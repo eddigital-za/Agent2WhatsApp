@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#070a08">
+    <title>Agent2WhatsApp — Send WhatsApp Messages from Any AI Agent (Free, Open Source)</title>
+
+    <!-- SEO & Meta Tags -->
+    <meta name="description"
+        content="Agent2WhatsApp is a free, open-source Node.js microservice that lets any AI agent — Python, LangChain, Flowise, custom GPTs — send messages to your personal WhatsApp. No Meta Cloud API fees, no template approvals, just a local session and one POST request.">
+    <meta name="keywords"
+        content="AI Agent WhatsApp, WhatsApp API alternative, Node.js WhatsApp microservice, whatsapp-web.js, send WhatsApp from Python, LangChain WhatsApp notification, Flowise WhatsApp, agent task notification">
+    <meta name="author" content="Mohammed Al Kharusi">
+    <meta name="robots" content="index, follow, max-image-preview:large">
+    <link rel="canonical" href="https://mokrosi.github.io/Agent2WhatsApp/">
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://mokrosi.github.io/Agent2WhatsApp/">
+    <meta property="og:site_name" content="Agent2WhatsApp">
+    <meta property="og:title" content="Agent2WhatsApp — Connect Any AI Agent to WhatsApp">
+    <meta property="og:description"
+        content="A free, open-source Node.js pipeline that lets your AI agents message your personal WhatsApp directly — no Meta API fees, no template approval, one POST request.">
+    <meta property="og:locale" content="en_US">
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Agent2WhatsApp — Connect Any AI Agent to WhatsApp">
+    <meta name="twitter:description"
+        content="Free, open-source Node.js microservice that lets any AI agent send messages straight to your WhatsApp via a local session.">
+
+    <!-- Structured Data (JSON-LD) — helps traditional search AND answer engines (AEO/GEO) cite this page accurately -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "Agent2WhatsApp",
+      "operatingSystem": "Windows, macOS, Linux",
+      "applicationCategory": "DeveloperApplication",
+      "description": "An open-source Node.js microservice that connects AI agents to a personal WhatsApp account via a local, session-based client, so agents can send completion summaries and alerts without the official Meta Cloud API.",
+      "softwareVersion": "1.0.0",
+      "url": "https://mokrosi.github.io/Agent2WhatsApp/",
+      "codeRepository": "https://github.com/mokrosi/Agent2WhatsApp",
+      "programmingLanguage": "JavaScript",
+      "license": "https://opensource.org/licenses/MIT",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "author": {
+        "@type": "Person",
+        "name": "Mohammed Al Kharusi",
+        "url": "https://github.com/mokrosi"
+      }
+    }
+    </script>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "What is Agent2WhatsApp?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Agent2WhatsApp is a free, open-source Node.js microservice that exposes a single HTTP endpoint. Any AI agent can send it a phone number and a text message, and the service forwards it to that number over a local WhatsApp Web session."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does Agent2WhatsApp use the official WhatsApp Business API?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. It uses whatsapp-web.js to drive a local, session-based WhatsApp Web client authenticated once by QR code, which avoids Meta's per-conversation fees and template approval process."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Which AI agent frameworks can send messages through it?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Any framework or language that can make an HTTP POST request with a JSON body, including Python scripts, LangChain, Flowise, and custom GPT tool calls."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is Agent2WhatsApp free to use?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. It is 100% free and open source under the MIT License, and it does not charge per-message or per-conversation fees."
+          }
+        }
+      ]
+    }
+    </script>
+
+    <!-- Google Fonts: monospace for the terminal/dev-tool voice, Inter for readable body copy -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=Inter:wght@300;400;500;600;800&display=swap"
+        rel="stylesheet">
+
+    <style>
+        :root {
+            --primary: #25D366;
+            --primary-glow: rgba(37, 211, 102, 0.35);
+            --phosphor: #7ee8a8;
+            --bg: #070a08;
+            --surface: #0e1512;
+            --surface-2: #131c17;
+            --text-main: #eef4f0;
+            --text-muted: #82938a;
+            --border: #1d2b23;
+            --amber: #e8b339;
+
+            --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+            --font-body: 'Inter', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            html {
+                scroll-behavior: auto;
+            }
+
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.001ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.001ms !important;
+            }
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text-main);
+            font-family: var(--font-body);
+            line-height: 1.65;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image:
+                radial-gradient(circle at 15% 0%, rgba(37, 211, 102, 0.08) 0%, transparent 45%),
+                radial-gradient(circle at 85% 20%, rgba(37, 211, 102, 0.05) 0%, transparent 40%);
+        }
+
+        .skip-link {
+            position: absolute;
+            left: -9999px;
+            top: 0;
+            background: var(--primary);
+            color: #041008;
+            padding: 12px 20px;
+            font-weight: 700;
+            z-index: 100;
+            border-radius: 0 0 8px 0;
+        }
+
+        .skip-link:focus {
+            left: 0;
+        }
+
+        a:focus-visible,
+        button:focus-visible,
+        .btn:focus-visible {
+            outline: 2px solid var(--phosphor);
+            outline-offset: 3px;
+            border-radius: 4px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1040px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        .eyebrow {
+            font-family: var(--font-mono);
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--surface);
+            color: var(--phosphor);
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            border: 1px solid var(--border);
+            margin-bottom: 28px;
+        }
+
+        .eyebrow::before {
+            content: '';
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--primary);
+            box-shadow: 0 0 8px var(--primary);
+        }
+
+        /* Hero */
+        header {
+            padding: 11vh 20px 6vh;
+        }
+
+        .hero-grid {
+            display: grid;
+            grid-template-columns: 1.05fr 0.95fr;
+            gap: 56px;
+            align-items: center;
+        }
+
+        h1 {
+            font-family: var(--font-mono);
+            font-size: clamp(2.1rem, 4.1vw, 3.2rem);
+            font-weight: 800;
+            margin-bottom: 20px;
+            letter-spacing: -0.02em;
+            line-height: 1.15;
+        }
+
+        h1 .accent {
+            color: var(--primary);
+        }
+
+        .subtitle {
+            font-size: clamp(1rem, 1.6vw, 1.15rem);
+            color: var(--text-muted);
+            max-width: 46ch;
+            margin: 0 0 32px;
+            font-weight: 300;
+        }
+
+        .subtitle strong {
+            color: var(--text-main);
+            font-weight: 600;
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 13px 24px;
+            border-radius: 10px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
+            font-size: 0.95rem;
+            font-family: var(--font-body);
+        }
+
+        .btn-primary {
+            background-color: var(--primary);
+            color: #04140a;
+            box-shadow: 0 4px 20px 0 var(--primary-glow);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 28px 0 rgba(37, 211, 102, 0.5);
+            background-color: #2fe677;
+        }
+
+        .btn-outline {
+            background-color: transparent;
+            color: var(--text-main);
+            border: 1px solid var(--border);
+        }
+
+        .btn-outline:hover {
+            border-color: var(--primary);
+            background-color: var(--surface);
+            transform: translateY(-2px);
+        }
+
+        .btn svg {
+            margin-right: 8px;
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+        }
+
+        /* Signature element: terminal-to-WhatsApp-bubble sequence */
+        .demo {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+        }
+
+        .demo-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface-2);
+        }
+
+        .demo-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--border);
+        }
+
+        .demo-label {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-left: 6px;
+        }
+
+        .demo-body {
+            padding: 22px 20px 26px;
+            font-family: var(--font-mono);
+            font-size: 0.86rem;
+            min-height: 230px;
+        }
+
+        .demo-line {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+            opacity: 0;
+            animation: reveal 0.4s ease forwards;
+        }
+
+        .demo-line .prompt {
+            color: var(--primary);
+            flex-shrink: 0;
+        }
+
+        .demo-line .out {
+            color: var(--text-muted);
+        }
+
+        .demo-line .ok {
+            color: var(--phosphor);
+        }
+
+        .demo-line:nth-child(1) {
+            animation-delay: 0.2s;
+        }
+
+        .demo-line:nth-child(2) {
+            animation-delay: 1.1s;
+        }
+
+        .demo-line:nth-child(3) {
+            animation-delay: 1.8s;
+        }
+
+        @keyframes reveal {
+            from {
+                opacity: 0;
+                transform: translateY(3px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .bubble {
+            opacity: 0;
+            animation: reveal 0.45s ease forwards;
+            animation-delay: 2.6s;
+            margin-top: 18px;
+            background: #1f2c24;
+            border: 1px solid #274031;
+            border-radius: 10px;
+            padding: 12px 14px;
+            max-width: 88%;
+            margin-left: auto;
+        }
+
+        .bubble-title {
+            font-family: var(--font-body);
+            font-weight: 700;
+            font-size: 0.85rem;
+            color: var(--primary);
+            margin-bottom: 4px;
+        }
+
+        .bubble-text {
+            font-family: var(--font-body);
+            font-size: 0.82rem;
+            color: var(--text-main);
+            line-height: 1.5;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+
+            .demo-line,
+            .bubble {
+                opacity: 1;
+                animation: none;
+            }
+        }
+
+        /* Sections */
+        section {
+            padding: 64px 0;
+        }
+
+        .section-head {
+            max-width: 62ch;
+            margin-bottom: 40px;
+        }
+
+        .section-head .eyebrow {
+            margin-bottom: 16px;
+        }
+
+        h2 {
+            font-family: var(--font-mono);
+            font-size: clamp(1.5rem, 2.6vw, 2rem);
+            font-weight: 700;
+            margin-bottom: 14px;
+            letter-spacing: -0.01em;
+        }
+
+        .lede {
+            color: var(--text-muted);
+            font-size: 1.02rem;
+            max-width: 60ch;
+        }
+
+        .lede strong {
+            color: var(--text-main);
+        }
+
+        /* Pipeline — numbered because it's a real, ordered request lifecycle */
+        .pipeline {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            overflow: hidden;
+        }
+
+        .pipe-step {
+            padding: 26px 22px;
+            border-right: 1px solid var(--border);
+            background: var(--surface);
+            position: relative;
+        }
+
+        .pipe-step:last-child {
+            border-right: none;
+        }
+
+        .pipe-num {
+            font-family: var(--font-mono);
+            color: var(--primary);
+            font-size: 0.8rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .pipe-step h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .pipe-step p {
+            font-size: 0.86rem;
+            color: var(--text-muted);
+        }
+
+        /* Feature cards */
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 20px;
+        }
+
+        .feature-card {
+            background: var(--surface);
+            padding: 28px;
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            transition: transform 0.25s ease, border-color 0.25s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--primary);
+        }
+
+        .icon-wrapper {
+            width: 42px;
+            height: 42px;
+            background: var(--surface-2);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 18px;
+            border: 1px solid var(--border);
+            color: var(--primary);
+        }
+
+        .icon-wrapper svg {
+            width: 22px;
+            height: 22px;
+        }
+
+        .feature-card h3 {
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .feature-card p {
+            font-size: 0.92rem;
+            color: var(--text-muted);
+        }
+
+        /* Code sample */
+        .code-block {
+            font-family: var(--font-mono);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px 22px;
+            font-size: 0.82rem;
+            color: var(--phosphor);
+            overflow-x: auto;
+            position: relative;
+            line-height: 1.7;
+        }
+
+        .code-block .muted {
+            color: var(--text-muted);
+        }
+
+        .code-block .str {
+            color: #ffd479;
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 14px;
+            right: 14px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            font-family: var(--font-body);
+            font-size: 0.75rem;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: color 0.2s ease, border-color 0.2s ease;
+        }
+
+        .copy-btn:hover {
+            color: var(--primary);
+            border-color: var(--primary);
+        }
+
+        /* FAQ */
+        .faq-item {
+            border-bottom: 1px solid var(--border);
+            padding: 20px 0;
+        }
+
+        .faq-item:first-child {
+            border-top: 1px solid var(--border);
+        }
+
+        .faq-item h3 {
+            font-size: 1.02rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .faq-item p {
+            color: var(--text-muted);
+            font-size: 0.94rem;
+            max-width: 68ch;
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 40px 20px;
+            border-top: 1px solid var(--border);
+            margin-top: auto;
+            background: rgba(7, 10, 8, 0.9);
+        }
+
+        footer p {
+            color: var(--text-muted);
+            font-size: 0.88rem;
+            margin-bottom: 6px;
+        }
+
+        footer a {
+            color: var(--primary);
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        footer a:hover {
+            color: var(--phosphor);
+        }
+
+        @media (max-width: 860px) {
+            .hero-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .pipeline {
+                grid-template-columns: 1fr;
+            }
+
+            .pipe-step {
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+            }
+
+            .pipe-step:last-child {
+                border-bottom: none;
+            }
+        }
+
+        @media (max-width: 600px) {
+            header {
+                padding: 9vh 16px 5vh;
+            }
+
+            .cta-buttons {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+
+            section {
+                padding: 48px 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="container">
+        <div class="hero-grid">
+            <div>
+                <div class="eyebrow">Open source · MIT licensed</div>
+                <h1>Give your AI agent<br>a <span class="accent">WhatsApp</span> voice</h1>
+                <p class="subtitle">
+                    <strong>Agent2WhatsApp</strong> is a free Node.js microservice that turns any AI agent's HTTP
+                    request into a WhatsApp message on your phone — no Meta Cloud API fees, no template approvals,
+                    just a local session and a single <code>POST /send</code>.
+                </p>
+                <div class="cta-buttons">
+                    <a href="https://github.com/mokrosi/Agent2WhatsApp" target="_blank" rel="noopener"
+                        class="btn btn-primary" aria-label="View Agent2WhatsApp source code on GitHub">
+                        <svg fill="currentColor" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path
+                                d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
+                        </svg>
+                        View on GitHub
+                    </a>
+                    <a href="#how-it-works" class="btn btn-outline">
+                        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                            <path d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                        </svg>
+                        See how it works
+                    </a>
+                </div>
+            </div>
+
+            <div class="demo" role="img"
+                aria-label="Terminal demo: the microservice starts, connects to WhatsApp, receives a POST request from an agent, and delivers a WhatsApp message reading Task Completed.">
+                <div class="demo-bar">
+                    <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+                    <span class="demo-label">index.js — local session</span>
+                </div>
+                <div class="demo-body">
+                    <div class="demo-line"><span class="prompt">$</span><span>npm start</span></div>
+                    <div class="demo-line"><span class="out">✔ WhatsApp Session is Ready and Connected!</span></div>
+                    <div class="demo-line"><span class="ok">→ POST /send { "phone": "968XXXXXXXX" }</span></div>
+                    <div class="bubble">
+                        <div class="bubble-title">🤖 Agent Task Completed!</div>
+                        <div class="bubble-text">Deploy finished. 12 files changed, tests passing, live in
+                            production.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="container" id="main">
+
+        <section aria-labelledby="what-is-heading">
+            <div class="section-head">
+                <h2 id="what-is-heading">What Agent2WhatsApp does</h2>
+                <p class="lede">
+                    <strong>Agent2WhatsApp is a self-hosted bridge between your AI agents and your personal
+                        WhatsApp.</strong>
+                    It runs as a small Express server that keeps one authenticated WhatsApp Web session open on your
+                    machine or VPS. Any agent — a Python script, a LangChain chain, a Flowise flow, a custom GPT tool
+                    call — sends a plain JSON payload to <code>/send</code>, and the service delivers it as a WhatsApp
+                    message. You scan a QR code once; after that, it's just HTTP.
+                </p>
+            </div>
+        </section>
+
+        <section aria-labelledby="how-it-works-heading" id="how-it-works">
+            <div class="section-head">
+                <div class="eyebrow">Request lifecycle</div>
+                <h2 id="how-it-works-heading">How a message actually gets there</h2>
+                <p class="lede">Four steps, in order, from agent output to notification on your phone.</p>
+            </div>
+            <div class="pipeline">
+                <div class="pipe-step">
+                    <div class="pipe-num">01</div>
+                    <h3>Agent finishes a task</h3>
+                    <p>Your agent — in any language or framework — builds a short summary of what it did.</p>
+                </div>
+                <div class="pipe-step">
+                    <div class="pipe-num">02</div>
+                    <h3>POST to /send</h3>
+                    <p>It sends <code>{ "phone", "text" }</code> as JSON to your running microservice.</p>
+                </div>
+                <div class="pipe-step">
+                    <div class="pipe-num">03</div>
+                    <h3>Local session forwards it</h3>
+                    <p>whatsapp-web.js relays the message through your already-authenticated WhatsApp session.</p>
+                </div>
+                <div class="pipe-step">
+                    <div class="pipe-num">04</div>
+                    <h3>Message arrives</h3>
+                    <p>You get it on your phone like any other WhatsApp message — no app to install.</p>
+                </div>
+            </div>
+        </section>
+
+        <section aria-labelledby="features-heading">
+            <div class="section-head">
+                <h2 id="features-heading">Why teams reach for it</h2>
+            </div>
+            <div class="features">
+                <div class="feature-card">
+                    <div class="icon-wrapper">
+                        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"
+                            focusable="false">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z">
+                            </path>
+                        </svg>
+                    </div>
+                    <h3>Independent gateway</h3>
+                    <p>Runs a local, session-based WhatsApp Web client. No official Cloud API approval, no
+                        per-conversation pricing.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="icon-wrapper">
+                        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"
+                            focusable="false">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9">
+                            </path>
+                        </svg>
+                    </div>
+                    <h3>Works with any agent</h3>
+                    <p>Python, LangChain, Flowise, custom GPTs, or anything else that can make a standard HTTP POST
+                        request.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="icon-wrapper">
+                        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"
+                            focusable="false">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z">
+                            </path>
+                        </svg>
+                    </div>
+                    <h3>Token-optimized</h3>
+                    <p>Formatting and routing live in the middleware, so your LLM only ever needs to output a short
+                        summary string.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="icon-wrapper">
+                        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"
+                            focusable="false">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z">
+                            </path>
+                        </svg>
+                    </div>
+                    <h3>Scan once, stay connected</h3>
+                    <p><code>LocalAuth</code> persists your WhatsApp session to disk, so the QR code only needs to be
+                        scanned the first time.</p>
+                </div>
+            </div>
+        </section>
+
+        <section aria-labelledby="quickstart-heading">
+            <div class="section-head">
+                <div class="eyebrow">30-second integration</div>
+                <h2 id="quickstart-heading">Notify yourself from Python</h2>
+                <p class="lede">Once the microservice is running and authenticated, this is the entire client side.
+                </p>
+            </div>
+            <pre class="code-block" id="code-sample"><button class="copy-btn" type="button" onclick="copyCode()" aria-label="Copy code sample">Copy</button><span class="muted">import</span> requests
+
+<span class="muted">def</span> notify_whatsapp(summary):
+    payload = {
+        <span class="str">"phone"</span>: <span class="str">"968XXXXXXXX"</span>,
+        <span class="str">"text"</span>: <span class="str">f"🤖 Agent Task Completed!\n\n{summary}"</span>
+    }
+    requests.post(<span class="str">"http://localhost:4000/send"</span>, json=payload)</pre>
+        </section>
+
+        <section aria-labelledby="faq-heading">
+            <div class="section-head">
+                <h2 id="faq-heading">Frequently asked questions</h2>
+            </div>
+            <div class="faq-list">
+                <div class="faq-item">
+                    <h3>What is Agent2WhatsApp?</h3>
+                    <p>A free, open-source Node.js microservice that exposes one HTTP endpoint. Send it a phone
+                        number and a text message, and it forwards that message over a local WhatsApp Web session.
+                    </p>
+                </div>
+                <div class="faq-item">
+                    <h3>Does it use the official WhatsApp Business API?</h3>
+                    <p>No. It uses <code>whatsapp-web.js</code> to drive a session-based WhatsApp Web client
+                        authenticated once by QR code, avoiding Meta's per-conversation fees and template approval
+                        process.</p>
+                </div>
+                <div class="faq-item">
+                    <h3>Which AI agent frameworks can send messages through it?</h3>
+                    <p>Any framework or language capable of an HTTP POST with a JSON body — Python, LangChain,
+                        Flowise, and custom GPT tool calls all work out of the box.</p>
+                </div>
+                <div class="faq-item">
+                    <h3>Is it free?</h3>
+                    <p>Yes. 100% free and open source under the MIT License, with no per-message or per-conversation
+                        charges.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>100% free and open-source software, MIT licensed.</p>
+        <p>Developed with passion by <a href="https://github.com/mokrosi" target="_blank" rel="noopener">Mohammed Al
+                Kharusi</a></p>
+    </footer>
+
+    <script>
+        function copyCode() {
+            const block = document.getElementById('code-sample');
+            const text = block.innerText.replace(/^Copy\s*/, '');
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = block.querySelector('.copy-btn');
+                const original = btn.textContent;
+                btn.textContent = 'Copied';
+                setTimeout(() => { btn.textContent = original; }, 1500);
+            });
+        }
+    </script>
+</body>
+
+</html>
