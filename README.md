@@ -1,47 +1,70 @@
 # Agent2WhatsApp 🚀
 
-A scalable, end-to-end pipeline that allows _any_ AI agent to send messages directly to your WhatsApp using Make (Integromat) and a custom Node.js WhatsApp Session microservice.
+A scalable, end-to-end open-source pipeline that allows _any_ AI agent to send messages directly to your WhatsApp using a custom Node.js WhatsApp Session microservice.
 
 This project bypasses the official Meta WhatsApp Cloud API restrictions and per-conversation fees by utilizing a session-based approach via QR code.
 
-## 🌟 Features
+## 🌟 Why This Project?
 
-- **Universal Compatibility:** Works seamlessly with any AI Agent (Node.js, Python, LangChain, Flowise, etc.) that can send a basic HTTP POST request.
+AI Agents (built with Python, LangChain, Flowise, custom GPTs, etc.) often need a way to notify users when long-running tasks are completed. Relying on Meta's official API requires pre-approved templates and incurs costs. **Agent2WhatsApp** solves this by turning your local machine or VPS into a WhatsApp web client that can dynamically receive JSON payloads from any agent and forward them to your personal WhatsApp number.
+
+## ✨ Features
+
+- **Universal Compatibility:** Works seamlessly with any AI Agent that can send a basic HTTP POST request.
 - **No Meta API Fees:** Utilizes `whatsapp-web.js` to run a local WhatsApp session, bypassing Meta's template constraints and pricing.
-- **Token-Optimized:** Offloads formatting and routing logic to the middleware (Make), keeping your LLM payload lightweight to save API costs.
-- **Centralized Hub:** Use a single Make Webhook to receive messages from multiple agents and route them dynamically based on the payload.
+- **Token-Optimized:** Offloads formatting and routing logic to the middleware, keeping your LLM payload lightweight to save API costs.
+- **Persistent Sessions:** Uses `LocalAuth` to store your WhatsApp session locally, meaning you only scan the QR code once.
+- **CORS Enabled:** Cross-origin resource sharing is enabled out-of-the-box for smooth integrations.
 
-## 🏗️ Architecture Overview
+## 🛠️ Requirements & Tech Stack
 
-```text
-[ Any AI Agent ] ──(POST JSON)──► [ Make Webhook ] ──(HTTP POST)──► [ Node.js API ] ──(WhatsApp Web API)──► [ Your WhatsApp ]
-🚀 Installation & Setup1. Deploy the Node.js MicroserviceThis microservice acts as your WhatsApp client and exposes an endpoint for Make.com to communicate with.  Bash# Clone the repository
-git clone [https://github.com/yourusername/Agent2WhatsApp.git](https://github.com/yourusername/Agent2WhatsApp.git)
+- **Node.js:** Core runtime environment (Requires >= 18.0.0).
+- **Express:** Handles incoming HTTP POST requests on port `4000`.
+- **WhatsApp-Web.js:** Powers the WhatsApp Web client simulation.
+- **Google Chrome:** The microservice explicitly relies on a local installation of Google Chrome located at `C:\Program Files\Google\Chrome\Application\chrome.exe` (configurable in `index.js`) to bypass Puppeteer download issues.
+
+## 🚀 Installation & Setup
+
+### 1. Clone the Repository
+
+```bash
+git clone [https://github.com/mokrosi/Agent2WhatsApp.git](https://github.com/mokrosi/Agent2WhatsApp.git)
 cd Agent2WhatsApp
+2. Install DependenciesBash# If you encounter Puppeteer errors, skip the internal browser download:
+$env:PUPPETEER_SKIP_DOWNLOAD="true"
 
-# Install the required dependencies
-npm install express whatsapp-web.js qrcode-terminal cors
-Run the server locally or on your VPS:Bashnode index.js
-Note: Upon the first run, a QR code will appear in your terminal. Scan it with your WhatsApp mobile app (Linked Devices) to authenticate the session.  2. Configure Make (Integromat) MiddlewareMake.com acts as the universal router for all your agents.  Custom Webhook: Create a new Custom Webhook in Make to generate your Universal Receiver URL.  HTTP Request: Add an HTTP module connected to the webhook to forward the data to your Node.js microservice[cite: 2]:URL: http://YOUR_SERVER_IP:3000/send[cite: 2]Method: POST[cite: 2]Body type: Raw -> JSON (application/json)[cite: 2]Payload Mapping:JSON{
-  "phone": "{{1.target_phone}}",
-  "text": "*Agent:* {{1.agent_name}}\n\n*Result:*\n{{1.result}}"
-}
-3. The Universal Agent Payload (Client Side)Configure your AI Agent to hit your Make Webhook with the following JSON structure when it finishes a task[cite: 2]:JSON{
-  "target_phone": "968XXXXXXXX",
-  "agent_name": "Research Agent",
-  "result": "The final processed output goes here."
-}
-Example fetch request:JavaScriptawait fetch('[https://hook.make.com/YOUR_WEBHOOK_ID](https://hook.make.com/YOUR_WEBHOOK_ID)', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-        target_phone: '968XXXXXXXX',
-        agent_name: 'Agent2WhatsApp',
-        result: 'Process completed successfully.'
-    })
-});
-🛠️ Production DeploymentFor 24/7 uptime, deploy the Node.js microservice to a VPS (DigitalOcean, AWS, etc.) using PM2[cite: 2]:Bashnpm install -g pm2
-pm2 start index.js --name "whatsapp-api"
+# Install Node.js packages
+npm install
+3. Boot the MicroserviceYou have two ways to start the server:Option A: Using the TerminalBashnpm start
+Option B: One-Click Run Script (Windows)
+Simply double-click the run.exe (or run.bat) file included in the project directory. This script executes node .\index.js automatically and boots up the server on port 4000.  4. Authenticate WhatsAppOpen the WhatsApp app on your phone.Navigate to Linked Devices > Link a Device.Scan the terminal QR code.Once successfully connected, you will see WhatsApp Session is Ready and Connected! in your console.🧠 The "Append Prompt" Trick (For AI Agents)If you are using an autonomous agent (like Anti-Gravity, Cursor, or AutoGPT), you can force it to notify you automatically upon task completion using the Append Prompt method.Simply copy the instruction block below and paste it at the very end of your main prompt.Copy this into your prompt:Plaintext---
+[CRITICAL INSTRUCTION - EXECUTE AS YOUR FINAL STEP]
+
+Once you have completely finished the main task requested above, you MUST notify me by sending a summary of your results to my WhatsApp.
+
+Without asking for further permission, automatically execute an HTTP POST request to my local WhatsApp microservice with the following specifications:
+
+- **Endpoint:** `http://localhost:4000/send`
+- **Method:** `POST`
+- **Headers:** `{"Content-Type": "application/json"}`
+- **Payload (JSON):**
+  {
+    "phone": "968XXXXXXXX",
+    "text": "🤖 *Agent Task Completed!*\n\n*Summary of work:*\n[Insert a clear, concise summary of the results, changes made, or details of the executed task here.]"
+  }
+
+Ensure this request is executed successfully using curl, fetch, or python before you finish your response.
+🐍 Python Agents SetupIf your AI agent is built using Python, you will need the requests library to send the payload to the microservice.  Install the required Python dependencies:Bashpip install -r requirements.txt
+(This installs requests>=2.31.0 as defined in the project files)  Python Agent Example:Pythonimport requests
+
+def notify_whatsapp(summary):
+    payload = {
+        "phone": "968XXXXXXXX",
+        "text": f"🤖 *Agent Task Completed!*\n\n{summary}"
+    }
+    requests.post("http://localhost:4000/send", json=payload)
+📡 Production DeploymentTo ensure your WhatsApp session runs 24/7 without terminal interruptions, use PM2:Bashnpm install -g pm2
+pm2 start index.js --name "whatsapp-agent-api"
 pm2 save
 📄 LicenseThis project is open-source and available under the MIT License.
 ```
