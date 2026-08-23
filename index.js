@@ -22,10 +22,49 @@ const client = new Client({
   },
 });
 
+let latestQr = null;
+
+app.get("/qr", (req, res) => {
+  if (!latestQr) {
+    return res.send(`
+      <html>
+        <body style="font-family:Arial;text-align:center;padding:40px;">
+          <h2>Waiting for WhatsApp QR...</h2>
+          <p>Refresh this page in a few seconds.</p>
+        </body>
+      </html>
+    `);
+  }
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>WhatsApp QR</title>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+      </head>
+      <body style="font-family:Arial;text-align:center;padding:40px;">
+        <h2>Link WhatsApp</h2>
+        <p>WhatsApp → Linked Devices → Link a Device</p>
+
+        <div id="qrcode" style="display:inline-block;margin-top:20px;"></div>
+
+        <script>
+          new QRCode(document.getElementById("qrcode"), {
+            text: ${JSON.stringify("${latestQr}")},
+            width: 320,
+            height: 320
+          });
+        </script>
+      </body>
+    </html>
+  `.replace('"${latestQr}"', JSON.stringify(latestQr)));
+});
+
 // Log the QR code to the terminal so it can be scanned from the WhatsApp app
 client.on("qr", (qr) => {
-  console.log("Scan this QR code with your WhatsApp mobile app (Linked Devices):");
-  qrcode.generate(qr, { small: true });
+  latestQr = qr;
+  console.log("New WhatsApp QR generated. Open /qr to scan it.");
 });
 
 // Log when the WhatsApp client is ready
