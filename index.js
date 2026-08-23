@@ -122,6 +122,23 @@ client.on("message", async (message) => {
     // Download attached media if present
     if (message.hasMedia) {
   try {
+    // Work around current whatsapp-web.js @lid media bug where
+// message.id._serialized may be missing on incoming media.
+if (
+  message.id &&
+  !message.id._serialized &&
+  message.id.fromMe !== undefined &&
+  message.id.remote &&
+  message.id.id
+) {
+  message.id._serialized =
+    `${message.id.fromMe}_${message.id.remote}_${message.id.id}`;
+
+  console.log(
+    "Reconstructed WhatsApp message ID for media download:",
+    message.id._serialized
+  );
+}
     const media = await message.downloadMedia();
 
     if (media) {
