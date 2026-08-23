@@ -72,6 +72,52 @@ client.on("ready", () => {
   console.log("WhatsApp Session is Ready and Connected!");
 });
 
+// Forward incoming WhatsApp messages to Make.com
+client.on("message", async (message) => {
+  try {
+    // Ignore messages sent by this WhatsApp account itself
+    if (message.fromMe) return;
+
+    const payload = {
+      from: message.from,
+      phone: message.from.replace("@c.us", ""),
+      text: message.body || "",
+      messageId: message.id?._serialized || "",
+      timestamp: message.timestamp,
+      type: message.type,
+      hasMedia: message.hasMedia,
+    };
+
+    console.log("Incoming WhatsApp message:", payload);
+
+    if (!process.env.MAKE_WEBHOOK_URL) {
+      console.error("MAKE_WEBHOOK_URL is not configured");
+      return;
+    }
+
+    const response = await fetch(process.env.MAKE_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      console.error(
+        "Make webhook failed:",
+        response.status,
+        await response.text()
+      );
+      return;
+    }
+
+    console.log("Message forwarded to Make successfully");
+  } catch (error) {
+    console.error("Error forwarding WhatsApp message to Make:", error);
+  }
+});
+
 // Handle connection errors and disconnections gracefully
 client.on("auth_failure", (message) => {
   console.error("Authentication failed:", message);
