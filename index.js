@@ -78,6 +78,18 @@ client.on("message", async (message) => {
     // Ignore messages sent by this WhatsApp account itself
     if (message.fromMe) return;
 
+    // Ignore group chats
+if (message.from.endsWith("@g.us")) return;
+
+// Only accept messages from the authorised controller number
+const ALLOWED_PHONE = process.env.ALLOWED_PHONE;
+
+if (
+  ALLOWED_PHONE &&
+  message.from !== `${ALLOWED_PHONE}@c.us`
+) {
+  return;
+}
     const payload = {
       from: message.from,
       phone: message.from.replace("@c.us", ""),
