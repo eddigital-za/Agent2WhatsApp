@@ -80,8 +80,33 @@ client.on("message", async (message) => {
     // Ignore messages sent by this WhatsApp account itself
     if (message.fromMe) return;
 
-    // Ignore group chats
-    if (message.from.endsWith("@g.us")) return;
+    // Allowed direct controller
+const ALLOWED_DIRECT_ID =
+  process.env.ALLOWED_DIRECT_ID || "263311610368253@lid";
+
+// Allowed BTSA Social group
+const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
+
+// Check whether this is a group message
+const isGroup = message.from.endsWith("@g.us");
+
+if (isGroup) {
+  // Until we know the BTSA Social group ID, log group IDs but DO NOT forward them
+  if (!ALLOWED_GROUP_ID) {
+    console.log("GROUP DETECTED:", message.from, message.body);
+    return;
+  }
+
+  // Ignore every group except BTSA Social
+  if (message.from !== ALLOWED_GROUP_ID) {
+    return;
+  }
+} else {
+  // Ignore every direct message except yours
+  if (message.from !== ALLOWED_DIRECT_ID) {
+    return;
+  }
+}
 
     const payload = {
       from: message.from,
