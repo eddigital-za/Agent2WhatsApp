@@ -116,64 +116,103 @@ client.on("message", async (message) => {
       timestamp: message.timestamp,
       type: message.type,
       hasMedia: message.hasMedia,
+
+      // Explicit media fields for easy mapping in Make.com
+      mediaType: null,
+      mediaFilename: null,
+      mediaData: null,
+
+      // Keep the existing media object as well
       media: null,
     };
 
     // Download attached media if present
     if (message.hasMedia) {
-  try {
-    // Work around current whatsapp-web.js @lid media bug where
-// message.id._serialized may be missing on incoming media.
-if (
-  message.id &&
-  !message.id._serialized &&
-  message.id.fromMe !== undefined &&
-  message.id.remote &&
-  message.id.id
-) {
-  message.id._serialized =
-    `${message.id.fromMe}_${message.id.remote}_${message.id.id}`;
+      try {
+        // Work around current whatsapp-web.js @lid media bug where
+        // message.id._serialized may be missing on incoming media.
+        if (
+          message.id &&
+          !message.id._serialized &&
+          message.id.fromMe !== undefined &&
+          message.id.remote &&
+          message.id.id
+        ) {
+          message.id._serialized =
+            `${message.id.fromMe}_${message.id.remote}_${message.id.id}`;
 
-  console.log(
-    "Reconstructed WhatsApp message ID for media download:",
-    message.id._serialized
-  );
-}
-    const media = await message.downloadMedia();
+          console.log(
+            "Reconstructed WhatsApp message ID for media download:",
+            message.id._serialized
+          );
+        }
 
-    if (media) {
-      payload.media = {
-        mimetype: media.mimetype || "",
-        filename: media.filename || "",
-        data: media.data || "",
-      };
+        const media = await message.downloadMedia();
 
-      console.log(
-        "Media downloaded:",
-        media.mimetype,
-        media.filename || "no filename"
-      );
-    } else {
-      payload.media = {
-        error: "downloadMedia returned no data",
-      };
+        if (media) {
+          // Determine a sensible file extension from the MIME type
+          let extension = "bin";
 
-      console.error(
-        "Message reported media, but downloadMedia returned nothing"
-      );
+          if (media.mimetype === "image/jpeg") {
+            extension = "jpg";
+          } else if (media.mimetype === "image/png") {
+            extension = "png";
+          } else if (media.mimetype === "image/webp") {
+            extension = "webp";
+          } else if (media.mimetype === "image/gif") {
+            extension = "gif";
+          } else if (media.mimetype === "video/mp4") {
+            extension = "mp4";
+          } else if (media.mimetype === "video/quicktime") {
+            extension = "mov";
+          }
+
+          // WhatsApp often provides no filename for images,
+          // so generate one when necessary.
+          const generatedFilename =
+            `whatsapp-${message.type || "media"}-${message.timestamp}.${extension}`;
+
+          const finalFilename =
+            media.filename || generatedFilename;
+
+          // Populate explicit fields for Make.com
+          payload.mediaType = media.mimetype || "";
+          payload.mediaFilename = finalFilename;
+          payload.mediaData = media.data || "";
+
+          // Preserve the nested media object
+          payload.media = {
+            mimetype: media.mimetype || "",
+            filename: finalFilename,
+            data: media.data || "",
+          };
+
+          console.log(
+            "Media downloaded:",
+            media.mimetype,
+            finalFilename
+          );
+        } else {
+          payload.media = {
+            error: "downloadMedia returned no data",
+          };
+
+          console.error(
+            "Message reported media, but downloadMedia returned nothing"
+          );
+        }
+      } catch (mediaError) {
+        payload.media = {
+          error: "downloadMedia failed",
+          details: mediaError?.message || String(mediaError),
+        };
+
+        console.error(
+          "Media download failed:",
+          mediaError?.message || mediaError
+        );
+      }
     }
-  } catch (mediaError) {
-    payload.media = {
-      error: "downloadMedia failed",
-      details: mediaError?.message || String(mediaError),
-    };
-
-    console.error(
-      "Media download failed:",
-      mediaError?.message || mediaError
-    );
-  }
-}
 
     console.log("Incoming WhatsApp message:", {
       from: payload.from,
@@ -183,8 +222,9 @@ if (
       timestamp: payload.timestamp,
       type: payload.type,
       hasMedia: payload.hasMedia,
-      mediaType: payload.media?.mimetype || null,
-      mediaFilename: payload.media?.filename || null,
+      mediaType: payload.mediaType,
+      mediaFilename: payload.mediaFilename,
+      mediaDataPresent: Boolean(payload.mediaData),
     });
 
     if (!process.env.MAKE_WEBHOOK_URL) {
