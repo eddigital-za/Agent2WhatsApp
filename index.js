@@ -84,15 +84,16 @@ client.on("message", async (message) => {
     if (message.from.endsWith("@g.us")) return;
 
     // Only accept messages from the authorised controller number
-    const ALLOWED_PHONE = process.env.ALLOWED_PHONE;
+const ALLOWED_PHONE = process.env.ALLOWED_PHONE;
 
-    if (
-      ALLOWED_PHONE &&
-      message.from !== `${ALLOWED_PHONE}@c.us`
-    ) {
-      return;
-    }
+if (ALLOWED_PHONE) {
+  const contact = await message.getContact();
+  const senderPhone = (contact.number || "").replace(/\D/g, "");
 
+  if (senderPhone !== ALLOWED_PHONE.replace(/\D/g, "")) {
+    return;
+  }
+}
     const payload = {
       from: message.from,
       phone: message.from.replace("@c.us", ""),
