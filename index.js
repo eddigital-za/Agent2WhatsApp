@@ -121,26 +121,42 @@ client.on("message", async (message) => {
 
     // Download attached media if present
     if (message.hasMedia) {
-      const media = await message.downloadMedia();
+  try {
+    const media = await message.downloadMedia();
 
-      if (media) {
-        payload.media = {
-          mimetype: media.mimetype || "",
-          filename: media.filename || "",
-          data: media.data || "",
-        };
+    if (media) {
+      payload.media = {
+        mimetype: media.mimetype || "",
+        filename: media.filename || "",
+        data: media.data || "",
+      };
 
-        console.log(
-          "Media downloaded:",
-          media.mimetype,
-          media.filename || "no filename"
-        );
-      } else {
-        console.error(
-          "Message reported media, but downloadMedia returned nothing"
-        );
-      }
+      console.log(
+        "Media downloaded:",
+        media.mimetype,
+        media.filename || "no filename"
+      );
+    } else {
+      payload.media = {
+        error: "downloadMedia returned no data",
+      };
+
+      console.error(
+        "Message reported media, but downloadMedia returned nothing"
+      );
     }
+  } catch (mediaError) {
+    payload.media = {
+      error: "downloadMedia failed",
+      details: mediaError?.message || String(mediaError),
+    };
+
+    console.error(
+      "Media download failed:",
+      mediaError?.message || mediaError
+    );
+  }
+}
 
     console.log("Incoming WhatsApp message:", {
       from: payload.from,
