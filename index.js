@@ -2,6 +2,8 @@ const express = require("express");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 
 // Create the Express application
 const app = express();
@@ -79,17 +81,18 @@ client.on("message", async (message) => {
     if (message.fromMe) return;
 
     // Ignore group chats
-if (message.from.endsWith("@g.us")) return;
+    if (message.from.endsWith("@g.us")) return;
 
-// Only accept messages from the authorised controller number
-const ALLOWED_PHONE = process.env.ALLOWED_PHONE;
+    // Only accept messages from the authorised controller number
+    const ALLOWED_PHONE = process.env.ALLOWED_PHONE;
 
-if (
-  ALLOWED_PHONE &&
-  message.from !== `${ALLOWED_PHONE}@c.us`
-) {
-  return;
-}
+    if (
+      ALLOWED_PHONE &&
+      message.from !== `${ALLOWED_PHONE}@c.us`
+    ) {
+      return;
+    }
+
     const payload = {
       from: message.from,
       phone: message.from.replace("@c.us", ""),
@@ -160,6 +163,35 @@ app.post("/send", async (req, res) => {
     res.status(500).send({ error: error.message });
   }
 });
+
+// Remove stale Chromium profile locks after Railway restarts
+function removeChromiumLocks(dir) {
+  if (!fs.existsSync(dir)) return;
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      removeChromiumLocks(fullPath);
+      continue;
+    }
+
+    if (
+      entry.name === "SingletonLock" ||
+      entry.name === "SingletonSocket" ||
+      entry.name === "SingletonCookie"
+    ) {
+      try {
+        fs.unlinkSync(fullPath);
+        console.log(`Removed stale Chromium lock: ${fullPath}`);
+      } catch (error) {
+        console.error(`Could not remove lock ${fullPath}:`, error.message);
+      }
+    }
+  }
+}
+
+removeChromiumLocks("/app/.wwebjs_auth");
 
 // Start the WhatsApp client and the Express server
 client.initialize();
