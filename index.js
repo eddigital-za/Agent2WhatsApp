@@ -14,6 +14,23 @@ app.use(express.json());
 // Allow cross-origin requests for easier integration
 app.use(cors());
 
+// Temporary directory for WhatsApp media files
+const MEDIA_DIR = path.join("/tmp", "whatsapp-media");
+
+// Create the media directory if it does not already exist
+if (!fs.existsSync(MEDIA_DIR)) {
+  fs.mkdirSync(MEDIA_DIR, { recursive: true });
+}
+
+// Make temporary WhatsApp media publicly accessible
+app.use(
+  "/media",
+  express.static(MEDIA_DIR, {
+    fallthrough: false,
+    maxAge: "1h",
+  })
+);
+
 // Initialize the WhatsApp client with LocalAuth so the session is stored locally
 const client = new Client({
   authStrategy: new LocalAuth(),
@@ -121,6 +138,7 @@ client.on("message", async (message) => {
       mediaType: null,
       mediaFilename: null,
       mediaData: null,
+      mediaUrl: null,
 
       // Keep the existing media object as well
       media: null,
@@ -170,10 +188,41 @@ client.on("message", async (message) => {
           // WhatsApp often provides no filename for images,
           // so generate one when necessary.
           const generatedFilename =
-            `whatsapp-${message.type || "media"}-${message.timestamp}.${extension}`;
+            `whatsapp-${message.type || "media"}-${message.timestamp}-${Date.now()}.${extension}`;
 
-          const finalFilename =
+          const originalFilename =
             media.filename || generatedFilename;
+
+          // Sanitize the filename before writing it to disk
+          const finalFilename = path
+            .basename(originalFilename)
+            .replace(/[^a-zA-Z0-9._-]/g, "_");
+
+          // Convert the WhatsApp Base64 media into the actual file bytes
+          const mediaBuffer = Buffer.from(media.data || "", "base64");
+
+          // Save the media temporarily on Railway
+          const mediaFilePath = path.join(MEDIA_DIR, finalFilename);
+
+          fs.writeFileSync(mediaFilePath, mediaBuffer);
+
+          // Determine this Railway service's public URL
+          const publicBaseUrl =
+            process.env.PUBLIC_BASE_URL ||
+            (
+              process.env.RAILWAY_PUBLIC_DOMAIN
+                ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+                : null
+            );
+
+          if (publicBaseUrl) {
+            payload.mediaUrl =
+              `${publicBaseUrl.replace(/\/$/, "")}/media/${encodeURIComponent(finalFilename)}`;
+          } else {
+            console.error(
+              "Could not generate mediaUrl. Set PUBLIC_BASE_URL or ensure RAILWAY_PUBLIC_DOMAIN exists."
+            );
+          }
 
           // Populate explicit fields for Make.com
           payload.mediaType = media.mimetype || "";
@@ -185,12 +234,23 @@ client.on("message", async (message) => {
             mimetype: media.mimetype || "",
             filename: finalFilename,
             data: media.data || "",
+            url: payload.mediaUrl,
           };
 
           console.log(
             "Media downloaded:",
             media.mimetype,
             finalFilename
+          );
+
+          console.log(
+            "Media saved:",
+            mediaFilePath
+          );
+
+          console.log(
+            "Public media URL:",
+            payload.mediaUrl
           );
         } else {
           payload.media = {
@@ -225,6 +285,7 @@ client.on("message", async (message) => {
       mediaType: payload.mediaType,
       mediaFilename: payload.mediaFilename,
       mediaDataPresent: Boolean(payload.mediaData),
+      mediaUrl: payload.mediaUrl,
     });
 
     if (!process.env.MAKE_WEBHOOK_URL) {
@@ -314,6 +375,43 @@ function removeChromiumLocks(dir) {
 }
 
 removeChromiumLocks("/app/.wwebjs_auth");
+
+// Remove temporary WhatsApp media files older than 1 hour
+function cleanupOldMediaFiles() {
+  try {
+    if (!fs.existsSync(MEDIA_DIR)) return;
+
+    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+
+    for (const entry of fs.readdirSync(MEDIA_DIR, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+
+      const filePath = path.join(MEDIA_DIR, entry.name);
+
+      try {
+        const stats = fs.statSync(filePath);
+
+        if (stats.mtimeMs < oneHourAgo) {
+          fs.unlinkSync(filePath);
+          console.log(`Removed old temporary media file: ${filePath}`);
+        }
+      } catch (error) {
+        console.error(
+          `Could not inspect/remove temporary media file ${filePath}:`,
+          error.message
+        );
+      }
+    }
+  } catch (error) {
+    console.error(
+      "Temporary media cleanup failed:",
+      error.message
+    );
+  }
+}
+
+// Clean temporary media every 15 minutes
+setInterval(cleanupOldMediaFiles, 15 * 60 * 1000);
 
 // Start the WhatsApp client and the Express server
 client.initialize();
