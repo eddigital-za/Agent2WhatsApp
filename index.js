@@ -332,6 +332,37 @@ client.on("disconnected", (reason) => {
   console.log("WhatsApp client disconnected:", reason);
 });
 
+// Protected endpoint to discover WhatsApp group chat IDs for allowlist configuration
+app.get("/debug/groups", async (req, res) => {
+  try {
+    // Check for required token parameter
+    const token = req.query.token;
+    const expectedToken = process.env.GROUPS_DEBUG_TOKEN;
+
+    if (!expectedToken || token !== expectedToken) {
+      return res.status(403).end();
+    }
+
+    // Check if WhatsApp session is authenticated
+    if (!client.info) {
+      return res.status(503).json({ error: "Session not ready" });
+    }
+
+    // Fetch all chats and filter for groups only
+    const chats = await client.getChats();
+    const groups = chats
+      .filter((chat) => chat.isGroup)
+      .map((chat) => ({
+        name: chat.name,
+        id: chat.id._serialized,
+      }));
+
+    res.status(200).json(groups);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Send a message to a phone number or group via the WhatsApp session
 app.post("/send", async (req, res) => {
   try {
