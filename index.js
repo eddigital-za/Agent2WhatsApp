@@ -33,7 +33,7 @@ app.use(
 
 // Initialize the WhatsApp client with LocalAuth so the session is stored locally
 const client = new Client({
-  authStrategy: new LocalAuth(),
+  authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth" }),
   puppeteer: {
     headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
@@ -89,6 +89,12 @@ client.on("qr", (qr) => {
 // Log when the WhatsApp client is ready
 client.on("ready", () => {
   console.log("WhatsApp Session is Ready and Connected!");
+});
+
+// Log when the WhatsApp client is authenticated
+client.on("authenticated", () => {
+  latestQr = null;
+  console.log("WhatsApp Session authenticated successfully!");
 });
 
 // Forward incoming WhatsApp messages to Make.com
@@ -334,6 +340,14 @@ app.post("/send", async (req, res) => {
       return res.status(400).send({ error: "Phone and text are required" });
     }
 
+    // Check if WhatsApp session is authenticated and ready
+    if (!client.info) {
+      return res.status(503).send({
+        error: "WhatsApp session not ready. Scan QR code at /qr endpoint first.",
+        ready: false,
+      });
+    }
+
     // Normalize the phone number and format it for WhatsApp Web
     const chatId = `${phone.replace(/\D/g, "")}@c.us`;
 
@@ -420,3 +434,4 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Microservice running on port ${PORT}`);
 });
+
