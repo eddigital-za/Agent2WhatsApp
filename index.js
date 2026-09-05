@@ -116,12 +116,13 @@ client.on("message", async (message) => {
     if (isGroup) {
       // Until we know the BTSA Social group ID, log group IDs but DO NOT forward them
       if (!ALLOWED_GROUP_ID) {
-        console.log("GROUP DETECTED:", message.from, message.body);
+        console.log("GROUP DETECTED:", message.from);
         return;
       }
 
       // Ignore every group except BTSA Social
       if (message.from !== ALLOWED_GROUP_ID) {
+        console.log("Ignored group message from:", message.from);
         return;
       }
     } else {
@@ -331,13 +332,13 @@ client.on("disconnected", (reason) => {
   console.log("WhatsApp client disconnected:", reason);
 });
 
-// Send a message to a phone number via the WhatsApp session
+// Send a message to a phone number or group via the WhatsApp session
 app.post("/send", async (req, res) => {
   try {
-    const { phone, text } = req.body;
+    const { phone, chatId, text } = req.body;
 
-    if (!phone || !text) {
-      return res.status(400).send({ error: "Phone and text are required" });
+    if (!text) {
+      return res.status(400).send({ error: "Text is required" });
     }
 
     // Check if WhatsApp session is authenticated and ready
@@ -348,11 +349,28 @@ app.post("/send", async (req, res) => {
       });
     }
 
-    // Normalize the phone number and format it for WhatsApp Web
-    const chatId = `${phone.replace(/\D/g, "")}@c.us`;
+    let targetChatId;
+
+    // Support both phone (direct message) and chatId (group or direct) formats
+    if (chatId) {
+      // Validate chatId format
+      if (!chatId.endsWith("@g.us") && !chatId.endsWith("@c.us")) {
+        return res.status(400).send({
+          error: "Invalid chatId. Must end with @g.us (group) or @c.us (direct).",
+        });
+      }
+      targetChatId = chatId;
+    } else if (phone) {
+      // Normalize the phone number and format it for WhatsApp Web (direct message)
+      targetChatId = `${phone.replace(/\D/g, "")}@c.us`;
+    } else {
+      return res.status(400).send({
+        error: "Either phone or chatId is required",
+      });
+    }
 
     // Send the message using the active WhatsApp session
-    await client.sendMessage(chatId, text);
+    await client.sendMessage(targetChatId, text);
 
     res.status(200).send({ success: true, message: "Message sent successfully" });
   } catch (error) {
