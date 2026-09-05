@@ -17,11 +17,68 @@ app.use("/media", express.static(MEDIA_DIR, { fallthrough: false, maxAge: "1h" }
 function loadPending() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch (_) { return null; }
 }
+
 function savePending(value) {
   try {
     if (value) fs.writeFileSync(STATE_FILE, JSON.stringify(value));
     else if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
-  } catch (e) { console.error("Pending-state write failed:", e.message); }
+  } catch (e) {
+    console.error("Pending-state write failed:", e.message);
+  }
+}
+
+function getPublicBaseUrl() {
+  return process.env.PUBLIC_BASE_URL ||
+    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
+}
+
+function buildPublicMediaUrl(filename) {
+  const publicBaseUrl = getPublicBaseUrl();
+  if (!publicBaseUrl || !filename) return null;
+  return `${publicBaseUrl.replace(/\/$/, "")}/media/${encodeURIComponent(filename)}`;
+}
+
+function extensionForMime(mimetype) {
+  const extensions = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+  };
+  return extensions[mimetype] || "bin";
+}
+
+function ensurePendingImageUrl(pending) {
+  if (!pending) return null;
+
+  if (pending.mediaData) {
+    const fallbackName = `approved-source-${Date.now()}.${extensionForMime(pending.mediaType || "image/jpeg")}`;
+    const filename = path.basename(pending.mediaFilename || fallbackName).replace(/[^a-zA-Z0-9._-]/g, "_");
+    const mediaFilePath = path.join(MEDIA_DIR, filename);
+
+    if (!fs.existsSync(mediaFilePath) || fs.statSync(mediaFilePath).size === 0) {
+      fs.writeFileSync(mediaFilePath, Buffer.from(pending.mediaData, "base64"));
+      console.log("Recreated pending approval media from persistent state:", filename);
+    }
+
+    const rebuiltUrl = buildPublicMediaUrl(filename);
+    if (rebuiltUrl) return rebuiltUrl;
+  }
+
+  return pending.imageUrl || null;
+}
+
+function parseApprovalPlatforms(text) {
+  const value = String(text || "");
+  const selected = [];
+
+  if (/\b(fb|facebook)\b/i.test(value)) selected.push("facebook");
+  if (/\b(ig|instagram)\b/i.test(value)) selected.push("instagram");
+  if (/\b(gbp|gmb|google business profile|google business|google)\b/i.test(value)) selected.push("gbp");
+
+  return selected.length ? selected : ["facebook", "instagram", "gbp"];
 }
 
 const client = new Client({
@@ -35,18 +92,31 @@ const client = new Client({
 
 let latestQr = null;
 app.get("/qr", (req, res) => {
-  if (!latestQr) return res.send("<html><body style='font-family:Arial;text-align:center;padding:40px'><h2>Waiting for WhatsApp QR...</h2><p>Refresh this page in a few seconds.</p></body></html>");
+  if (!latestQr) {
+    return res.send("<html><body style='font-family:Arial;text-align:center;padding:40px'><h2>Waiting for WhatsApp QR...</h2><p>Refresh this page in a few seconds.</p></body></html>");
+  }
   res.send(`<!DOCTYPE html><html><head><title>WhatsApp QR</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script></head><body style="font-family:Arial;text-align:center;padding:40px"><h2>Link WhatsApp</h2><p>WhatsApp → Linked Devices → Link a Device</p><div id="qrcode"></div><script>new QRCode(document.getElementById("qrcode"),{text:${JSON.stringify(latestQr)},width:320,height:320});</script></body></html>`);
 });
-client.on("qr", qr => { latestQr = qr; console.log("New WhatsApp QR generated. Open /qr to scan it."); });
+
+client.on("qr", qr => {
+  latestQr = qr;
+  console.log("New WhatsApp QR generated. Open /qr to scan it.");
+});
 client.on("ready", () => console.log("WhatsApp Session is Ready and Connected!"));
-client.on("authenticated", () => { latestQr = null; console.log("WhatsApp Session authenticated successfully!"); });
+client.on("authenticated", () => {
+  latestQr = null;
+  console.log("WhatsApp Session authenticated successfully!");
+});
 
 function repairSerializedMessageId(message) {
   const id = message?.id;
   if (!id) return null;
+
   const serialized = id._serialized || id.$1 ||
-    (id.fromMe !== undefined && id.remote && id.id ? `${id.fromMe}_${id.remote}_${id.id}` : null);
+    (id.fromMe !== undefined && id.remote && id.id
+      ? `${id.fromMe}_${id.remote}_${id.id}`
+      : null);
+
   if (serialized && !id._serialized) {
     id._serialized = serialized;
     console.log("Repaired WhatsApp serialized message ID:", serialized);
@@ -57,22 +127,45 @@ function repairSerializedMessageId(message) {
 async function downloadMediaFromEventData(message) {
   const d = message?._data || {};
   const mediaArgs = {
-    directPath: d.directPath, encFilehash: d.encFilehash, filehash: d.filehash,
-    mediaKey: d.mediaKey, mediaKeyTimestamp: d.mediaKeyTimestamp,
-    type: d.type || message.type, mimetype: d.mimetype, filename: d.filename || null,
+    directPath: d.directPath,
+    encFilehash: d.encFilehash,
+    filehash: d.filehash,
+    mediaKey: d.mediaKey,
+    mediaKeyTimestamp: d.mediaKeyTimestamp,
+    type: d.type || message.type,
+    mimetype: d.mimetype,
+    filename: d.filename || null,
   };
-  if (!mediaArgs.directPath || !mediaArgs.mediaKey) throw new Error("event media metadata incomplete");
+
+  if (!mediaArgs.directPath || !mediaArgs.mediaKey) {
+    throw new Error("event media metadata incomplete");
+  }
+
   return await client.pupPage.evaluate(async (args) => {
     const managerModule = window.require("WAWebDownloadManager");
     const manager = managerModule.downloadManager || managerModule;
-    const mockQpl = { addAnnotations() { return this; }, addPoint() { return this; } };
+    const mockQpl = {
+      addAnnotations() { return this; },
+      addPoint() { return this; },
+    };
+
     const decrypted = await manager.downloadAndMaybeDecrypt({
-      directPath: args.directPath, encFilehash: args.encFilehash, filehash: args.filehash,
-      mediaKey: args.mediaKey, mediaKeyTimestamp: args.mediaKeyTimestamp, type: args.type,
-      signal: new AbortController().signal, downloadQpl: mockQpl,
+      directPath: args.directPath,
+      encFilehash: args.encFilehash,
+      filehash: args.filehash,
+      mediaKey: args.mediaKey,
+      mediaKeyTimestamp: args.mediaKeyTimestamp,
+      type: args.type,
+      signal: new AbortController().signal,
+      downloadQpl: mockQpl,
     });
+
     const data = await window.WWebJS.arrayBufferToBase64Async(decrypted);
-    return { data, mimetype: args.mimetype || "application/octet-stream", filename: args.filename || null };
+    return {
+      data,
+      mimetype: args.mimetype || "application/octet-stream",
+      filename: args.filename || null,
+    };
   }, mediaArgs);
 }
 
@@ -82,7 +175,10 @@ async function getInboundMedia(message) {
     if (media?.data) return media;
     throw new Error("downloadMedia returned no data");
   } catch (primaryError) {
-    console.warn("Standard downloadMedia failed; using event-data fallback:", primaryError?.message || String(primaryError));
+    console.warn(
+      "Standard downloadMedia failed; using event-data fallback:",
+      primaryError?.message || String(primaryError)
+    );
     const media = await downloadMediaFromEventData(message);
     if (!media?.data) throw new Error("event-data fallback returned no data");
     console.log("Event-data media fallback succeeded");
@@ -91,7 +187,11 @@ async function getInboundMedia(message) {
 }
 
 async function postJson(url, payload) {
-  const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
   return response;
 }
@@ -99,39 +199,79 @@ async function postJson(url, payload) {
 client.on("message", async (message) => {
   try {
     if (message.fromMe) return;
+
     const ALLOWED_DIRECT_ID = process.env.ALLOWED_DIRECT_ID || "263311610368253@lid";
     const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
     const isGroup = message.from.endsWith("@g.us");
+
     if (isGroup) {
-      if (!ALLOWED_GROUP_ID) { console.log("GROUP DETECTED:", message.from); return; }
+      if (!ALLOWED_GROUP_ID) {
+        console.log("GROUP DETECTED:", message.from);
+        return;
+      }
       if (message.from !== ALLOWED_GROUP_ID) return;
-    } else if (message.from !== ALLOWED_DIRECT_ID) return;
+    } else if (message.from !== ALLOWED_DIRECT_ID) {
+      return;
+    }
 
     const incomingText = (message.body || "").trim();
     const command = incomingText.toLowerCase();
     const pending = loadPending();
 
     if (!message.hasMedia && pending && /^(approve|approved|post|publish)(\s|$)/i.test(command)) {
+      if (pending.status === "publishing") {
+        console.log("Duplicate approval ignored while publishing is already in progress");
+        await client.sendMessage(message.from, "Publishing is already in progress.");
+        return;
+      }
+
       console.log("Approval received for pending social draft");
-      await postJson(PUBLISH_WEBHOOK_URL, {
-        action: "approve",
-        chatId: message.from,
-        caption: pending.caption,
-        imageUrl: pending.imageUrl,
-        mediaType: pending.mediaType || "image/jpeg",
-        originalContext: pending.originalContext || "",
-        draftCreatedAt: pending.createdAt || null,
-      });
+      const platforms = parseApprovalPlatforms(incomingText);
+      const imageUrl = ensurePendingImageUrl(pending);
+      if (!imageUrl) throw new Error("No approved image is available for publishing");
+
+      savePending({ ...pending, status: "publishing", selectedPlatforms: platforms, imageUrl });
+
+      try {
+        await postJson(PUBLISH_WEBHOOK_URL, {
+          action: "approve",
+          chatId: message.from,
+          caption: pending.caption,
+          imageUrl,
+          mediaType: pending.mediaType || "image/jpeg",
+          originalContext: pending.originalContext || "",
+          draftCreatedAt: pending.createdAt || null,
+          platforms,
+        });
+        savePending(null);
+        console.log("Approved social draft handed to publishing workflow:", platforms.join(", "));
+      } catch (publishError) {
+        savePending({ ...pending, status: "pending", imageUrl });
+        throw publishError;
+      }
       return;
     }
 
     if (!message.hasMedia && pending && /^(edit|change|revise|rewrite)(:|\s|$)/i.test(command)) {
-      const editInstruction = incomingText.replace(/^(edit|change|revise|rewrite)\s*:?\s*/i, "").trim();
-      if (!editInstruction) {
-        await client.sendMessage(message.from, "Send the change after EDIT, for example: EDIT: remove the model name");
+      if (pending.status === "publishing") {
+        await client.sendMessage(message.from, "Publishing is already in progress, so this draft can no longer be edited.");
         return;
       }
+
+      const editInstruction = incomingText
+        .replace(/^(edit|change|revise|rewrite)\s*:?\s*/i, "")
+        .trim();
+
+      if (!editInstruction) {
+        await client.sendMessage(
+          message.from,
+          "Send the change after EDIT, for example: EDIT: remove the model name"
+        );
+        return;
+      }
+
       console.log("Edit received for pending social draft");
+      const imageUrl = ensurePendingImageUrl(pending);
       const editPayload = {
         from: message.from,
         phone: message.from.replace("@c.us", ""),
@@ -143,56 +283,102 @@ client.on("message", async (message) => {
         mediaType: pending.mediaType || "image/jpeg",
         mediaFilename: pending.mediaFilename || "approved-source.jpg",
         mediaData: pending.mediaData || null,
-        mediaUrl: pending.imageUrl || null,
-        media: { mimetype: pending.mediaType || "image/jpeg", filename: pending.mediaFilename || "approved-source.jpg", data: pending.mediaData || "", url: pending.imageUrl || null },
+        mediaUrl: imageUrl,
+        media: {
+          mimetype: pending.mediaType || "image/jpeg",
+          filename: pending.mediaFilename || "approved-source.jpg",
+          data: pending.mediaData || "",
+          url: imageUrl,
+        },
       };
-      if (!process.env.MAKE_WEBHOOK_URL) throw new Error("MAKE_WEBHOOK_URL is not configured");
+
+      if (!process.env.MAKE_WEBHOOK_URL) {
+        throw new Error("MAKE_WEBHOOK_URL is not configured");
+      }
       await postJson(process.env.MAKE_WEBHOOK_URL, editPayload);
       return;
     }
 
     const repairedId = repairSerializedMessageId(message);
     const payload = {
-      from: message.from, phone: message.from.replace("@c.us", ""), text: message.body || "",
-      messageId: repairedId || "", timestamp: message.timestamp, type: message.type,
-      hasMedia: message.hasMedia, mediaType: null, mediaFilename: null, mediaData: null, mediaUrl: null, media: null,
+      from: message.from,
+      phone: message.from.replace("@c.us", ""),
+      text: message.body || "",
+      messageId: repairedId || "",
+      timestamp: message.timestamp,
+      type: message.type,
+      hasMedia: message.hasMedia,
+      mediaType: null,
+      mediaFilename: null,
+      mediaData: null,
+      mediaUrl: null,
+      media: null,
     };
 
     if (message.hasMedia) {
       try {
         const media = await getInboundMedia(message);
-        const extensions = { "image/jpeg":"jpg", "image/png":"png", "image/webp":"webp", "image/gif":"gif", "video/mp4":"mp4", "video/quicktime":"mov" };
-        const extension = extensions[media.mimetype] || "bin";
+        const extension = extensionForMime(media.mimetype);
         const generatedFilename = `whatsapp-${message.type || "media"}-${message.timestamp}-${Date.now()}.${extension}`;
-        const finalFilename = path.basename(media.filename || generatedFilename).replace(/[^a-zA-Z0-9._-]/g, "_");
+        const finalFilename = path.basename(media.filename || generatedFilename)
+          .replace(/[^a-zA-Z0-9._-]/g, "_");
         const mediaFilePath = path.join(MEDIA_DIR, finalFilename);
+
         fs.writeFileSync(mediaFilePath, Buffer.from(media.data || "", "base64"));
-        const publicBaseUrl = process.env.PUBLIC_BASE_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
-        if (publicBaseUrl) payload.mediaUrl = `${publicBaseUrl.replace(/\/$/, "")}/media/${encodeURIComponent(finalFilename)}`;
+        payload.mediaUrl = buildPublicMediaUrl(finalFilename);
         payload.mediaType = media.mimetype || "";
         payload.mediaFilename = finalFilename;
         payload.mediaData = media.data || "";
-        payload.media = { mimetype: media.mimetype || "", filename: finalFilename, data: media.data || "", url: payload.mediaUrl };
+        payload.media = {
+          mimetype: media.mimetype || "",
+          filename: finalFilename,
+          data: media.data || "",
+          url: payload.mediaUrl,
+        };
+
         console.log("Media downloaded:", media.mimetype, finalFilename);
         console.log("Public media URL:", payload.mediaUrl);
       } catch (mediaError) {
-        payload.media = { error: "downloadMedia failed", details: mediaError?.message || String(mediaError) };
-        console.error("Media download failed after fallback:", mediaError?.message || mediaError);
+        payload.media = {
+          error: "downloadMedia failed",
+          details: mediaError?.message || String(mediaError),
+        };
+        console.error(
+          "Media download failed after fallback:",
+          mediaError?.message || mediaError
+        );
       }
     }
 
     console.log("Incoming WhatsApp message:", {
-      from: payload.from, text: payload.text, messageId: payload.messageId, type: payload.type,
-      hasMedia: payload.hasMedia, mediaType: payload.mediaType, mediaFilename: payload.mediaFilename,
-      mediaDataPresent: Boolean(payload.mediaData), mediaUrl: payload.mediaUrl,
+      from: payload.from,
+      text: payload.text,
+      messageId: payload.messageId,
+      type: payload.type,
+      hasMedia: payload.hasMedia,
+      mediaType: payload.mediaType,
+      mediaFilename: payload.mediaFilename,
+      mediaDataPresent: Boolean(payload.mediaData),
+      mediaUrl: payload.mediaUrl,
     });
-    if (!process.env.MAKE_WEBHOOK_URL) return console.error("MAKE_WEBHOOK_URL is not configured");
+
+    if (!process.env.MAKE_WEBHOOK_URL) {
+      return console.error("MAKE_WEBHOOK_URL is not configured");
+    }
+
     const response = await fetch(process.env.MAKE_WEBHOOK_URL, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
-    if (!response.ok) return console.error("Make webhook failed:", response.status, await response.text());
+
+    if (!response.ok) {
+      return console.error("Make webhook failed:", response.status, await response.text());
+    }
     console.log("Message forwarded to Make successfully");
-  } catch (error) { console.error("Error forwarding WhatsApp message to Make:", error); }
+  } catch (error) {
+    console.error("Error forwarding WhatsApp message to Make:", error);
+  }
 });
 
 client.on("auth_failure", message => console.error("Authentication failed:", message));
@@ -200,20 +386,43 @@ client.on("disconnected", reason => console.log("WhatsApp client disconnected:",
 
 app.post("/send", async (req, res) => {
   try {
-    const { phone, chatId, text, imageUrl, mediaUrl, mediaType, mediaFilename, mediaData, originalContext, saveDraft, sendImage } = req.body;
+    const {
+      phone,
+      chatId,
+      text,
+      imageUrl,
+      mediaUrl,
+      mediaType,
+      mediaFilename,
+      mediaData,
+      originalContext,
+      saveDraft,
+      sendImage,
+    } = req.body;
+
     if (!text) return res.status(400).send({ error: "Text is required" });
-    if (!client.info) return res.status(503).send({ error: "WhatsApp session not ready", ready: false });
+    if (!client.info) {
+      return res.status(503).send({ error: "WhatsApp session not ready", ready: false });
+    }
+
     let targetChatId;
     if (chatId) targetChatId = chatId;
     else if (phone) targetChatId = `${phone.replace(/\D/g, "")}@c.us`;
     else return res.status(400).send({ error: "Either phone or chatId is required" });
 
     const finalImageUrl = imageUrl || mediaUrl || null;
+
     if (saveDraft || finalImageUrl) {
       savePending({
-        chatId: targetChatId, caption: text, imageUrl: finalImageUrl,
-        mediaType: mediaType || "image/jpeg", mediaFilename: mediaFilename || null,
-        mediaData: mediaData || null, originalContext: originalContext || "", createdAt: new Date().toISOString(),
+        chatId: targetChatId,
+        caption: text,
+        imageUrl: finalImageUrl,
+        mediaType: mediaType || "image/jpeg",
+        mediaFilename: mediaFilename || null,
+        mediaData: mediaData || null,
+        originalContext: originalContext || "",
+        createdAt: new Date().toISOString(),
+        status: "pending",
       });
       console.log("Pending social draft saved for approval");
     }
@@ -224,21 +433,29 @@ app.post("/send", async (req, res) => {
     } else {
       await client.sendMessage(targetChatId, text);
     }
+
     res.status(200).send({ success: true });
-  } catch (error) { res.status(500).send({ error: error.message }); }
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
 });
 
 function removeChromiumLocks(dir) {
   if (!fs.existsSync(dir)) return;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) { removeChromiumLocks(fullPath); continue; }
-    if (["SingletonLock","SingletonSocket","SingletonCookie"].includes(entry.name)) {
+    if (entry.isDirectory()) {
+      removeChromiumLocks(fullPath);
+      continue;
+    }
+    if (["SingletonLock", "SingletonSocket", "SingletonCookie"].includes(entry.name)) {
       try { fs.unlinkSync(fullPath); } catch (_) {}
     }
   }
 }
+
 removeChromiumLocks("/app/.wwebjs_auth");
 client.initialize();
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Microservice running on port ${PORT}`));
