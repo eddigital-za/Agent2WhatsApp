@@ -34,20 +34,70 @@ client.on("authenticated", () => { latestQr = null; console.log("WhatsApp Sessio
 function repairSerializedMessageId(message) {
   const id = message?.id;
   if (!id) return null;
-
-  // WhatsApp Web changed the serialized-id property from _serialized to $1.
-  // whatsapp-web.js 1.x still reads _serialized in downloadMedia(). Copy the
-  // live value back, or reconstruct it from the intact ID components.
   const serialized = id._serialized || id.$1 ||
-    (id.fromMe !== undefined && id.remote && id.id
-      ? `${id.fromMe}_${id.remote}_${id.id}`
-      : null);
-
+    (id.fromMe !== undefined && id.remote && id.id ? `${id.fromMe}_${id.remote}_${id.id}` : null);
   if (serialized && !id._serialized) {
     id._serialized = serialized;
     console.log("Repaired WhatsApp serialized message ID:", serialized);
   }
   return serialized;
+}
+
+// WhatsApp Web's current LID/group regression can make downloadMedia() fail
+// because whatsapp-web.js tries to look the message up again by ID. The event
+// already contains the media cryptographic metadata, so this fallback decrypts
+// that exact event media directly without doing the broken Msg.get() lookup.
+async function downloadMediaFromEventData(message) {
+  const d = message?._data || {};
+  const mediaArgs = {
+    directPath: d.directPath,
+    encFilehash: d.encFilehash,
+    filehash: d.filehash,
+    mediaKey: d.mediaKey,
+    mediaKeyTimestamp: d.mediaKeyTimestamp,
+    type: d.type || message.type,
+    mimetype: d.mimetype,
+    filename: d.filename || null,
+  };
+
+  if (!mediaArgs.directPath || !mediaArgs.mediaKey) {
+    throw new Error("event media metadata incomplete");
+  }
+
+  return await client.pupPage.evaluate(async (args) => {
+    const managerModule = window.require("WAWebDownloadManager");
+    const manager = managerModule.downloadManager || managerModule;
+    const mockQpl = {
+      addAnnotations() { return this; },
+      addPoint() { return this; },
+    };
+    const decrypted = await manager.downloadAndMaybeDecrypt({
+      directPath: args.directPath,
+      encFilehash: args.encFilehash,
+      filehash: args.filehash,
+      mediaKey: args.mediaKey,
+      mediaKeyTimestamp: args.mediaKeyTimestamp,
+      type: args.type,
+      signal: new AbortController().signal,
+      downloadQpl: mockQpl,
+    });
+    const data = await window.WWebJS.arrayBufferToBase64Async(decrypted);
+    return { data, mimetype: args.mimetype || "application/octet-stream", filename: args.filename || null };
+  }, mediaArgs);
+}
+
+async function getInboundMedia(message) {
+  try {
+    const media = await message.downloadMedia();
+    if (media?.data) return media;
+    throw new Error("downloadMedia returned no data");
+  } catch (primaryError) {
+    console.warn("Standard downloadMedia failed; using event-data fallback:", primaryError?.message || String(primaryError));
+    const media = await downloadMediaFromEventData(message);
+    if (!media?.data) throw new Error("event-data fallback returned no data");
+    console.log("Event-data media fallback succeeded");
+    return media;
+  }
 }
 
 client.on("message", async (message) => {
@@ -81,9 +131,7 @@ client.on("message", async (message) => {
 
     if (message.hasMedia) {
       try {
-        const media = await message.downloadMedia();
-        if (!media) throw new Error("downloadMedia returned no data");
-
+        const media = await getInboundMedia(message);
         const extensions = { "image/jpeg":"jpg", "image/png":"png", "image/webp":"webp", "image/gif":"gif", "video/mp4":"mp4", "video/quicktime":"mov" };
         const extension = extensions[media.mimetype] || "bin";
         const generatedFilename = `whatsapp-${message.type || "media"}-${message.timestamp}-${Date.now()}.${extension}`;
@@ -102,7 +150,7 @@ client.on("message", async (message) => {
         console.log("Public media URL:", payload.mediaUrl);
       } catch (mediaError) {
         payload.media = { error: "downloadMedia failed", details: mediaError?.message || String(mediaError) };
-        console.error("Media download failed:", mediaError?.message || mediaError);
+        console.error("Media download failed after fallback:", mediaError?.message || mediaError);
       }
     }
 
