@@ -1,5 +1,5 @@
 {
-  "name": "btsa-lead-followup-whatsapp",
+  "name": "agent2whatsapp",
   "version": "1.0.0",
   "description": "Dedicated BTSA WhatsApp service for lead replies and follow-ups",
   "main": "lead.js",
@@ -7,7 +7,9 @@
     "start": "node lead.js"
   },
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.21.2",
+    "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.28.0"
   }
 }
