@@ -57,6 +57,15 @@ async function postToMake(payload) {
   }
 }
 
+function normalizeZaPhone(value) {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("0027")) digits = digits.slice(2);
+  if (digits.startsWith("0")) digits = `27${digits.slice(1)}`;
+  if (digits.length === 9) digits = `27${digits}`;
+  return digits;
+}
+
 const IGNORED_MESSAGE_TYPES = new Set([
   "e2e_notification",
   "notification_template",
@@ -72,20 +81,24 @@ client.on("message", async message => {
     if (message.from.endsWith("@g.us")) return;
     if (IGNORED_MESSAGE_TYPES.has(message.type)) return;
 
-    let phone = "";
+    let rawPhone = "";
     try {
       const contact = await message.getContact();
-      phone = contact?.number || "";
+      rawPhone = contact?.number || "";
     } catch (_) {}
 
-    if (!phone && message.from.endsWith("@c.us")) {
-      phone = message.from.replace("@c.us", "");
+    if (!rawPhone && message.from.endsWith("@c.us")) {
+      rawPhone = message.from.replace("@c.us", "");
     }
+
+    const phone = normalizeZaPhone(rawPhone);
+    const sheetPhone = phone.startsWith("27") && phone.length === 11 ? phone.slice(2) : phone;
 
     const payload = {
       event: "inbound_message",
       chatId: message.from,
       phone,
+      sheetPhone,
       text: message.body || "",
       messageId: message.id?._serialized || "",
       timestamp: message.timestamp,
@@ -95,6 +108,7 @@ client.on("message", async message => {
 
     console.log("Inbound client WhatsApp message:", {
       phone: payload.phone,
+      sheetPhone: payload.sheetPhone,
       chatId: payload.chatId,
       type: payload.type,
       hasMedia: payload.hasMedia,
@@ -106,15 +120,6 @@ client.on("message", async message => {
     console.error("Inbound forwarding error:", error.message || error);
   }
 });
-
-function normalizeZaPhone(value) {
-  let digits = String(value || "").replace(/\D/g, "");
-  if (!digits) return "";
-  if (digits.startsWith("0027")) digits = digits.slice(2);
-  if (digits.startsWith("0")) digits = `27${digits.slice(1)}`;
-  if (digits.length === 9) digits = `27${digits}`;
-  return digits;
-}
 
 app.post("/send", async (req, res) => {
   try {
