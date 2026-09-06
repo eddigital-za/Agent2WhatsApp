@@ -1,15 +1,13 @@
 {
-  "name": "agent2whatsapp",
+  "name": "btsa-lead-followup-whatsapp",
   "version": "1.0.0",
-  "description": "WhatsApp microservice for sending messages from AI agents",
-  "main": "index.js",
+  "description": "Dedicated BTSA WhatsApp service for lead replies and follow-ups",
+  "main": "lead.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node lead.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
     "express": "^4.21.2",
-    "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.28.0"
   }
 }
