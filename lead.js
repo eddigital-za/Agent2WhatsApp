@@ -97,6 +97,15 @@ client.on("message", async message => {
   }
 });
 
+function normalizeZaPhone(value) {
+  let digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("0027")) digits = digits.slice(2);
+  if (digits.startsWith("0")) digits = `27${digits.slice(1)}`;
+  if (digits.length === 9) digits = `27${digits}`;
+  return digits;
+}
+
 app.post("/send", async (req, res) => {
   try {
     const { phone, chatId, text } = req.body || {};
@@ -106,7 +115,7 @@ app.post("/send", async (req, res) => {
 
     let targetChatId = chatId;
     if (!targetChatId && phone) {
-      const digits = String(phone).replace(/\D/g, "");
+      const digits = normalizeZaPhone(phone);
       if (!digits) return res.status(400).json({ error: "Valid phone or chatId is required" });
       targetChatId = `${digits}@c.us`;
     }
