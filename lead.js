@@ -91,14 +91,13 @@ client.on("message", async message => {
       rawPhone = message.from.replace("@c.us", "");
     }
 
-    const phone = normalizeZaPhone(rawPhone);
-    const sheetPhone = phone.startsWith("27") && phone.length === 11 ? phone.slice(2) : phone;
+    const phoneIntl = normalizeZaPhone(rawPhone);
+    const phone = phoneIntl.startsWith("27") && phoneIntl.length === 11 ? phoneIntl.slice(2) : phoneIntl;
 
     const payload = {
       event: "inbound_message",
       chatId: message.from,
       phone,
-      sheetPhone,
       text: message.body || "",
       messageId: message.id?._serialized || "",
       timestamp: message.timestamp,
@@ -108,7 +107,6 @@ client.on("message", async message => {
 
     console.log("Inbound client WhatsApp message:", {
       phone: payload.phone,
-      sheetPhone: payload.sheetPhone,
       chatId: payload.chatId,
       type: payload.type,
       hasMedia: payload.hasMedia,
