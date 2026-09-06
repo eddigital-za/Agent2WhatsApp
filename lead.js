@@ -57,10 +57,20 @@ async function postToMake(payload) {
   }
 }
 
+const IGNORED_MESSAGE_TYPES = new Set([
+  "e2e_notification",
+  "notification_template",
+  "notification_template_v2",
+  "protocol",
+  "ciphertext",
+  "revoked"
+]);
+
 client.on("message", async message => {
   try {
     if (message.fromMe) return;
     if (message.from.endsWith("@g.us")) return;
+    if (IGNORED_MESSAGE_TYPES.has(message.type)) return;
 
     let phone = "";
     try {
