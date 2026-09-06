@@ -66,6 +66,28 @@ function normalizeZaPhone(value) {
   return digits;
 }
 
+async function resolveInboundPhone(message) {
+  const sourceId = message.author || message.from || "";
+
+  if (sourceId.endsWith("@lid")) {
+    try {
+      const mappings = await client.getContactLidAndPhone([sourceId]);
+      const pn = mappings?.[0]?.pn || "";
+      if (pn) return pn.replace("@c.us", "");
+    } catch (error) {
+      console.error("LID phone resolution failed:", error.message || error);
+    }
+  }
+
+  try {
+    const contact = await message.getContact();
+    if (contact?.number) return contact.number;
+  } catch (_) {}
+
+  if (sourceId.endsWith("@c.us")) return sourceId.replace("@c.us", "");
+  return "";
+}
+
 const IGNORED_MESSAGE_TYPES = new Set([
   "e2e_notification",
   "notification_template",
@@ -81,18 +103,19 @@ client.on("message", async message => {
     if (message.from.endsWith("@g.us")) return;
     if (IGNORED_MESSAGE_TYPES.has(message.type)) return;
 
-    let rawPhone = "";
-    try {
-      const contact = await message.getContact();
-      rawPhone = contact?.number || "";
-    } catch (_) {}
-
-    if (!rawPhone && message.from.endsWith("@c.us")) {
-      rawPhone = message.from.replace("@c.us", "");
-    }
-
+    const rawPhone = await resolveInboundPhone(message);
     const phoneIntl = normalizeZaPhone(rawPhone);
     const phone = phoneIntl.startsWith("27") && phoneIntl.length === 11 ? phoneIntl.slice(2) : phoneIntl;
+
+    if (!phone || !/^\d{9}$/.test(phone)) {
+      console.error("Inbound message skipped: unable to resolve valid SA phone", {
+        chatId: message.from,
+        author: message.author || null,
+        resolved: phone || null,
+        type: message.type,
+      });
+      return;
+    }
 
     const payload = {
       event: "inbound_message",
