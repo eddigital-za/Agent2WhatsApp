@@ -149,5 +149,5 @@ function removeChromiumLocks(dir) {
 removeChromiumLocks("/app/.wwebjs_auth");
 client.initialize();
 
-const PORT = process.env.PORT || 4000;
+const PORT = 4000;
 app.listen(PORT, () => console.log(`BTSA Lead Follow-up service listening on ${PORT}`));
