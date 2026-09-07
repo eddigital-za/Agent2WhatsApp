@@ -100,6 +100,8 @@ const IGNORED_MESSAGE_TYPES = new Set([
 client.on("message", async message => {
   try {
     if (message.fromMe) return;
+    if (message.from === "status@broadcast") return;
+    if (message.from.endsWith("@broadcast")) return;
     if (message.from.endsWith("@g.us")) return;
     if (IGNORED_MESSAGE_TYPES.has(message.type)) return;
 
