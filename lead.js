@@ -106,20 +106,7 @@ client.on("message", async message => {
     if (message.fromMe) return;
     if (message.from === "status@broadcast") return;
     if (message.from.endsWith("@broadcast")) return;
-    if (message.from.endsWith("@g.us")) {
-      let groupName = "";
-      try {
-        const chat = await message.getChat();
-        groupName = chat?.name || "";
-      } catch (_) {}
-      console.log("GROUP_DISCOVERY", {
-        chatId: message.from,
-        groupName,
-        author: message.author || null,
-        text: message.body || "",
-      });
-      return;
-    }
+    if (message.from.endsWith("@g.us")) return;
     if (IGNORED_MESSAGE_TYPES.has(message.type)) return;
 
     const rawPhone = await resolveInboundPhone(message);
