@@ -91,6 +91,10 @@ const client = new Client({
 });
 
 let latestQr = null;
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true, whatsappReady: Boolean(client.info) });
+});
 app.get("/qr", (req, res) => {
   if (!latestQr) {
     return res.send("<html><body style='font-family:Arial;text-align:center;padding:40px'><h2>Waiting for WhatsApp QR...</h2><p>Refresh this page in a few seconds.</p></body></html>");
