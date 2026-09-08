@@ -43,6 +43,10 @@ const client = new Client({
 
 let latestQr = null;
 
+app.get("/health", (req, res) => {
+  res.json({ ok: true, whatsappReady: Boolean(client.info) });
+});
+
 app.get("/qr", (req, res) => {
   if (!latestQr) {
     return res.send(`
