@@ -36,6 +36,10 @@ client.on("authenticated", () => {
   console.log("WhatsApp authenticated.");
 });
 
+client.on("loading_screen", (percent, message) => {
+  console.log("WhatsApp loading:", percent, message);
+});
+client.on("change_state", state => console.log("WhatsApp state:", state));
 client.on("ready", () => console.log("BTSA Lead Follow-up WhatsApp is ready."));
 client.on("auth_failure", message => console.error("Authentication failed:", message));
 client.on("disconnected", reason => console.log("WhatsApp disconnected:", reason));
