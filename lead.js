@@ -15,6 +15,34 @@ const client = new Client({
 
 let latestQr = null;
 
+const SEND_LEDGER_PATH = "/app/.wwebjs_auth/btsa-send-ledger.json";
+
+function readSendLedger() {
+  const fs = require("fs");
+  try {
+    return JSON.parse(fs.readFileSync(SEND_LEDGER_PATH, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") console.error("Send ledger read error:", error.message || error);
+    return {};
+  }
+}
+
+function recordAcceptedSend(idempotencyKey, record) {
+  if (!idempotencyKey) return;
+  const fs = require("fs");
+  const ledger = readSendLedger();
+  ledger[idempotencyKey] = { ...record, acceptedAt: new Date().toISOString() };
+
+  const cutoff = Date.now() - 45 * 24 * 60 * 60 * 1000;
+  for (const [key, value] of Object.entries(ledger)) {
+    if (Date.parse(value.acceptedAt || 0) < cutoff) delete ledger[key];
+  }
+
+  const tempPath = `${SEND_LEDGER_PATH}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(ledger), "utf8");
+  fs.renameSync(tempPath, SEND_LEDGER_PATH);
+}
+
 app.get("/health", (req, res) => {
   res.json({ ok: true, whatsappReady: Boolean(client.info) });
 });
@@ -150,9 +178,11 @@ client.on("message", async message => {
 
 app.post("/send", async (req, res) => {
   try {
-    const { phone, chatId, text } = req.body || {};
+    const { phone, chatId, text, idempotencyKey } = req.body || {};
+    const sendKey = String(idempotencyKey || "").trim();
 
     if (!text) return res.status(400).json({ error: "Text is required" });
+    if (sendKey.length > 200) return res.status(400).json({ error: "idempotencyKey is too long" });
     if (!client.info) return res.status(503).json({ error: "WhatsApp session not ready", ready: false });
 
     let targetChatId = chatId;
@@ -164,34 +194,37 @@ app.post("/send", async (req, res) => {
 
     if (!targetChatId) return res.status(400).json({ error: "Either phone or chatId is required" });
 
-    const sentAt = Date.now();
+    if (sendKey) {
+      const prior = readSendLedger()[sendKey];
+      if (prior) {
+        console.log("Duplicate outbound suppressed", { idempotencyKey: sendKey, targetChatId });
+        return res.json({
+          success: true,
+          accepted: true,
+          deduplicated: true,
+          messageId: prior.messageId || null,
+          chatId: prior.chatId || targetChatId,
+        });
+      }
+    }
+
     const result = await client.sendMessage(targetChatId, text);
-    let messageId = result?.id?._serialized || null;
-    let verification = "send-result";
+    const messageId = result?.id?._serialized || null;
 
-    if (!messageId) {
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      const chat = await client.getChatById(targetChatId);
-      const recent = await chat.fetchMessages({ limit: 20, fromMe: true });
-      const confirmed = [...recent].reverse().find(message =>
-        message.body === text &&
-        Number(message.timestamp || 0) * 1000 >= sentAt - 30000
-      );
-      messageId = confirmed?.id?._serialized || null;
-      verification = "chat-history";
-    }
+    recordAcceptedSend(sendKey, { messageId, chatId: targetChatId });
+    console.log("Outbound WhatsApp accepted", {
+      idempotencyKey: sendKey || null,
+      targetChatId,
+      messageId,
+    });
 
-    if (!messageId) {
-      console.error("Outbound send could not be verified", { targetChatId });
-      return res.status(502).json({
-        success: false,
-        error: "WhatsApp accepted the send call but no verifiable message ID was returned",
-        chatId: targetChatId,
-      });
-    }
-
-    console.log("Outbound WhatsApp verified", { targetChatId, messageId, verification });
-    res.json({ success: true, messageId, chatId: targetChatId, verification });
+    res.json({
+      success: true,
+      accepted: true,
+      deduplicated: false,
+      messageId,
+      chatId: targetChatId,
+    });
   } catch (error) {
     console.error("Send error:", error.message || error);
     res.status(500).json({ error: error.message || String(error) });
