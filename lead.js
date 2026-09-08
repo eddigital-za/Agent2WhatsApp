@@ -19,6 +19,21 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, whatsappReady: Boolean(client.info) });
 });
 
+app.get("/groups", async (req, res) => {
+  try {
+    if (!client.info) return res.status(503).json({ error: "WhatsApp session not ready", ready: false });
+    const chats = await client.getChats();
+    const groups = chats
+      .filter(chat => chat.isGroup)
+      .map(chat => ({ name: chat.name || "", id: chat.id?._serialized || "" }))
+      .filter(group => group.id);
+    res.json({ groups });
+  } catch (error) {
+    console.error("Group discovery error:", error.message || error);
+    res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get("/qr", (req, res) => {
   if (!latestQr) {
     return res.send("<html><body style='font-family:Arial;text-align:center;padding:40px'><h2>Waiting for WhatsApp QR...</h2><p>If already linked, the session may simply be starting.</p></body></html>");
