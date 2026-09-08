@@ -1,10 +1,11 @@
 {
   "name": "agent2whatsapp",
   "version": "1.0.0",
-  "description": "WhatsApp microservice for sending messages from AI agents",
-  "main": "index.js",
+  "description": "Independent health and evidence-based recovery monitor for BTSA agents",
+  "main": "maintenance.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node maintenance.js",
+    "test": "node --test maintenance.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
