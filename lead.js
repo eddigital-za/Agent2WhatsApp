@@ -164,8 +164,34 @@ app.post("/send", async (req, res) => {
 
     if (!targetChatId) return res.status(400).json({ error: "Either phone or chatId is required" });
 
+    const sentAt = Date.now();
     const result = await client.sendMessage(targetChatId, text);
-    res.json({ success: true, messageId: result?.id?._serialized || null, chatId: targetChatId });
+    let messageId = result?.id?._serialized || null;
+    let verification = "send-result";
+
+    if (!messageId) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const chat = await client.getChatById(targetChatId);
+      const recent = await chat.fetchMessages({ limit: 20, fromMe: true });
+      const confirmed = [...recent].reverse().find(message =>
+        message.body === text &&
+        Number(message.timestamp || 0) * 1000 >= sentAt - 30000
+      );
+      messageId = confirmed?.id?._serialized || null;
+      verification = "chat-history";
+    }
+
+    if (!messageId) {
+      console.error("Outbound send could not be verified", { targetChatId });
+      return res.status(502).json({
+        success: false,
+        error: "WhatsApp accepted the send call but no verifiable message ID was returned",
+        chatId: targetChatId,
+      });
+    }
+
+    console.log("Outbound WhatsApp verified", { targetChatId, messageId, verification });
+    res.json({ success: true, messageId, chatId: targetChatId, verification });
   } catch (error) {
     console.error("Send error:", error.message || error);
     res.status(500).json({ error: error.message || String(error) });
