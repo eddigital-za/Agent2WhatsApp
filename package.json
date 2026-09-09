@@ -1,10 +1,10 @@
 {
-  "name": "agent2whatsapp",
+  "name": "btsa-finance-whatsapp",
   "version": "1.0.0",
-  "description": "Dedicated BTSA WhatsApp service for lead replies and follow-ups",
-  "main": "lead.js",
+  "description": "Standalone BTSA Finance WhatsApp reporting service",
+  "main": "finance.js",
   "scripts": {
-    "start": "node lead.js"
+    "start": "node finance.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
