@@ -183,7 +183,7 @@ app.post("/lead", async (req, res) => {
       if (existing) return res.json({ success: true, accepted: true, deduplicated: true, leadId: existing.id });
     }
     const priorSent = db.prepare(`SELECT id, first_touch_sent_at FROM leads WHERE phone=? AND first_touch_sent_at IS NOT NULL AND first_touch_sent_at>=? ORDER BY first_touch_sent_at DESC LIMIT 1`).get(phone, addHoursIso(receivedAt, -24));
-    const dueAt = addMinutesIso(receivedAt, 3);
+    const dueAt = addMinutesIso(receivedAt, 0.5);
     const result = db.prepare(`INSERT INTO leads(sheet_row,submitted_at,received_at,name,phone,pickup,dropoff,bike_type,bike_make,bike_model,urgency,estimated_price,manual_review,first_touch_due_at,duplicate_suppressed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(sheetRow, submittedAt, receivedAt, b.name || "", phone, b.pickup || "", b.dropoff || "", b.motorcycleType || b.bikeType || "", b.bikeMake || "", b.bikeModel || "", b.urgency || "", String(b.estimatedPrice || b.price || ""), b.manualReview ? 1 : 0, dueAt, priorSent ? receivedAt : null);
     const leadId = Number(result.lastInsertRowid);
