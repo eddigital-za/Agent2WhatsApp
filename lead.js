@@ -7,6 +7,22 @@ const path = require("path");
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+const ALLOWED_ORIGINS = new Set([
+  "https://biketransport.co.za",
+  "https://www.biketransport.co.za",
+]);
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 const TZ = "Africa/Johannesburg";
 const REPORT_CHAT_ID = process.env.LEAD_REPORT_CHAT_ID || "120363413031194219@g.us";
 const DB_PATH = "/app/.wwebjs_auth/btsa-leads.sqlite";
@@ -171,7 +187,7 @@ app.post("/lead", async (req, res) => {
     const result = db.prepare(`INSERT INTO leads(sheet_row,submitted_at,received_at,name,phone,pickup,dropoff,bike_type,bike_make,bike_model,urgency,estimated_price,manual_review,first_touch_due_at,duplicate_suppressed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(sheetRow, submittedAt, receivedAt, b.name || "", phone, b.pickup || "", b.dropoff || "", b.motorcycleType || b.bikeType || "", b.bikeMake || "", b.bikeModel || "", b.urgency || "", String(b.estimatedPrice || b.price || ""), b.manualReview ? 1 : 0, dueAt, priorSent ? receivedAt : null);
     const leadId = Number(result.lastInsertRowid);
-    logEvent({ leadId, phone, type: "lead_received", key: sheetRow ? `lead-${sheetRow}` : null, source: "make", details: { sheetRow } });
+    logEvent({ leadId, phone, type: "lead_received", key: sheetRow ? `lead-${sheetRow}` : null, source: b.source || "railway", details: { sheetRow } });
     if (priorSent) logEvent({ leadId, phone, type: "duplicate_suppressed", key: `duplicate-${leadId}`, details: { priorLeadId: priorSent.id } });
     res.json({ success: true, accepted: true, leadId, duplicateSuppressed: Boolean(priorSent), firstTouchDueAt: priorSent ? null : dueAt });
   } catch (e) { console.error("Lead ingest error:", e); res.status(500).json({ error: e.message }); }
