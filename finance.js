@@ -48,10 +48,14 @@ function startOfLocalDay(date = new Date()) {
 }
 
 function mondayStart(date = new Date()) {
-  const d = startOfLocalDay(date);
-  const day = d.getDay();
+  const p = localDateParts(date);
+  const ymd = `${p.year}-${String(p.month).padStart(2,'0')}-${String(p.day).padStart(2,'0')}`;
+  // Determine weekday at local midday so UTC conversion cannot roll the date back.
+  const localMidday = new Date(`${ymd}T12:00:00+02:00`);
+  const day = localMidday.getUTCDay();
   const diff = day === 0 ? 6 : day - 1;
-  d.setDate(d.getDate() - diff);
+  const d = new Date(`${ymd}T00:00:00+02:00`);
+  d.setUTCDate(d.getUTCDate() - diff);
   return d;
 }
 
@@ -70,13 +74,13 @@ function summarizeInvoices(invoices, now = new Date()) {
     }))
     .filter(x => x.txnDate && x.total >= 0 && !/voided/i.test(x.privateNote));
 
-  // Monday report always covers the last fully completed Monday-Sunday week.
+  // Monday report always covers the last fully completed Monday-Sunday week in SAST.
   const currentWeekStart = mondayStart(now);
   const reportWeekStart = new Date(currentWeekStart);
-  reportWeekStart.setDate(reportWeekStart.getDate() - 7);
+  reportWeekStart.setUTCDate(reportWeekStart.getUTCDate() - 7);
   const reportWeekEnd = new Date(currentWeekStart); // exclusive
   const comparisonWeekStart = new Date(reportWeekStart);
-  comparisonWeekStart.setDate(comparisonWeekStart.getDate() - 7);
+  comparisonWeekStart.setUTCDate(comparisonWeekStart.getUTCDate() - 7);
 
   const reportWeek = clean.filter(x => x.txnDate >= reportWeekStart && x.txnDate < reportWeekEnd);
   const comparisonWeek = clean.filter(x => x.txnDate >= comparisonWeekStart && x.txnDate < reportWeekStart);
@@ -152,6 +156,8 @@ function summarizeInvoices(invoices, now = new Date()) {
     totalOutstanding,
     warnings,
     managementSummary,
+    reportWeekStart: reportWeekStart.toISOString(),
+    reportWeekEndExclusive: reportWeekEnd.toISOString(),
   };
 }
 
