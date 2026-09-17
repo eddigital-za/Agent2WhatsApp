@@ -246,13 +246,25 @@ async function processFirstTouches() {
   }
 }
 
+function followupLocation(value) {
+  const parts = String(value || "").split(",").map(s => s.trim()).filter(Boolean);
+  if (!parts.length) return "";
+  const noStreet = parts.filter(p => !/^\d+\s/.test(p) && !/^\d{4}$/.test(p) && !/south africa/i.test(p));
+  return noStreet[0] || parts[0];
+}
+
 async function processFollowups() {
   if (!client.info) return;
   const cutoff = addHoursIso(isoNow(), -24);
-  const rows = db.prepare(`SELECT * FROM leads WHERE first_touch_sent_at IS NOT NULL AND first_touch_sent_at<=? AND replied_at IS NULL AND followup_sent_at IS NULL ORDER BY first_touch_sent_at ASC LIMIT 20`).all(cutoff);
+  // Follow-up eligibility is phone-level, not row-level. A repeat enquiry can create
+  // more than one lead row for the same customer; any reply after this lead's first
+  // touch closes the automated follow-up sequence for every older row on that phone.
+  const rows = db.prepare(`SELECT l.* FROM leads l WHERE l.first_touch_sent_at IS NOT NULL AND l.first_touch_sent_at<=? AND l.replied_at IS NULL AND l.followup_sent_at IS NULL AND NOT EXISTS (SELECT 1 FROM leads r WHERE r.phone=l.phone AND r.replied_at IS NOT NULL AND r.replied_at>=l.first_touch_sent_at) ORDER BY l.first_touch_sent_at ASC LIMIT 20`).all(cutoff);
   for (const lead of rows) {
     const key = `lead-24h-followup-${lead.id}`;
-    const text = `Hi ${lead.name || "there"}, just checking in on your ${[lead.bike_make, lead.bike_model].filter(Boolean).join(" ")} transport from ${lead.pickup} to ${lead.dropoff}. If you still need it moved, let me know and I’ll check the current route availability and best rate for you.\n\nThanks, Duane`;
+    const pickup = followupLocation(lead.pickup);
+    const dropoff = followupLocation(lead.dropoff);
+    const text = `Hi ${lead.name || "there"}, just checking in on your ${[lead.bike_make, lead.bike_model].filter(Boolean).join(" ")} transport from ${pickup || lead.pickup} to ${dropoff || lead.dropoff}. If you still need it moved, let me know and I’ll check the current route availability and best rate for you.\n\nThanks, Duane`;
     try {
       const out = await sendWhatsApp({ phone: lead.phone, text, idempotencyKey: key });
       db.prepare("UPDATE leads SET followup_sent_at=? WHERE id=?").run(isoNow(), lead.id);
