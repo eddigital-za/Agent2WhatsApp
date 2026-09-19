@@ -141,6 +141,7 @@ async function sendGroup(text, key, orderId = null) {
   const result = await client.sendMessage(GROUP_ID, text);
   const messageId = result?.id?._serialized || null;
   event(orderId, 'message_sent', key, { text, messageId });
+  if (messageId && orderId) db.prepare('INSERT OR REPLACE INTO question_links(message_id,order_id,created_at) VALUES(?,?,?)').run(messageId,orderId,nowIso());
   return { messageId };
 }
 
@@ -259,7 +260,7 @@ function responseText(payload) {
   }
   return '';
 }
-async function interpretSchedulingMessage(text) {
+async function interpretSchedulingMessage(text, quotedText = '', forcedExternalId = '') {
   if (!OPENAI_API_KEY) return null;
   const orders = db.prepare("SELECT external_id,client_name,route,bike,contractor,transport_method,collection_at,delivery_at,status,completed_at FROM orders ORDER BY completed_at IS NOT NULL,created_at DESC LIMIT 60").all();
   const contractors = db.prepare('SELECT name FROM contractors WHERE active=1 ORDER BY name COLLATE NOCASE').all().map(row=>row.name);
@@ -268,6 +269,8 @@ async function interpretSchedulingMessage(text) {
     `Current timestamp: ${now.toISOString()}. Business timezone: ${TZ}. Local date: ${localDate(now)}.`,
     `Known orders: ${JSON.stringify(orders)}`,
     `Known contractors: ${JSON.stringify(contractors)}`,
+    `Quoted WhatsApp message, if any: ${JSON.stringify(String(quotedText || ''))}`,
+    `Order fixed by the quoted-message database link, if any: ${JSON.stringify(String(forcedExternalId || ''))}`,
     `WhatsApp message: ${JSON.stringify(String(text || ''))}`
   ].join('\n');
   const schema = {
@@ -298,7 +301,7 @@ async function interpretSchedulingMessage(text) {
     body:JSON.stringify({
       model:OPENAI_MODEL,
       input:[
-        {role:'system',content:`You interpret informal South African WhatsApp scheduling updates for a motorcycle transport business. Messages often come from speech-to-text and may contain missing punctuation, wrong capitals, minor spelling errors, shortened SLA references, and multiple orders. Match an order only when the number or customer/context identifies exactly one known order. Treat SLA381, SLA 381, SL381 and spoken variants as possible SLA-381. Correct obvious contractor spelling against the supplied list, including shortened company names. Resolve relative dates in ${TZ}. Do not invent a date, time, contractor, status, or order. A phrase such as this afternoon may be represented at 15:00 with expected confidence; today without a stated time uses 09:00. Null means unchanged. If a material instruction is ambiguous, use action clarify and state one short question. Return one item per intended order.`},
+        {role:'system',content:`You interpret informal South African WhatsApp scheduling updates for a motorcycle transport business. Messages often come from speech-to-text and may contain missing punctuation, wrong capitals, minor spelling errors, shortened SLA references, and multiple orders. Match an order only when the number or customer/context identifies exactly one known order. Treat SLA381, SLA 381, SL381, 381 and spoken variants as possible SLA-381. A quoted-message database link fixes the order and must be used. Otherwise quoted reminder text may identify the order. A generic message such as delivered, collected, done or cancelled with no explicit order and no quoted context is ambiguous: never guess from recency; return clarify with an empty external_id. Correct obvious contractor spelling against the supplied list, including shortened company names. Resolve relative dates in ${TZ} and return local wall-clock ISO values; 11:30 means 11:30 in ${TZ}, never 11:30 UTC. Do not invent a date, time, contractor, status, or order. Null means unchanged. If a material instruction is ambiguous, use action clarify and state one short question. Return one item per intended order.`},
         {role:'user',content:prompt}
       ],
       text:{format:{type:'json_schema',name:'btsa_scheduling_updates',strict:true,schema}}
@@ -311,6 +314,8 @@ async function interpretSchedulingMessage(text) {
 }
 function validIso(value) {
   if (!value) return null;
+  const local = String(value).match(/^(20\d{2})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (local) return atLocal(`${local[1]}-${local[2]}-${local[3]}`,Number(local[4]),Number(local[5])).toISOString();
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
@@ -407,9 +412,22 @@ async function inbound(message) {
       event(ingested.order.id, 'inbound_processed', mid, { text: message.body, newOrder: true, deduplicated: ingested.deduplicated });
       return;
     }
+    let quotedText=''; let quotedOrder=null;
+    if(message.hasQuotedMsg){
+      const quoted=await message.getQuotedMessage();
+      quotedText=quoted?.body||'';
+      const qid=quoted?.id?._serialized||'';
+      const link=qid?db.prepare('SELECT order_id FROM question_links WHERE message_id=?').get(qid):null;
+      if(link)quotedOrder=db.prepare('SELECT * FROM orders WHERE id=?').get(link.order_id);
+    }
+    if(!quotedText && /^\s*(delivered|complete|completed|collected|done|cancelled|canceled|in transit)\s*[.!]?\s*$/i.test(message.body)){
+      await sendGroup('Which SLA number is this update for?',`clarify-generic-${mid}`);
+      event(null,'inbound_clarification',mid,{text:message.body,reason:'missing_order'});
+      return;
+    }
     if (OPENAI_API_KEY) {
       try {
-        const interpreted = await interpretSchedulingMessage(message.body);
+        const interpreted = await interpretSchedulingMessage(message.body,quotedText,quotedOrder?.external_id||'');
         if (interpreted?.updates?.length) {
           for (let index=0; index<interpreted.updates.length; index++) await applyInterpretedUpdate(interpreted.updates[index],`${mid}-${index}`);
           event(null,'ai_inbound_processed',mid,{text:message.body,updates:interpreted.updates.length});
@@ -434,13 +452,7 @@ async function inbound(message) {
       }
       return;
     }
-    let order = findOrderFromText(message.body);
-    if (!order && message.hasQuotedMsg) {
-      const quoted = await message.getQuotedMessage();
-      const qid = quoted?.id?._serialized || '';
-      const link = qid ? db.prepare('SELECT order_id FROM question_links WHERE message_id=?').get(qid) : null;
-      if (link) order = db.prepare('SELECT * FROM orders WHERE id=?').get(link.order_id);
-    }
+    let order = findOrderFromText(message.body) || quotedOrder;
     if (!order) return;
     const applied = await applyUpdate(order, message.body);
     if (!applied) await sendGroup(`I found ${orderLabel(order)}, but I could not safely identify a collection/delivery date or completion instruction. Please include collection or delivery and the date.`, `clarify-${mid}`, order.id);
@@ -509,15 +521,19 @@ client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 function removeLocks(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const f=path.join(dir,e.name);if(e.isDirectory())removeLocks(f);else if(['SingletonLock','SingletonSocket','SingletonCookie'].includes(e.name)){try{fs.unlinkSync(f);}catch(_){}}}}
 removeLocks(AUTH_DIR); client.initialize();
 async function interpreterSelfTest(){
-  const key='interpreter-self-test-v1';
+  const key='interpreter-self-test-v2';
   if(!OPENAI_API_KEY||db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const sample=`SLA381 in transit delivery will be today BTSA doing the delivery\nSL382 in transit with Cheetah Express delivery will be today at approximately 11:30\nSLA385 Cheeta Express delivered an hour ago\nSLA386 in transit with Speedway express shared revenue trip delivery expected this afternoon`;
   const result=await interpretSchedulingMessage(sample);
   const ids=(result?.updates||[]).map(update=>orderKey(update.external_id));
   const expected=['SLA381','SLA382','SLA385','SLA386'];
   if(expected.some(id=>!ids.includes(id)))throw new Error(`Interpreter self-test order mismatch: ${ids.join(',')}`);
+  const short=await interpretSchedulingMessage('381 delivered');
+  if(orderKey(short?.updates?.[0]?.external_id)!=='SLA381'||short?.updates?.[0]?.status!=='completed')throw new Error('Interpreter self-test failed for short numeric update');
+  const quoted=await interpretSchedulingMessage('Delivered','Delivery reminder: SLA-381 | Alan Boyd | Honda XR650L','SLA-381');
+  if(orderKey(quoted?.updates?.[0]?.external_id)!=='SLA381'||quoted?.updates?.[0]?.status!=='completed')throw new Error('Interpreter self-test failed for quoted update');
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
-  console.log(`AI scheduling interpreter verified with ${result.updates.length} structured updates`);
+  console.log(`AI scheduling interpreter verified: multi-order=${result.updates.length}, short-form=true, quoted-reply=true`);
 }
 const PORT=Number(process.env.PORT||4000); app.listen(PORT,()=>{
   console.log(`BTSA Scheduling Agent listening on ${PORT}; SQLite ${DB_PATH}; shadow=${SHADOW_MODE}; ai=${Boolean(OPENAI_API_KEY)}`);
