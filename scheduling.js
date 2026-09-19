@@ -411,7 +411,6 @@ async function confirmProof(proofId,orderId){
 }
 async function handleProofPhoto(message,quotedOrder){
   const stage=proofStage(message.body||'');
-  if(!stage){await sendGroup('Is this a collection or delivery photo?',`proof-stage-${message.id?._serialized||Date.now()}`);return true;}
   const media=await getInboundMedia(message);
   if(!media?.data)throw new Error('WhatsApp returned no image data');
   if(!String(media.mimetype||'').startsWith('image/')){await sendGroup('Please send a photo for collection or delivery proof.',`proof-image-${message.id?._serialized||Date.now()}`);return true;}
@@ -420,6 +419,13 @@ async function handleProofPhoto(message,quotedOrder){
   const filePath=path.join(PROOF_DIR,filename);
   fs.writeFileSync(filePath,Buffer.from(media.data,'base64'));
   let order=findOrderFromText(message.body)||quotedOrder||null;
+  if(!stage){
+    db.prepare('INSERT OR IGNORE INTO proofs(order_id,stage,whatsapp_message_id,mime_type,filename,file_path,vision_json,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(order?.id||null,'unknown',mid,media.mimetype,filename,filePath,'{}','awaiting_stage',nowIso());
+    const proof=db.prepare('SELECT * FROM proofs WHERE whatsapp_message_id=?').get(mid);
+    const out=await sendGroup('Is this a collection or delivery photo? Reply with Collection or Delivery. Add the SLA number if you know it.',`proof-stage-${proof.id}`,order?.id||null);
+    if(out.messageId)db.prepare('INSERT OR REPLACE INTO proof_links(message_id,proof_id,created_at) VALUES(?,?,?)').run(out.messageId,proof.id,nowIso());
+    return true;
+  }
   let vision={};
   if(!order&&OPENAI_API_KEY)vision=await analyzeProofPhoto(media,message.body||'',stage);
   if(!order&&vision.external_id)order=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(vision.external_id);
@@ -609,9 +615,23 @@ async function inbound(message) {
     const questionLink=linkedRowForQuotedIds('question_links','order_id',quote.ids);
     const quotedOrder=questionLink?db.prepare('SELECT * FROM orders WHERE id=?').get(questionLink.order_id):null;
     if(message.hasMedia){await handleProofPhoto(message,quotedOrder);return;}
-    const proofLink=linkedRowForQuotedIds('proof_links','proof_id',quote.ids);
+    let proofLink=linkedRowForQuotedIds('proof_links','proof_id',quote.ids);
+    if(!proofLink&&proofStage(message.body||'')){
+      const cutoff=new Date(Date.now()-30*60*1000).toISOString();
+      proofLink=db.prepare("SELECT id AS proof_id FROM proofs WHERE status='awaiting_stage' AND created_at>=? ORDER BY id DESC LIMIT 1").get(cutoff);
+    }
     if(proofLink){
       const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(proofLink.proof_id);
+      if(proof?.status==='awaiting_stage'){
+        const stage=proofStage(message.body||'');
+        const order=findOrderFromText(message.body)||quotedOrder||(proof.order_id?db.prepare('SELECT * FROM orders WHERE id=?').get(proof.order_id):null);
+        if(!stage){await sendGroup('Please reply with Collection or Delivery. Add the SLA number if you know it.',`proof-stage-retry-${proof.id}`);return;}
+        db.prepare("UPDATE proofs SET stage=?,order_id=?,status=? WHERE id=?").run(stage,order?.id||null,order?'ready':'awaiting_confirmation',proof.id);
+        if(order){await confirmProof(proof.id,order.id);return;}
+        const out=await sendGroup(`I have the ${stage} photo. Which SLA number is it for?`,`proof-order-${proof.id}`);
+        if(out.messageId)db.prepare('INSERT OR REPLACE INTO proof_links(message_id,proof_id,created_at) VALUES(?,?,?)').run(out.messageId,proof.id,nowIso());
+        return;
+      }
       let order=/^\s*(yes|y|confirm|correct|yep|yeah)\s*[.!]?\s*$/i.test(message.body||'')&&proof?.order_id?db.prepare('SELECT * FROM orders WHERE id=?').get(proof.order_id):findOrderFromText(message.body);
       if(order){await confirmProof(proof.id,order.id);return;}
       await sendGroup('Reply with YES to confirm my suggested match, or send the correct SLA number.',`proof-retry-${mid}`);
