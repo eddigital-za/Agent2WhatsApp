@@ -302,6 +302,53 @@ function proofStage(text) {
 function extensionForMime(mime) {
   return ({'image/jpeg':'jpg','image/png':'png','image/webp':'webp','image/heic':'heic'}[mime] || 'bin');
 }
+async function downloadMediaFromEventData(message) {
+  const data=message?._data||{};
+  const args={
+    directPath:data.directPath,
+    encFilehash:data.encFilehash,
+    filehash:data.filehash,
+    mediaKey:data.mediaKey,
+    mediaKeyTimestamp:data.mediaKeyTimestamp,
+    type:data.type||message.type,
+    mimetype:data.mimetype,
+    filename:data.filename||null
+  };
+  if(!args.directPath||!args.mediaKey)throw new Error('WhatsApp media metadata incomplete');
+  return client.pupPage.evaluate(async mediaArgs=>{
+    const managerModule=window.require('WAWebDownloadManager');
+    const manager=managerModule.downloadManager||managerModule;
+    const mockQpl={addAnnotations(){return this;},addPoint(){return this;}};
+    const decrypted=await manager.downloadAndMaybeDecrypt({
+      directPath:mediaArgs.directPath,
+      encFilehash:mediaArgs.encFilehash,
+      filehash:mediaArgs.filehash,
+      mediaKey:mediaArgs.mediaKey,
+      mediaKeyTimestamp:mediaArgs.mediaKeyTimestamp,
+      type:mediaArgs.type,
+      signal:new AbortController().signal,
+      downloadQpl:mockQpl
+    });
+    return {
+      data:await window.WWebJS.arrayBufferToBase64Async(decrypted),
+      mimetype:mediaArgs.mimetype||'application/octet-stream',
+      filename:mediaArgs.filename||null
+    };
+  },args);
+}
+async function getInboundMedia(message) {
+  try{
+    const media=await message.downloadMedia();
+    if(media?.data)return media;
+    throw new Error('downloadMedia returned no data');
+  }catch(primaryError){
+    console.warn('Standard media download failed; using event-data fallback:',primaryError?.message||String(primaryError));
+    const media=await downloadMediaFromEventData(message);
+    if(!media?.data)throw new Error('WhatsApp media fallback returned no data');
+    console.log('Event-data media fallback succeeded');
+    return media;
+  }
+}
 async function analyzeProofPhoto(media, caption, stage) {
   const candidates=db.prepare("SELECT external_id,client_name,route,bike,contractor,collection_at,delivery_at,status FROM orders WHERE status NOT IN ('cancelled') ORDER BY completed_at IS NOT NULL,updated_at DESC LIMIT 40").all();
   const schema={type:'object',additionalProperties:false,properties:{
@@ -341,7 +388,7 @@ async function confirmProof(proofId,orderId){
 async function handleProofPhoto(message,quotedOrder){
   const stage=proofStage(message.body||'');
   if(!stage){await sendGroup('Is this a collection or delivery photo?',`proof-stage-${message.id?._serialized||Date.now()}`);return true;}
-  const media=await message.downloadMedia();
+  const media=await getInboundMedia(message);
   if(!media?.data)throw new Error('WhatsApp returned no image data');
   if(!String(media.mimetype||'').startsWith('image/')){await sendGroup('Please send a photo for collection or delivery proof.',`proof-image-${message.id?._serialized||Date.now()}`);return true;}
   const mid=message.id?._serialized||crypto.randomUUID();
@@ -587,7 +634,13 @@ async function inbound(message) {
     const applied = await applyUpdate(order, message.body);
     if (!applied) await sendGroup(`I found ${orderLabel(order)}, but I could not safely identify a collection/delivery date or completion instruction. Please include collection or delivery and the date.`, `clarify-${mid}`, order.id);
     event(order.id,'inbound_processed',mid,{text:message.body});
-  } catch (e) { console.error('Inbound scheduling error:',e.message); }
+  } catch (e) {
+    const detail=e?.message||String(e);
+    console.error('Inbound scheduling error:',detail,e?.stack||'');
+    if(message.hasMedia){
+      try{await sendGroup('I received the photo but could not process it. Please resend it once.',`proof-error-${message.id?._serialized||Date.now()}`);}catch(replyError){console.error('Failed to send proof error reply:',replyError?.message||String(replyError));}
+    }
+  }
 }
 
 app.get('/health',(req,res)=>{ let databaseReady=false; try{db.prepare('SELECT 1').get();databaseReady=true;}catch(_){} res.json({ok:true,whatsappReady:Boolean(client.info),databaseReady,shadowMode:SHADOW_MODE,lastInboundAt}); });
