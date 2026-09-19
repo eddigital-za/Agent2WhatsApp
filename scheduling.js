@@ -62,7 +62,34 @@ CREATE TABLE IF NOT EXISTS report_runs (
   run_key TEXT PRIMARY KEY,
   sent_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS contractors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE COLLATE NOCASE NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `);
+
+const SHEET_CONTRACTORS = [
+  'UBT',
+  'Cheetah Express',
+  'Bike Transport',
+  'Armand',
+  'Bike in Motion',
+  'DJ Bike Transport',
+  'Ross - Speedway Express',
+  'BTSA',
+  'Boat Express',
+  'George',
+  'Assets in Motion',
+  'Moto Movers'
+];
+const seedContractor = db.prepare(`
+  INSERT INTO contractors(name,active,created_at,updated_at) VALUES(?,1,?,?)
+  ON CONFLICT(name) DO UPDATE SET active=1,updated_at=excluded.updated_at
+`);
+for (const name of SHEET_CONTRACTORS) seedContractor.run(name, new Date().toISOString(), new Date().toISOString());
 
 function nowIso() { return new Date().toISOString(); }
 function localParts(date = new Date()) {
@@ -193,6 +220,11 @@ function parseDate(text) {
   return date;
 }
 function confidence(text) { return /\b(probably|maybe|expected|likely|should|provisional|tentative)\b/i.test(text) ? 'expected' : 'confirmed'; }
+function normalizedContractor(value) {
+  const input = String(value || '').toLowerCase();
+  return db.prepare('SELECT name FROM contractors WHERE active=1 ORDER BY length(name) DESC').all()
+    .find(row => input.includes(String(row.name).toLowerCase()))?.name || null;
+}
 function findOrderFromText(text) {
   const ids = db.prepare("SELECT * FROM orders WHERE completed_at IS NULL ORDER BY created_at DESC").all();
   const lower = String(text || '').toLowerCase();
@@ -233,9 +265,9 @@ async function applyUpdate(o, text) {
     else db.prepare("UPDATE orders SET collection_at=?,collection_confidence=?,status='scheduled',updated_at=? WHERE id=?").run(date.toISOString(),conf,nowIso(),o.id);
     changed=true;
   }
-  const contractor = text.match(/\b(tita express|inyameko|marthinus express|cheetah express|ultimate bike transport|btsa)\b/i);
+  const contractor = normalizedContractor(text);
   if (contractor) {
-    db.prepare('UPDATE orders SET contractor=?,transport_method=?,updated_at=? WHERE id=?').run(contractor[1],/btsa/i.test(contractor[1])?'BTSA':'subcontractor',nowIso(),o.id);
+    db.prepare('UPDATE orders SET contractor=?,transport_method=?,updated_at=? WHERE id=?').run(contractor,/^btsa$/i.test(contractor)?'BTSA':'subcontractor',nowIso(),o.id);
     changed=true;
   }
   if (!changed) return false;
@@ -276,6 +308,14 @@ async function inbound(message) {
 app.get('/health',(req,res)=>{ let databaseReady=false; try{db.prepare('SELECT 1').get();databaseReady=true;}catch(_){} res.json({ok:true,whatsappReady:Boolean(client.info),databaseReady,shadowMode:SHADOW_MODE,lastInboundAt}); });
 app.get('/qr',(req,res)=>{ if(!latestQr)return res.send('<h2>Waiting for WhatsApp QR or already connected</h2>'); res.send(`<!doctype html><title>BTSA Scheduling QR</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><h2>Link BTSA Scheduling Agent</h2><div id="q"></div><script>new QRCode(document.getElementById('q'),{text:${JSON.stringify(latestQr)},width:320,height:320});</script>`); });
 app.get('/orders',auth,(req,res)=>res.json(db.prepare('SELECT * FROM orders ORDER BY completed_at IS NOT NULL, COALESCE(collection_at,delivery_at,created_at)').all()));
+app.get('/contractors',auth,(req,res)=>res.json(db.prepare('SELECT name,active,created_at,updated_at FROM contractors ORDER BY name COLLATE NOCASE').all()));
+app.post('/contractors',auth,(req,res)=>{
+  const name=String(req.body?.name||'').trim();
+  if(!name)return res.status(400).json({error:'name is required'});
+  const now=nowIso();
+  db.prepare(`INSERT INTO contractors(name,active,created_at,updated_at) VALUES(?,1,?,?) ON CONFLICT(name) DO UPDATE SET active=1,updated_at=excluded.updated_at`).run(name,now,now);
+  res.json({success:true,contractor:db.prepare('SELECT name,active,created_at,updated_at FROM contractors WHERE name=? COLLATE NOCASE').get(name)});
+});
 app.post('/order',auth,async(req,res)=>{
   try{
     const b=req.body||{}; const externalId=String(b.externalId||b.entryId||b.orderId||'').trim();
