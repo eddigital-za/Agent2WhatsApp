@@ -12,5 +12,10 @@
   "dependencies": {
     "express": "^4.21.2",
     "whatsapp-web.js": "^1.28.0"
+  },
+  "overrides": {
+    "puppeteer": "25.11.0",
+    "puppeteer-core": "25.11.0",
+    "@puppeteer/browsers": "3.2.2"
   }
 }
