@@ -3,13 +3,15 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const app = express();
-app.use(express.json({ limit: "30mb" }));
+app.use(express.json({ limit: "30mb", verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 app.use(cors());
 
 const MEDIA_DIR = path.join("/tmp", "whatsapp-media");
 const STATE_FILE = "/app/.wwebjs_auth/btsa-social-pending.json";
+const PROOF_EVENTS_FILE = "/app/.wwebjs_auth/btsa-social-proof-events.json";
 const PUBLISH_WEBHOOK_URL = "https://hook.eu2.make.com/yijj3ssp95599eb7qfbarmogpcbwffdb";
 if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
 app.use("/media", express.static(MEDIA_DIR, { fallthrough: false, maxAge: "1h" }));
@@ -25,6 +27,25 @@ function savePending(value) {
   } catch (e) {
     console.error("Pending-state write failed:", e.message);
   }
+}
+
+function loadProofEvents() {
+  try { return new Set(JSON.parse(fs.readFileSync(PROOF_EVENTS_FILE, "utf8"))); } catch (_) { return new Set(); }
+}
+
+function rememberProofEvent(eventId) {
+  const events = loadProofEvents();
+  events.add(eventId);
+  fs.writeFileSync(PROOF_EVENTS_FILE, JSON.stringify([...events].slice(-1000)));
+}
+
+function validHmac(req) {
+  const secret = process.env.AGENT_HANDOFF_SECRET || "";
+  const supplied = String(req.get("x-btsa-signature") || "");
+  if (!secret || !supplied || !req.rawBody) return false;
+  const expected = crypto.createHmac("sha256", secret).update(req.rawBody).digest("hex");
+  const a = Buffer.from(supplied); const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 function getPublicBaseUrl() {
@@ -94,6 +115,50 @@ let latestQr = null;
 
 app.get("/health", (req, res) => {
   res.json({ ok: true, whatsappReady: Boolean(client.info) });
+});
+app.post("/proof", async (req, res) => {
+  try {
+    if (!validHmac(req)) return res.status(401).json({ error: "Invalid signature" });
+    const event = req.body || {};
+    if (event.eventType !== "delivery_proof_received" || !event.eventId) return res.status(400).json({ error: "Invalid proof event" });
+    if (loadProofEvents().has(event.eventId)) return res.json({ success: true, deduplicated: true });
+    const proof = event.proof || {}; const order = event.order || {}; const privacy = event.privacy || {};
+    if (!proof.mediaData || !String(proof.mimeType || "").startsWith("image/")) return res.status(400).json({ error: "Image proof is required" });
+    if (!process.env.MAKE_WEBHOOK_URL) return res.status(503).json({ error: "MAKE_WEBHOOK_URL is not configured" });
+    const warnings = [privacy.containsFace ? "face visible" : "", privacy.containsNumberPlate ? "number plate visible" : "", privacy.containsAddressOrDocument ? "address or document visible" : "", privacy.note || ""].filter(Boolean).join("; ") || "none detected";
+    const context = [
+      "DELIVERY PROOF RECEIVED FROM THE SCHEDULING AGENT.",
+      `Bike: ${order.bike || "motorcycle"}`,
+      `Route: ${order.route || "not supplied"}`,
+      `Privacy review: ${warnings}`,
+      "Create a BTSA social caption draft for approval. Do not include the SLA number, customer name, exact address, or subcontractor. Flag any privacy concern clearly. Do not publish automatically."
+    ].join("\n");
+    const payload = {
+      from: process.env.ALLOWED_GROUP_ID || "scheduling-agent",
+      phone: "",
+      text: context,
+      messageId: event.eventId,
+      timestamp: Math.floor(Date.now() / 1000),
+      type: "image",
+      hasMedia: true,
+      mediaType: proof.mimeType,
+      mediaFilename: proof.filename || `${event.eventId}.jpg`,
+      mediaData: proof.mediaData,
+      mediaUrl: null,
+      media: { mimetype: proof.mimeType, filename: proof.filename || `${event.eventId}.jpg`, data: proof.mediaData, url: null },
+      source: "btsa-scheduling-agent",
+      orderContext: { bike: order.bike || "", route: order.route || "", stage: proof.stage || "delivery" },
+      privacy
+    };
+    const response = await fetch(process.env.MAKE_WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response.ok) throw new Error(`Make webhook HTTP ${response.status}: ${await response.text()}`);
+    rememberProofEvent(event.eventId);
+    console.log("Scheduling proof handed to social draft workflow:", event.eventId);
+    res.json({ success: true, deduplicated: false });
+  } catch (error) {
+    console.error("Scheduling proof intake failed:", error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 app.get("/qr", (req, res) => {
   if (!latestQr) {
