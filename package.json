@@ -1,18 +1,16 @@
 {
-  "name": "agent2whatsapp",
-  "version": "1.1.0",
-  "description": "Dedicated BTSA WhatsApp lead service with persistent server-side state",
-  "main": "lead.js",
+  "name": "btsa-scheduling-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone BTSA WhatsApp scheduling and reminder agent",
+  "main": "scheduling.js",
   "scripts": {
-    "start": "node lead.js"
+    "start": "node scheduling.js",
+    "check": "node --check scheduling.js"
   },
-  "engines": {
-    "node": ">=22.5.0"
-  },
+  "engines": { "node": ">=22.5.0" },
   "dependencies": {
-    "cors": "^2.8.5",
     "express": "^4.21.2",
-    "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.28.0"
   }
 }

@@ -1,0 +1,289 @@
+const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const { DatabaseSync } = require('node:sqlite');
+
+const app = express();
+app.use(express.json({ limit: '2mb' }));
+
+const TZ = 'Africa/Johannesburg';
+const AUTH_DIR = '/app/.wwebjs_auth';
+const DB_PATH = path.join(AUTH_DIR, 'btsa-scheduling.sqlite');
+const GROUP_ID = process.env.ORDERS_GROUP_ID || '';
+const API_KEY = process.env.INTAKE_API_KEY || '';
+const CALENDAR_WEBHOOK_URL = process.env.CALENDAR_WEBHOOK_URL || '';
+const CALENDAR_WEBHOOK_SECRET = process.env.CALENDAR_WEBHOOK_SECRET || '';
+const SHADOW_MODE = String(process.env.SHADOW_MODE || 'true').toLowerCase() === 'true';
+const MORNING_HOUR = Number(process.env.MORNING_SUMMARY_HOUR || 7);
+const EVENING_HOUR = Number(process.env.EVENING_SUMMARY_HOUR || 17);
+
+if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+const db = new DatabaseSync(DB_PATH);
+db.exec(`
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  external_id TEXT UNIQUE NOT NULL,
+  client_name TEXT,
+  route TEXT,
+  bike TEXT,
+  contractor TEXT,
+  transport_method TEXT,
+  collection_at TEXT,
+  collection_confidence TEXT DEFAULT 'unknown',
+  delivery_at TEXT,
+  delivery_confidence TEXT DEFAULT 'unknown',
+  status TEXT DEFAULT 'unscheduled',
+  next_action TEXT,
+  next_action_at TEXT,
+  calendar_collection_id TEXT,
+  calendar_delivery_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_next_action ON orders(next_action_at);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  order_id INTEGER,
+  event_type TEXT NOT NULL,
+  event_key TEXT UNIQUE,
+  details TEXT
+);
+CREATE TABLE IF NOT EXISTS question_links (
+  message_id TEXT PRIMARY KEY,
+  order_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS report_runs (
+  run_key TEXT PRIMARY KEY,
+  sent_at TEXT NOT NULL
+);
+`);
+
+function nowIso() { return new Date().toISOString(); }
+function localParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short'
+  }).formatToParts(date);
+  return Object.fromEntries(parts.map(p => [p.type, p.value]));
+}
+function localDate(date = new Date()) { const p = localParts(date); return `${p.year}-${p.month}-${p.day}`; }
+function localHour(date = new Date()) { return Number(localParts(date).hour); }
+function localMinute(date = new Date()) { return Number(localParts(date).minute); }
+function atLocal(dateString, hour = 8, minute = 0) { return new Date(`${dateString}T${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}:00+02:00`); }
+function addDays(date, days) { return new Date(date.getTime() + days * 86400000); }
+function fmt(dateValue) {
+  if (!dateValue) return 'Not scheduled';
+  return new Intl.DateTimeFormat('en-ZA', { timeZone: TZ, weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(dateValue));
+}
+function event(orderId, type, key, details = null) {
+  db.prepare('INSERT OR IGNORE INTO events(created_at,order_id,event_type,event_key,details) VALUES(?,?,?,?,?)')
+    .run(nowIso(), orderId, type, key || null, details ? JSON.stringify(details) : null);
+}
+function auth(req, res, next) {
+  if (!API_KEY) return res.status(503).json({ error: 'INTAKE_API_KEY is not configured' });
+  const supplied = String(req.get('x-api-key') || '');
+  const a = Buffer.from(supplied); const b = Buffer.from(API_KEY);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: 'Unauthorized' });
+  next();
+}
+
+const client = new Client({
+  authStrategy: new LocalAuth({ dataPath: AUTH_DIR, clientId: 'btsa-scheduling' }),
+  puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium', args: ['--no-sandbox','--disable-setuid-sandbox'] }
+});
+let latestQr = null;
+let lastInboundAt = null;
+
+async function sendGroup(text, key, orderId = null) {
+  if (!GROUP_ID) throw new Error('ORDERS_GROUP_ID is not configured');
+  if (key && db.prepare('SELECT 1 FROM events WHERE event_key=?').get(key)) return { deduplicated: true };
+  if (SHADOW_MODE) {
+    event(orderId, 'shadow_message', key, { text });
+    console.log('[SHADOW]', text);
+    return { shadow: true };
+  }
+  if (!client.info) throw new Error('WhatsApp session is not ready');
+  const result = await client.sendMessage(GROUP_ID, text);
+  const messageId = result?.id?._serialized || null;
+  event(orderId, 'message_sent', key, { text, messageId });
+  return { messageId };
+}
+
+function orderLabel(o) { return `${o.external_id}${o.client_name ? ` | ${o.client_name}` : ''}${o.route ? ` | ${o.route}` : ''}`; }
+function missingQuestion(o) {
+  const missing = [];
+  if (!o.collection_at) missing.push('collection date');
+  if (!o.delivery_at) missing.push('delivery date');
+  if (!o.contractor && !o.transport_method) missing.push('BTSA/subcontractor assignment');
+  return `*Scheduling information needed: ${o.external_id}*\n${[o.client_name,o.bike,o.route].filter(Boolean).join(' | ')}\nMissing: ${missing.join(', ')}.\nReply to this message with the schedule update.`;
+}
+async function askForMissing(o) {
+  if (o.collection_at && o.delivery_at && (o.contractor || o.transport_method)) return;
+  const key = `missing-info-${o.id}-${localDate()}`;
+  const out = await sendGroup(missingQuestion(o), key, o.id);
+  if (out.messageId) db.prepare('INSERT OR REPLACE INTO question_links(message_id,order_id,created_at) VALUES(?,?,?)').run(out.messageId, o.id, nowIso());
+}
+
+function nextWeekday(base, weekday, forceNextWeek) {
+  const p = localDate(base);
+  const local = atLocal(p, 9, 0);
+  let delta = (weekday - local.getUTCDay() + 7) % 7;
+  if (forceNextWeek || delta === 0) delta += 7;
+  return addDays(local, delta);
+}
+function parseDate(text) {
+  const t = String(text || '').toLowerCase();
+  const today = atLocal(localDate(), 9, 0);
+  let date = null;
+  if (/\btoday\b/.test(t)) date = today;
+  else if (/\btomorrow\b/.test(t)) date = addDays(today, 1);
+  else {
+    const iso = t.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+    const za = t.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](20\d{2}))?\b/);
+    if (iso) date = atLocal(`${iso[1]}-${iso[2]}-${iso[3]}`, 9, 0);
+    else if (za) date = atLocal(`${za[3] || localParts().year}-${String(za[2]).padStart(2,'0')}-${String(za[1]).padStart(2,'0')}`, 9, 0);
+    else {
+      const weekdays = { sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6 };
+      for (const [name, day] of Object.entries(weekdays)) if (new RegExp(`\\b${name}\\b`).test(t)) { date = nextWeekday(new Date(), day, /\bnext\s+/.test(t)); break; }
+    }
+  }
+  if (!date) return null;
+  const tm = t.match(/\b([01]?\d|2[0-3])[:h]([0-5]\d)\b/);
+  if (tm) date = atLocal(localDate(date), Number(tm[1]), Number(tm[2]));
+  return date;
+}
+function confidence(text) { return /\b(probably|maybe|expected|likely|should|provisional|tentative)\b/i.test(text) ? 'expected' : 'confirmed'; }
+function findOrderFromText(text) {
+  const ids = db.prepare("SELECT * FROM orders WHERE completed_at IS NULL ORDER BY created_at DESC").all();
+  const lower = String(text || '').toLowerCase();
+  const exact = ids.filter(o => lower.includes(String(o.external_id).toLowerCase()));
+  if (exact.length === 1) return exact[0];
+  const name = ids.filter(o => o.client_name && lower.includes(String(o.client_name).toLowerCase()));
+  return name.length === 1 ? name[0] : null;
+}
+async function syncCalendar(o) {
+  if (!CALENDAR_WEBHOOK_URL) return;
+  const payload = JSON.stringify({ action:'upsert', order:o, timezone:TZ });
+  const signature = CALENDAR_WEBHOOK_SECRET ? crypto.createHmac('sha256', CALENDAR_WEBHOOK_SECRET).update(payload).digest('hex') : '';
+  const response = await fetch(CALENDAR_WEBHOOK_URL, { method:'POST', headers:{'content-type':'application/json','x-btsa-signature':signature}, body:payload });
+  if (!response.ok) throw new Error(`Calendar webhook HTTP ${response.status}`);
+}
+function recalc(o) {
+  const now = new Date();
+  const candidates = [];
+  for (const [kind, value] of [['collection',o.collection_at],['delivery',o.delivery_at]]) {
+    if (!value) continue;
+    const when = new Date(value);
+    candidates.push({ at:addDays(when,-2), action:`${kind}_two_day` });
+    candidates.push({ at:addDays(when,-1), action:`${kind}_one_day` });
+    candidates.push({ at:when, action:`${kind}_due` });
+  }
+  const next = candidates.filter(x=>x.at>now).sort((a,b)=>a.at-b.at)[0];
+  db.prepare('UPDATE orders SET next_action=?,next_action_at=?,updated_at=? WHERE id=?').run(next?.action || null,next?.at.toISOString() || null,nowIso(),o.id);
+}
+async function applyUpdate(o, text) {
+  const date = parseDate(text);
+  const lower = text.toLowerCase();
+  let changed = false;
+  if (/\b(cancel|cancelled)\b/.test(lower)) { db.prepare("UPDATE orders SET status='cancelled',completed_at=?,updated_at=? WHERE id=?").run(nowIso(),nowIso(),o.id); changed=true; }
+  else if (/\b(completed|complete|delivered)\b/.test(lower) && !date) { db.prepare("UPDATE orders SET status='completed',completed_at=?,updated_at=? WHERE id=?").run(nowIso(),nowIso(),o.id); changed=true; }
+  else if (date) {
+    const conf = confidence(text);
+    if (/\bdeliver/.test(lower)) db.prepare("UPDATE orders SET delivery_at=?,delivery_confidence=?,status='scheduled',updated_at=? WHERE id=?").run(date.toISOString(),conf,nowIso(),o.id);
+    else db.prepare("UPDATE orders SET collection_at=?,collection_confidence=?,status='scheduled',updated_at=? WHERE id=?").run(date.toISOString(),conf,nowIso(),o.id);
+    changed=true;
+  }
+  const contractor = text.match(/\b(tita express|inyameko|marthinus express|cheetah express|ultimate bike transport|btsa)\b/i);
+  if (contractor) {
+    db.prepare('UPDATE orders SET contractor=?,transport_method=?,updated_at=? WHERE id=?').run(contractor[1],/btsa/i.test(contractor[1])?'BTSA':'subcontractor',nowIso(),o.id);
+    changed=true;
+  }
+  if (!changed) return false;
+  const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(o.id);
+  recalc(updated);
+  await syncCalendar(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
+  await sendGroup(`*${updated.external_id} updated*\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor || updated.transport_method || 'Not assigned'}\nStatus: ${updated.status}`, `update-confirm-${updated.id}-${Date.now()}`, updated.id);
+  return true;
+}
+
+const seen = new Set();
+async function inbound(message) {
+  try {
+    if (message.fromMe || message.from !== GROUP_ID || !message.body) return;
+    const mid = message.id?._serialized || '';
+    if (mid && seen.has(mid)) return;
+    if (mid) { seen.add(mid); if (seen.size>5000) seen.clear(); }
+    lastInboundAt = nowIso();
+    let order = findOrderFromText(message.body);
+    if (!order && message.hasQuotedMsg) {
+      const quoted = await message.getQuotedMessage();
+      const qid = quoted?.id?._serialized || '';
+      const link = qid ? db.prepare('SELECT order_id FROM question_links WHERE message_id=?').get(qid) : null;
+      if (link) order = db.prepare('SELECT * FROM orders WHERE id=?').get(link.order_id);
+    }
+    if (!order) return;
+    const applied = await applyUpdate(order, message.body);
+    if (!applied) await sendGroup(`I found ${orderLabel(order)}, but I could not safely identify a collection/delivery date or completion instruction. Please include collection or delivery and the date.`, `clarify-${mid}`, order.id);
+    event(order.id,'inbound_processed',mid,{text:message.body});
+  } catch (e) { console.error('Inbound scheduling error:',e.message); }
+}
+
+app.get('/health',(req,res)=>{ let databaseReady=false; try{db.prepare('SELECT 1').get();databaseReady=true;}catch(_){} res.json({ok:true,whatsappReady:Boolean(client.info),databaseReady,shadowMode:SHADOW_MODE,lastInboundAt}); });
+app.get('/qr',(req,res)=>{ if(!latestQr)return res.send('<h2>Waiting for WhatsApp QR or already connected</h2>'); res.send(`<!doctype html><title>BTSA Scheduling QR</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><h2>Link BTSA Scheduling Agent</h2><div id="q"></div><script>new QRCode(document.getElementById('q'),{text:${JSON.stringify(latestQr)},width:320,height:320});</script>`); });
+app.get('/orders',auth,(req,res)=>res.json(db.prepare('SELECT * FROM orders ORDER BY completed_at IS NOT NULL, COALESCE(collection_at,delivery_at,created_at)').all()));
+app.post('/order',auth,async(req,res)=>{
+  try{
+    const b=req.body||{}; const externalId=String(b.externalId||b.entryId||b.orderId||'').trim();
+    if(!externalId)return res.status(400).json({error:'externalId is required'});
+    const existing=db.prepare('SELECT * FROM orders WHERE external_id=?').get(externalId);
+    if(existing)return res.json({success:true,deduplicated:true,order:existing});
+    const now=nowIso();
+    const r=db.prepare('INSERT INTO orders(external_id,client_name,route,bike,contractor,transport_method,collection_at,delivery_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+      .run(externalId,b.clientName||b.name||'',b.route||'',b.bike||[b.make,b.model].filter(Boolean).join(' '),b.contractor||'',b.transportMethod||'',b.collectionAt||null,b.deliveryAt||null,(b.collectionAt||b.deliveryAt)?'scheduled':'unscheduled',now,now);
+    const o=db.prepare('SELECT * FROM orders WHERE id=?').get(Number(r.lastInsertRowid));
+    recalc(o); event(o.id,'order_received',`order-${externalId}`,{source:b.source||'webhook'}); await syncCalendar(o); await askForMissing(o);
+    res.json({success:true,deduplicated:false,order:db.prepare('SELECT * FROM orders WHERE id=?').get(o.id)});
+  }catch(e){console.error('Order intake error:',e);res.status(500).json({error:e.message});}
+});
+app.post('/send',auth,async(req,res)=>{try{res.json(await sendGroup(req.body.text,req.body.idempotencyKey||`manual-${Date.now()}`));}catch(e){res.status(500).json({error:e.message});}});
+
+async function dueReminders(){
+  const rows=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND next_action_at IS NOT NULL AND next_action_at<=? ORDER BY next_action_at LIMIT 20").all(nowIso());
+  for(const o of rows){
+    const action=o.next_action; const kind=action.startsWith('collection')?'Collection':'Delivery';
+    const when=kind==='Collection'?o.collection_at:o.delivery_at;
+    await sendGroup(`*${kind} reminder: ${o.external_id}*\n${[o.client_name,o.bike,o.route].filter(Boolean).join(' | ')}\nScheduled: ${fmt(when)}\nAssigned: ${o.contractor||o.transport_method||'Not assigned'}\nReply with an update if this has changed.`, `reminder-${o.id}-${action}`,o.id);
+    db.prepare('UPDATE orders SET next_action_at=NULL,next_action=NULL,updated_at=? WHERE id=?').run(nowIso(),o.id);
+    recalc(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
+  }
+}
+async function summary(period){
+  const key=`${period}-summary-${localDate()}`; if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY COALESCE(collection_at,delivery_at,created_at)").all();
+  const lines=open.slice(0,30).map(o=>`• ${o.external_id}: C ${fmt(o.collection_at)} | D ${fmt(o.delivery_at)} | ${o.contractor||o.transport_method||'unassigned'}`);
+  await sendGroup(`*BTSA scheduling ${period} summary*\nOpen orders: ${open.length}\n${lines.join('\n')||'No open orders.'}`,key);
+  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+}
+setInterval(()=>dueReminders().catch(console.error),60000);
+setInterval(()=>{
+  if(localMinute()!==0)return;
+  if(localHour()===MORNING_HOUR)summary('morning').catch(console.error);
+  if(localHour()===EVENING_HOUR)summary('evening').catch(console.error);
+},60000);
+
+client.on('message',inbound); client.on('message_create',inbound);
+client.on('qr',qr=>{latestQr=qr;console.log('Scheduling WhatsApp QR generated');});
+client.on('authenticated',()=>{latestQr=null;console.log('Scheduling WhatsApp authenticated');});
+client.on('ready',()=>console.log('BTSA Scheduling Agent ready'));
+client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
+client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
+
+function removeLocks(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const f=path.join(dir,e.name);if(e.isDirectory())removeLocks(f);else if(['SingletonLock','SingletonSocket','SingletonCookie'].includes(e.name)){try{fs.unlinkSync(f);}catch(_){}}}}
+removeLocks(AUTH_DIR); client.initialize();
+const PORT=Number(process.env.PORT||4000); app.listen(PORT,()=>console.log(`BTSA Scheduling Agent listening on ${PORT}; SQLite ${DB_PATH}; shadow=${SHADOW_MODE}`));
