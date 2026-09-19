@@ -20,8 +20,12 @@ const MORNING_HOUR = Number(process.env.MORNING_SUMMARY_HOUR || 7);
 const EVENING_HOUR = Number(process.env.EVENING_SUMMARY_HOUR || 17);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const SOCIAL_PROOF_WEBHOOK_URL = process.env.SOCIAL_PROOF_WEBHOOK_URL || '';
+const AGENT_HANDOFF_SECRET = process.env.AGENT_HANDOFF_SECRET || '';
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+const PROOF_DIR = path.join(AUTH_DIR, 'proofs');
+if (!fs.existsSync(PROOF_DIR)) fs.mkdirSync(PROOF_DIR, { recursive: true });
 const db = new DatabaseSync(DB_PATH);
 db.exec(`
 CREATE TABLE IF NOT EXISTS orders (
@@ -70,6 +74,36 @@ CREATE TABLE IF NOT EXISTS contractors (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proofs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER,
+  stage TEXT NOT NULL,
+  whatsapp_message_id TEXT UNIQUE NOT NULL,
+  mime_type TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  vision_json TEXT,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  confirmed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS proof_links (
+  message_id TEXT PRIMARY KEY,
+  proof_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_key TEXT UNIQUE NOT NULL,
+  event_type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
 );
 `);
 
@@ -145,7 +179,7 @@ async function sendGroup(text, key, orderId = null) {
   return { messageId };
 }
 
-function orderLabel(o) { return `${o.external_id}${o.client_name ? ` | ${o.client_name}` : ''}${o.route ? ` | ${o.route}` : ''}`; }
+function orderLabel(o) { return `${o.external_id}${o.bike ? ` | ${o.bike}` : ''}${o.client_name ? ` | ${o.client_name}` : ''}${o.route ? ` | ${o.route}` : ''}`; }
 function fieldFromBlock(text, heading, field) {
   const block = String(text || '').match(new RegExp(`\\*?${heading} DETAILS\\*?([\\s\\S]*?)(?=\\n\\*?[A-Z ]+ DETAILS\\*?|$)`, 'i'))?.[1] || '';
   return block.match(new RegExp(`^${field}:\\s*(.+)$`, 'im'))?.[1]?.trim() || '';
@@ -260,6 +294,93 @@ function responseText(payload) {
   }
   return '';
 }
+function proofStage(text) {
+  if (/\b(deliver(?:ed|y)?|drop[ -]?off)\b/i.test(text)) return 'delivery';
+  if (/\b(collect(?:ed|ion)?|pick[ -]?up)\b/i.test(text)) return 'collection';
+  return null;
+}
+function extensionForMime(mime) {
+  return ({'image/jpeg':'jpg','image/png':'png','image/webp':'webp','image/heic':'heic'}[mime] || 'bin');
+}
+async function analyzeProofPhoto(media, caption, stage) {
+  const candidates=db.prepare("SELECT external_id,client_name,route,bike,contractor,collection_at,delivery_at,status FROM orders WHERE status NOT IN ('cancelled') ORDER BY completed_at IS NOT NULL,updated_at DESC LIMIT 40").all();
+  const schema={type:'object',additionalProperties:false,properties:{
+    external_id:{type:['string','null']},confidence:{type:'number'},bike_description:{type:'string'},reason:{type:'string'},
+    contains_face:{type:'boolean'},contains_number_plate:{type:'boolean'},contains_address_or_document:{type:'boolean'},social_safety_note:{type:'string'}
+  },required:['external_id','confidence','bike_description','reason','contains_face','contains_number_plate','contains_address_or_document','social_safety_note']};
+  const response=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{authorization:`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'},body:JSON.stringify({
+    model:OPENAI_MODEL,
+    input:[{role:'system',content:'Match a motorcycle proof photo against the supplied scheduling candidates. Use visible make/model/type/colour only and operational timing/context. Never identify a person. Select an external_id only when one candidate is materially stronger; otherwise return null. Inspect for faces, number plates, addresses and documents that should be reviewed before social publishing.'},{role:'user',content:[
+      {type:'input_text',text:`Stage: ${stage}. Caption: ${caption}. Candidates: ${JSON.stringify(candidates)}`},
+      {type:'input_image',image_url:`data:${media.mimetype};base64,${media.data}`,detail:'low'}
+    ]}],text:{format:{type:'json_schema',name:'btsa_proof_match',strict:true,schema}}
+  })});
+  if(!response.ok)throw new Error(`OpenAI vision HTTP ${response.status}: ${await response.text()}`);
+  return JSON.parse(responseText(await response.json()));
+}
+function enqueueSocialProof(proof,order,mediaData,vision){
+  if(!SOCIAL_PROOF_WEBHOOK_URL||!AGENT_HANDOFF_SECRET)return;
+  const payload={eventId:`proof-${proof.id}`,eventType:'delivery_proof_received',occurredAt:nowIso(),proof:{stage:proof.stage,mimeType:proof.mime_type,filename:proof.filename,mediaData},order:{externalId:order.external_id,bike:order.bike||'',route:order.route||'',clientName:order.client_name||'',contractor:order.contractor||order.transport_method||''},privacy:{containsFace:Boolean(vision?.contains_face),containsNumberPlate:Boolean(vision?.contains_number_plate),containsAddressOrDocument:Boolean(vision?.contains_address_or_document),note:vision?.social_safety_note||''}};
+  db.prepare("INSERT OR IGNORE INTO outbox(event_key,event_type,payload,status,attempts,next_attempt_at,created_at) VALUES(?,?,?,'pending',0,?,?)").run(payload.eventId,payload.eventType,JSON.stringify(payload),nowIso(),nowIso());
+}
+async function confirmProof(proofId,orderId){
+  const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(proofId);
+  const order=db.prepare('SELECT * FROM orders WHERE id=?').get(orderId);
+  if(!proof||!order)throw new Error('Proof or order not found');
+  if(proof.status==='confirmed')return;
+  const when=nowIso();
+  if(proof.stage==='delivery')db.prepare("UPDATE orders SET delivery_at=?,delivery_confidence='confirmed',status='completed',completed_at=?,updated_at=? WHERE id=?").run(when,when,when,order.id);
+  else db.prepare("UPDATE orders SET collection_at=?,collection_confidence='confirmed',status='in_transit',updated_at=? WHERE id=?").run(when,when,order.id);
+  db.prepare("UPDATE proofs SET order_id=?,status='confirmed',confirmed_at=? WHERE id=?").run(order.id,when,proof.id);
+  const updated=db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
+  recalc(updated);
+  const vision=proof.vision_json?JSON.parse(proof.vision_json):{};
+  if(proof.stage==='delivery')enqueueSocialProof(proof,updated,fs.readFileSync(proof.file_path).toString('base64'),vision);
+  await sendGroup(`*${proof.stage==='delivery'?'Delivery':'Collection'} confirmed*\n${orderLabel(updated)}\nRecorded: ${fmt(when)}`,`proof-confirmed-${proof.id}`,updated.id);
+}
+async function handleProofPhoto(message,quotedOrder){
+  const stage=proofStage(message.body||'');
+  if(!stage){await sendGroup('Is this a collection or delivery photo?',`proof-stage-${message.id?._serialized||Date.now()}`);return true;}
+  const media=await message.downloadMedia();
+  if(!media?.data)throw new Error('WhatsApp returned no image data');
+  if(!String(media.mimetype||'').startsWith('image/')){await sendGroup('Please send a photo for collection or delivery proof.',`proof-image-${message.id?._serialized||Date.now()}`);return true;}
+  const mid=message.id?._serialized||crypto.randomUUID();
+  const filename=`proof-${Date.now()}-${crypto.createHash('sha256').update(mid).digest('hex').slice(0,10)}.${extensionForMime(media.mimetype)}`;
+  const filePath=path.join(PROOF_DIR,filename);
+  fs.writeFileSync(filePath,Buffer.from(media.data,'base64'));
+  let order=findOrderFromText(message.body)||quotedOrder||null;
+  let vision={};
+  if(!order&&OPENAI_API_KEY)vision=await analyzeProofPhoto(media,message.body||'',stage);
+  if(!order&&vision.external_id)order=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(vision.external_id);
+  const status=order&&(findOrderFromText(message.body)||quotedOrder)?'ready':'awaiting_confirmation';
+  const result=db.prepare('INSERT OR IGNORE INTO proofs(order_id,stage,whatsapp_message_id,mime_type,filename,file_path,vision_json,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(order?.id||null,stage,mid,media.mimetype,filename,filePath,JSON.stringify(vision),status,nowIso());
+  const proof=db.prepare('SELECT * FROM proofs WHERE whatsapp_message_id=?').get(mid);
+  if(proof.status==='confirmed')return true;
+  if(status==='ready'){await confirmProof(proof.id,order.id);return true;}
+  if(order&&Number(vision.confidence)>=0.65){
+    const out=await sendGroup(`I think this is *${orderLabel(order)}*. Confirm ${stage}? Reply YES, or reply with the correct SLA number.`, `proof-match-${proof.id}`,order.id);
+    if(out.messageId)db.prepare('INSERT OR REPLACE INTO proof_links(message_id,proof_id,created_at) VALUES(?,?,?)').run(out.messageId,proof.id,nowIso());
+  }else{
+    const out=await sendGroup(`I could not safely match this ${stage} photo. Reply to this message with the SLA number.`, `proof-unmatched-${proof.id}`);
+    if(out.messageId)db.prepare('INSERT OR REPLACE INTO proof_links(message_id,proof_id,created_at) VALUES(?,?,?)').run(out.messageId,proof.id,nowIso());
+  }
+  return true;
+}
+async function processOutbox(){
+  if(!SOCIAL_PROOF_WEBHOOK_URL||!AGENT_HANDOFF_SECRET)return;
+  const rows=db.prepare("SELECT * FROM outbox WHERE status='pending' AND next_attempt_at<=? ORDER BY id LIMIT 5").all(nowIso());
+  for(const row of rows){
+    const body=row.payload; const signature=crypto.createHmac('sha256',AGENT_HANDOFF_SECRET).update(body).digest('hex');
+    try{
+      const response=await fetch(SOCIAL_PROOF_WEBHOOK_URL,{method:'POST',headers:{'content-type':'application/json','x-btsa-signature':signature},body});
+      if(!response.ok)throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      db.prepare("UPDATE outbox SET status='delivered',delivered_at=?,attempts=attempts+1,last_error=NULL WHERE id=?").run(nowIso(),row.id);
+    }catch(error){
+      const attempts=row.attempts+1; const delay=Math.min(3600,Math.pow(2,attempts)*30);
+      db.prepare("UPDATE outbox SET attempts=?,next_attempt_at=?,last_error=? WHERE id=?").run(attempts,new Date(Date.now()+delay*1000).toISOString(),String(error.message).slice(0,500),row.id);
+    }
+  }
+}
 async function interpretSchedulingMessage(text, quotedText = '', forcedExternalId = '') {
   if (!OPENAI_API_KEY) return null;
   const orders = db.prepare("SELECT external_id,client_name,route,bike,contractor,transport_method,collection_at,delivery_at,status,completed_at FROM orders ORDER BY completed_at IS NOT NULL,created_at DESC LIMIT 60").all();
@@ -347,7 +468,7 @@ async function applyInterpretedUpdate(plan, messageKey) {
   db.prepare(`UPDATE orders SET ${fields.join(',')} WHERE id=?`).run(...values);
   const updated=db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
   recalc(updated); await syncCalendar(updated);
-  await sendGroup(`*${updated.external_id} updated*\n${plan.summary}\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor||updated.transport_method||'Not assigned'}\nStatus: ${String(updated.status).replaceAll('_',' ')}`,`ai-update-${messageKey}-${updated.id}`,updated.id);
+  await sendGroup(`*${updated.external_id} updated*\n${[updated.bike,updated.client_name,updated.route].filter(Boolean).join(' | ')}\n${plan.summary}\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor||updated.transport_method||'Not assigned'}\nStatus: ${String(updated.status).replaceAll('_',' ')}`,`ai-update-${messageKey}-${updated.id}`,updated.id);
   return {updated:true,orderId:updated.id};
 }
 async function syncCalendar(o) {
@@ -395,30 +516,39 @@ async function applyUpdate(o, text) {
   const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(o.id);
   recalc(updated);
   await syncCalendar(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
-  await sendGroup(`*${updated.external_id} updated*\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor || updated.transport_method || 'Not assigned'}\nStatus: ${String(updated.status).replaceAll('_',' ')}`, `update-confirm-${updated.id}-${Date.now()}`, updated.id);
+  await sendGroup(`*${updated.external_id} updated*\n${[updated.bike,updated.client_name,updated.route].filter(Boolean).join(' | ')}\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor || updated.transport_method || 'Not assigned'}\nStatus: ${String(updated.status).replaceAll('_',' ')}`, `update-confirm-${updated.id}-${Date.now()}`, updated.id);
   return true;
 }
 
 const seen = new Set();
 async function inbound(message) {
   try {
-    if (message.fromMe || message.from !== GROUP_ID || !message.body) return;
+    if (message.fromMe || message.from !== GROUP_ID || (!message.body&&!message.hasMedia)) return;
     const mid = message.id?._serialized || '';
     if (mid && seen.has(mid)) return;
     if (mid) { seen.add(mid); if (seen.size>5000) seen.clear(); }
     lastInboundAt = nowIso();
-    const ingested = await ingestGroupOrder(message.body, mid);
+    const ingested = message.body ? await ingestGroupOrder(message.body, mid) : null;
     if (ingested) {
       event(ingested.order.id, 'inbound_processed', mid, { text: message.body, newOrder: true, deduplicated: ingested.deduplicated });
       return;
     }
-    let quotedText=''; let quotedOrder=null;
+    let quotedText=''; let quotedOrder=null; let quotedId='';
     if(message.hasQuotedMsg){
       const quoted=await message.getQuotedMessage();
       quotedText=quoted?.body||'';
-      const qid=quoted?.id?._serialized||'';
-      const link=qid?db.prepare('SELECT order_id FROM question_links WHERE message_id=?').get(qid):null;
+      quotedId=quoted?.id?._serialized||'';
+      const link=quotedId?db.prepare('SELECT order_id FROM question_links WHERE message_id=?').get(quotedId):null;
       if(link)quotedOrder=db.prepare('SELECT * FROM orders WHERE id=?').get(link.order_id);
+    }
+    if(message.hasMedia){await handleProofPhoto(message,quotedOrder);return;}
+    const proofLink=quotedId?db.prepare('SELECT proof_id FROM proof_links WHERE message_id=?').get(quotedId):null;
+    if(proofLink){
+      const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(proofLink.proof_id);
+      let order=/^\s*(yes|y|confirm|correct|yep|yeah)\s*[.!]?\s*$/i.test(message.body||'')&&proof?.order_id?db.prepare('SELECT * FROM orders WHERE id=?').get(proof.order_id):findOrderFromText(message.body);
+      if(order){await confirmProof(proof.id,order.id);return;}
+      await sendGroup('Reply with YES to confirm my suggested match, or send the correct SLA number.',`proof-retry-${mid}`);
+      return;
     }
     if(!quotedText && /^\s*(delivered|complete|completed|collected|done|cancelled|canceled|in transit)\s*[.!]?\s*$/i.test(message.body)){
       await sendGroup('Which SLA number is this update for?',`clarify-generic-${mid}`);
@@ -500,11 +630,12 @@ async function dueReminders(){
 async function summary(period){
   const key=`${period}-summary-${localDate()}`; if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY COALESCE(collection_at,delivery_at,created_at)").all();
-  const lines=open.slice(0,30).map(o=>`• ${o.external_id}: C ${fmt(o.collection_at)} | D ${fmt(o.delivery_at)} | ${o.contractor||o.transport_method||'unassigned'}`);
+  const lines=open.slice(0,30).map(o=>`• ${o.external_id}${o.bike?` | ${o.bike}`:''}${o.client_name?` | ${o.client_name}`:''}: C ${fmt(o.collection_at)} | D ${fmt(o.delivery_at)} | ${o.contractor||o.transport_method||'unassigned'}`);
   await sendGroup(`*BTSA scheduling ${period} summary*\nOpen orders: ${open.length}\n${lines.join('\n')||'No open orders.'}`,key);
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
 setInterval(()=>dueReminders().catch(console.error),60000);
+setInterval(()=>processOutbox().catch(console.error),60000);
 setInterval(()=>{
   if(localMinute()!==0)return;
   if(localHour()===MORNING_HOUR)summary('morning').catch(console.error);
