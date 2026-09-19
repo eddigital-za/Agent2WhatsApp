@@ -133,6 +133,11 @@ app.post("/proof", async (req, res) => {
       `Privacy review: ${warnings}`,
       "Create a BTSA social caption draft for approval. Do not include the SLA number, customer name, exact address, or subcontractor. Flag any privacy concern clearly. Do not publish automatically."
     ].join("\n");
+    const safeFilename = path.basename(proof.filename || `${event.eventId}.${extensionForMime(proof.mimeType)}`).replace(/[^a-zA-Z0-9._-]/g, "_");
+    const mediaFilePath = path.join(MEDIA_DIR, safeFilename);
+    fs.writeFileSync(mediaFilePath, Buffer.from(proof.mediaData, "base64"));
+    const mediaUrl = buildPublicMediaUrl(safeFilename);
+    if (!mediaUrl) throw new Error("Public media URL is not configured");
     const payload = {
       from: process.env.ALLOWED_GROUP_ID || "scheduling-agent",
       phone: "",
@@ -142,10 +147,10 @@ app.post("/proof", async (req, res) => {
       type: "image",
       hasMedia: true,
       mediaType: proof.mimeType,
-      mediaFilename: proof.filename || `${event.eventId}.jpg`,
+      mediaFilename: safeFilename,
       mediaData: proof.mediaData,
-      mediaUrl: null,
-      media: { mimetype: proof.mimeType, filename: proof.filename || `${event.eventId}.jpg`, data: proof.mediaData, url: null },
+      mediaUrl,
+      media: { mimetype: proof.mimeType, filename: safeFilename, data: proof.mediaData, url: mediaUrl },
       source: "btsa-scheduling-agent",
       orderContext: { bike: order.bike || "", route: order.route || "", stage: proof.stage || "delivery" },
       privacy
