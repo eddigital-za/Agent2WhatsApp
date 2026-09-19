@@ -116,6 +116,40 @@ async function sendGroup(text, key, orderId = null) {
 }
 
 function orderLabel(o) { return `${o.external_id}${o.client_name ? ` | ${o.client_name}` : ''}${o.route ? ` | ${o.route}` : ''}`; }
+function fieldFromBlock(text, heading, field) {
+  const block = String(text || '').match(new RegExp(`\\*?${heading} DETAILS\\*?([\\s\\S]*?)(?=\\n\\*?[A-Z ]+ DETAILS\\*?|$)`, 'i'))?.[1] || '';
+  return block.match(new RegExp(`^${field}:\\s*(.+)$`, 'im'))?.[1]?.trim() || '';
+}
+function parseNewOrderMessage(text, messageId) {
+  const body = String(text || '');
+  const header = body.match(/^\*?New Order\s*-\s*(.+?)\s*-\s*R?([\d.,]+)\*?\s*$/im);
+  if (!header) return null;
+  const collectionName = fieldFromBlock(body, 'COLLECTION', 'Contact');
+  const deliveryName = fieldFromBlock(body, 'DELIVERY', 'Contact');
+  const bike = body.match(/^Make and Model:\s*(.+)$/im)?.[1]?.trim() || '';
+  const stableSource = messageId || body;
+  const suffix = crypto.createHash('sha256').update(stableSource).digest('hex').slice(0, 10).toUpperCase();
+  return {
+    externalId: `WA-${suffix}`,
+    clientName: deliveryName || collectionName,
+    route: header[1].trim(),
+    bike,
+    source: 'orders-whatsapp-group'
+  };
+}
+async function ingestGroupOrder(text, messageId) {
+  const parsed = parseNewOrderMessage(text, messageId);
+  if (!parsed) return null;
+  const existing = db.prepare('SELECT * FROM orders WHERE external_id=?').get(parsed.externalId);
+  if (existing) return { order: existing, deduplicated: true };
+  const now = nowIso();
+  const result = db.prepare('INSERT INTO orders(external_id,client_name,route,bike,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)')
+    .run(parsed.externalId, parsed.clientName, parsed.route, parsed.bike, 'unscheduled', now, now);
+  const order = db.prepare('SELECT * FROM orders WHERE id=?').get(Number(result.lastInsertRowid));
+  event(order.id, 'order_received', `order-${parsed.externalId}`, { source: parsed.source, messageId });
+  await askForMissing(order);
+  return { order, deduplicated: false };
+}
 function missingQuestion(o) {
   const missing = [];
   if (!o.collection_at) missing.push('collection date');
@@ -220,6 +254,11 @@ async function inbound(message) {
     if (mid && seen.has(mid)) return;
     if (mid) { seen.add(mid); if (seen.size>5000) seen.clear(); }
     lastInboundAt = nowIso();
+    const ingested = await ingestGroupOrder(message.body, mid);
+    if (ingested) {
+      event(ingested.order.id, 'inbound_processed', mid, { text: message.body, newOrder: true, deduplicated: ingested.deduplicated });
+      return;
+    }
     let order = findOrderFromText(message.body);
     if (!order && message.hasQuotedMsg) {
       const quoted = await message.getQuotedMessage();
