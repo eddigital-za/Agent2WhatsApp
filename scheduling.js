@@ -281,6 +281,30 @@ function findOrderFromText(text) {
   const name = ids.filter(o => !o.completed_at && o.client_name && lower.includes(String(o.client_name).toLowerCase()));
   return name.length === 1 ? name[0] : null;
 }
+function linkedRowForQuotedIds(table,selectColumn,quotedIds) {
+  for(const id of quotedIds.filter(Boolean)){
+    const row=db.prepare(`SELECT ${selectColumn} FROM ${table} WHERE message_id=? OR message_id LIKE ? ORDER BY message_id=? DESC LIMIT 1`).get(id,`%${id}`,id);
+    if(row)return row;
+  }
+  return null;
+}
+async function quotedContext(message) {
+  let text='';
+  const ids=[];
+  const raw=message?._data?.quotedStanzaID||message?._data?.quotedMsg?.id?._serialized||message?._data?.quotedMsg?.id?.id||'';
+  if(raw)ids.push(String(raw));
+  if(message.hasQuotedMsg){
+    try{
+      const quoted=await message.getQuotedMessage();
+      text=quoted?.body||'';
+      const serialized=quoted?.id?._serialized||quoted?.id?.id||'';
+      if(serialized)ids.unshift(String(serialized));
+    }catch(error){
+      console.warn('WhatsApp quoted-message fetch failed; using stored quoted ID:',error?.message||String(error));
+    }
+  }
+  return {text,ids:[...new Set(ids)]};
+}
 function splitOrderUpdates(text) {
   const body = String(text || '');
   const matches = [...body.matchAll(/\bSL(?:A)?[\s-]?(\d+)\b/gi)];
@@ -580,16 +604,12 @@ async function inbound(message) {
       event(ingested.order.id, 'inbound_processed', mid, { text: message.body, newOrder: true, deduplicated: ingested.deduplicated });
       return;
     }
-    let quotedText=''; let quotedOrder=null; let quotedId='';
-    if(message.hasQuotedMsg){
-      const quoted=await message.getQuotedMessage();
-      quotedText=quoted?.body||'';
-      quotedId=quoted?.id?._serialized||'';
-      const link=quotedId?db.prepare('SELECT order_id FROM question_links WHERE message_id=?').get(quotedId):null;
-      if(link)quotedOrder=db.prepare('SELECT * FROM orders WHERE id=?').get(link.order_id);
-    }
+    const quote=await quotedContext(message);
+    const quotedText=quote.text;
+    const questionLink=linkedRowForQuotedIds('question_links','order_id',quote.ids);
+    const quotedOrder=questionLink?db.prepare('SELECT * FROM orders WHERE id=?').get(questionLink.order_id):null;
     if(message.hasMedia){await handleProofPhoto(message,quotedOrder);return;}
-    const proofLink=quotedId?db.prepare('SELECT proof_id FROM proof_links WHERE message_id=?').get(quotedId):null;
+    const proofLink=linkedRowForQuotedIds('proof_links','proof_id',quote.ids);
     if(proofLink){
       const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(proofLink.proof_id);
       let order=/^\s*(yes|y|confirm|correct|yep|yeah)\s*[.!]?\s*$/i.test(message.body||'')&&proof?.order_id?db.prepare('SELECT * FROM orders WHERE id=?').get(proof.order_id):findOrderFromText(message.body);
