@@ -219,7 +219,10 @@ function missingQuestion(o) {
   if (!o.collection_at) missing.push('collection date');
   if (!o.delivery_at) missing.push('delivery date');
   if (!o.contractor && !o.transport_method) missing.push('BTSA/subcontractor assignment');
-  return `*Scheduling information needed: ${o.external_id}*\n${[o.client_name,o.bike,o.route].filter(Boolean).join(' | ')}\nMissing: ${missing.join(', ')}.\nReply to this message with the schedule update.`;
+  return `❓ *${o.external_id} | ${o.bike||'Motorcycle'}*\nNeed: ${missing.join(', ')}\nReply with the update.`;
+}
+function compactOrderUpdate(o, heading='Updated') {
+  return `✅ *${o.external_id} | ${o.bike||'Motorcycle'}*\n${heading}\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}\nVia: ${o.contractor||o.transport_method||'Unassigned'}\nStatus: ${String(o.status).replaceAll('_',' ')}`;
 }
 async function askForMissing(o) {
   if (o.collection_at && o.delivery_at && (o.contractor || o.transport_method)) return;
@@ -405,9 +408,9 @@ async function analyzeProofPhoto(media, caption, stage) {
   if(!response.ok)throw new Error(`OpenAI vision HTTP ${response.status}: ${await response.text()}`);
   return JSON.parse(responseText(await response.json()));
 }
-function enqueueSocialProof(proof,order,mediaData,vision){
+function enqueueSocialProof(proof,order,mediaData,vision,eventId=`proof-${proof.id}`){
   if(!SOCIAL_PROOF_WEBHOOK_URL||!AGENT_HANDOFF_SECRET)return;
-  const payload={eventId:`proof-${proof.id}`,eventType:'delivery_proof_received',occurredAt:nowIso(),proof:{stage:proof.stage,mimeType:proof.mime_type,filename:proof.filename,mediaData},order:{externalId:order.external_id,bike:order.bike||'',route:order.route||'',clientName:order.client_name||'',contractor:order.contractor||order.transport_method||''},privacy:{containsFace:Boolean(vision?.contains_face),containsNumberPlate:Boolean(vision?.contains_number_plate),containsAddressOrDocument:Boolean(vision?.contains_address_or_document),note:vision?.social_safety_note||''}};
+  const payload={eventId,eventType:'delivery_proof_received',occurredAt:nowIso(),proof:{stage:proof.stage,mimeType:proof.mime_type,filename:proof.filename,mediaData},order:{externalId:order.external_id,bike:order.bike||'',route:order.route||'',clientName:order.client_name||'',contractor:order.contractor||order.transport_method||''},privacy:{containsFace:Boolean(vision?.contains_face),containsNumberPlate:Boolean(vision?.contains_number_plate),containsAddressOrDocument:Boolean(vision?.contains_address_or_document),note:vision?.social_safety_note||''}};
   db.prepare("INSERT OR IGNORE INTO outbox(event_key,event_type,payload,status,attempts,next_attempt_at,created_at) VALUES(?,?,?,'pending',0,?,?)").run(payload.eventId,payload.eventType,JSON.stringify(payload),nowIso(),nowIso());
 }
 async function confirmProof(proofId,orderId){
@@ -423,7 +426,7 @@ async function confirmProof(proofId,orderId){
   recalc(updated);
   const vision=proof.vision_json?JSON.parse(proof.vision_json):{};
   if(proof.stage==='delivery')enqueueSocialProof(proof,updated,fs.readFileSync(proof.file_path).toString('base64'),vision);
-  await sendGroup(`*${proof.stage==='delivery'?'Delivery':'Collection'} confirmed*\n${orderLabel(updated)}\nRecorded: ${fmt(when)}`,`proof-confirmed-${proof.id}`,updated.id);
+  await sendGroup(`✅ *${proof.stage==='delivery'?'Delivered':'Collected'} | ${updated.external_id}*\n${updated.bike||'Motorcycle'}\n${fmt(when)}`,`proof-confirmed-${proof.id}`,updated.id);
 }
 async function handleProofPhoto(message,quotedOrder){
   const stage=proofStage(message.body||'');
@@ -568,7 +571,7 @@ async function applyInterpretedUpdate(plan, messageKey, sourceText='') {
   db.prepare(`UPDATE orders SET ${fields.join(',')} WHERE id=?`).run(...values);
   const updated=db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
   recalc(updated); await syncCalendar(updated);
-  await sendGroup(`*${updated.external_id} updated*\n${[updated.bike,updated.client_name,updated.route].filter(Boolean).join(' | ')}\n${plan.summary}\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor||updated.transport_method||'Not assigned'}\nStatus: ${String(updated.status).replaceAll('_',' ')}`,`ai-update-${messageKey}-${updated.id}`,updated.id);
+  await sendGroup(compactOrderUpdate(updated,plan.summary||'Updated'),`ai-update-${messageKey}-${updated.id}`,updated.id);
   return {updated:true,orderId:updated.id};
 }
 async function syncCalendar(o) {
@@ -616,7 +619,7 @@ async function applyUpdate(o, text) {
   const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(o.id);
   recalc(updated);
   await syncCalendar(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
-  await sendGroup(`*${updated.external_id} updated*\n${[updated.bike,updated.client_name,updated.route].filter(Boolean).join(' | ')}\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor || updated.transport_method || 'Not assigned'}\nStatus: ${String(updated.status).replaceAll('_',' ')}`, `update-confirm-${updated.id}-${Date.now()}`, updated.id);
+  await sendGroup(compactOrderUpdate(updated), `update-confirm-${updated.id}-${Date.now()}`, updated.id);
   return true;
 }
 
@@ -738,7 +741,7 @@ async function dueReminders(){
   for(const o of rows){
     const action=o.next_action; const kind=action.startsWith('collection')?'Collection':'Delivery';
     const when=kind==='Collection'?o.collection_at:o.delivery_at;
-    await sendGroup(`*${kind} reminder: ${o.external_id}*\n${[o.client_name,o.bike,o.route].filter(Boolean).join(' | ')}\nScheduled: ${fmt(when)}\nAssigned: ${o.contractor||o.transport_method||'Not assigned'}\nReply with an update if this has changed.`, `reminder-${o.id}-${action}`,o.id);
+    await sendGroup(`⏰ *${kind} | ${o.external_id}*\n${o.bike||'Motorcycle'}\n${fmt(when)}\nVia: ${o.contractor||o.transport_method||'Unassigned'}`, `reminder-${o.id}-${action}`,o.id);
     db.prepare('UPDATE orders SET next_action_at=NULL,next_action=NULL,updated_at=? WHERE id=?').run(nowIso(),o.id);
     recalc(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
   }
@@ -746,8 +749,8 @@ async function dueReminders(){
 async function summary(period){
   const key=`${period}-summary-${localDate()}`; if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY COALESCE(collection_at,delivery_at,created_at)").all();
-  const lines=open.slice(0,30).map(o=>`• ${o.external_id}${o.bike?` | ${o.bike}`:''}${o.client_name?` | ${o.client_name}`:''}: C ${fmt(o.collection_at)} | D ${fmt(o.delivery_at)} | ${o.contractor||o.transport_method||'unassigned'}`);
-  await sendGroup(`*BTSA scheduling ${period} summary*\nOpen orders: ${open.length}\n${lines.join('\n')||'No open orders.'}`,key);
+  const lines=open.slice(0,30).map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}\nVia: ${o.contractor||o.transport_method||'Unassigned'}`);
+  await sendGroup(`📋 *${period[0].toUpperCase()+period.slice(1)} schedule | ${open.length} open*\n\n${lines.join('\n\n')||'No open orders.'}`,key);
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
 async function repairSept19Updates(){
@@ -772,6 +775,17 @@ async function repairSept19Updates(){
   const order381=db.prepare("SELECT * FROM orders WHERE external_id='SLA-381' COLLATE NOCASE").get();
   if(proof&&order381)await confirmProof(proof.id,order381.id);
 }
+async function requeueSept19SocialProof(){
+  const key='repair-2026-09-19-social-proof-v2';
+  if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
+  const proof=db.prepare("SELECT * FROM proofs WHERE id=1 AND stage='delivery' AND status='confirmed'").get();
+  const order=db.prepare("SELECT * FROM orders WHERE external_id='SLA-381' COLLATE NOCASE").get();
+  if(!proof||!order||!fs.existsSync(proof.file_path))return;
+  const vision=proof.vision_json?JSON.parse(proof.vision_json):{};
+  enqueueSocialProof(proof,order,fs.readFileSync(proof.file_path).toString('base64'),vision,'proof-1-social-retry-v2');
+  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+  console.log('Queued SLA-381 delivery proof for Social Agent retry');
+}
 setInterval(()=>dueReminders().catch(console.error),60000);
 setInterval(()=>processOutbox().catch(console.error),60000);
 setInterval(()=>{
@@ -783,7 +797,7 @@ setInterval(()=>{
 client.on('message',inbound);
 client.on('qr',qr=>{latestQr=qr;console.log('Scheduling WhatsApp QR generated');});
 client.on('authenticated',()=>{latestQr=null;console.log('Scheduling WhatsApp authenticated');});
-client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');repairSept19Updates().catch(error=>console.error('Sept 19 repair failed:',error?.message||String(error)));});
+client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');repairSept19Updates().then(requeueSept19SocialProof).catch(error=>console.error('Sept 19 repair failed:',error?.message||String(error)));});
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
