@@ -223,15 +223,28 @@ function confidence(text) { return /\b(probably|maybe|expected|likely|should|pro
 function normalizedContractor(value) {
   const input = String(value || '').toLowerCase();
   return db.prepare('SELECT name FROM contractors WHERE active=1 ORDER BY length(name) DESC').all()
-    .find(row => input.includes(String(row.name).toLowerCase()))?.name || null;
+    .find(row => {
+      const name = String(row.name).toLowerCase();
+      const variants = [name];
+      if (name.includes(' - ')) variants.push(name.split(' - ').pop());
+      return variants.some(candidate => input.includes(candidate));
+    })?.name || null;
 }
+function orderKey(value) { return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 function findOrderFromText(text) {
   const ids = db.prepare("SELECT * FROM orders WHERE completed_at IS NULL ORDER BY created_at DESC").all();
   const lower = String(text || '').toLowerCase();
-  const exact = ids.filter(o => lower.includes(String(o.external_id).toLowerCase()));
+  const compact = orderKey(text);
+  const exact = ids.filter(o => compact.includes(orderKey(o.external_id)));
   if (exact.length === 1) return exact[0];
   const name = ids.filter(o => o.client_name && lower.includes(String(o.client_name).toLowerCase()));
   return name.length === 1 ? name[0] : null;
+}
+function splitOrderUpdates(text) {
+  const body = String(text || '');
+  const matches = [...body.matchAll(/\bSLA[\s-]?(\d+)\b/gi)];
+  if (matches.length <= 1) return [body];
+  return matches.map((match,index) => body.slice(match.index, matches[index + 1]?.index || body.length).trim()).filter(Boolean);
 }
 async function syncCalendar(o) {
   if (!CALENDAR_WEBHOOK_URL) return;
@@ -270,6 +283,10 @@ async function applyUpdate(o, text) {
     db.prepare('UPDATE orders SET contractor=?,transport_method=?,updated_at=? WHERE id=?').run(contractor,/^btsa$/i.test(contractor)?'BTSA':'subcontractor',nowIso(),o.id);
     changed=true;
   }
+  if (/\bin[ -]?transit\b/i.test(text)) {
+    db.prepare("UPDATE orders SET status='in_transit',updated_at=? WHERE id=?").run(nowIso(),o.id);
+    changed=true;
+  }
   if (!changed) return false;
   const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(o.id);
   recalc(updated);
@@ -289,6 +306,21 @@ async function inbound(message) {
     const ingested = await ingestGroupOrder(message.body, mid);
     if (ingested) {
       event(ingested.order.id, 'inbound_processed', mid, { text: message.body, newOrder: true, deduplicated: ingested.deduplicated });
+      return;
+    }
+    const updates = splitOrderUpdates(message.body);
+    if (updates.length > 1) {
+      for (let index=0; index<updates.length; index++) {
+        const update = updates[index];
+        const order = findOrderFromText(update);
+        if (!order) {
+          await sendGroup(`I could not identify the order in this update: ${update}`, `clarify-${mid}-${index}`);
+          continue;
+        }
+        const applied = await applyUpdate(order, update);
+        if (!applied) await sendGroup(`I found ${orderLabel(order)}, but I could not safely identify the update.`, `clarify-${mid}-${index}`, order.id);
+        event(order.id,'inbound_processed',`${mid}-${index}`,{text:update,multiOrder:true});
+      }
       return;
     }
     let order = findOrderFromText(message.body);
