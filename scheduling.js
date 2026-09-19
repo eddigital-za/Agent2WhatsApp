@@ -18,6 +18,8 @@ const CALENDAR_WEBHOOK_SECRET = process.env.CALENDAR_WEBHOOK_SECRET || '';
 const SHADOW_MODE = String(process.env.SHADOW_MODE || 'true').toLowerCase() === 'true';
 const MORNING_HOUR = Number(process.env.MORNING_SUMMARY_HOUR || 7);
 const EVENING_HOUR = Number(process.env.EVENING_SUMMARY_HOUR || 17);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 const db = new DatabaseSync(DB_PATH);
@@ -250,6 +252,99 @@ function splitOrderUpdates(text) {
   if (matches.length <= 1) return [body];
   return matches.map((match,index) => body.slice(match.index, matches[index + 1]?.index || body.length).trim()).filter(Boolean);
 }
+function responseText(payload) {
+  if (payload?.output_text) return payload.output_text;
+  for (const item of payload?.output || []) {
+    for (const content of item?.content || []) if (content?.type === 'output_text' && content.text) return content.text;
+  }
+  return '';
+}
+async function interpretSchedulingMessage(text) {
+  if (!OPENAI_API_KEY) return null;
+  const orders = db.prepare("SELECT external_id,client_name,route,bike,contractor,transport_method,collection_at,delivery_at,status,completed_at FROM orders ORDER BY completed_at IS NOT NULL,created_at DESC LIMIT 60").all();
+  const contractors = db.prepare('SELECT name FROM contractors WHERE active=1 ORDER BY name COLLATE NOCASE').all().map(row=>row.name);
+  const now = new Date();
+  const prompt = [
+    `Current timestamp: ${now.toISOString()}. Business timezone: ${TZ}. Local date: ${localDate(now)}.`,
+    `Known orders: ${JSON.stringify(orders)}`,
+    `Known contractors: ${JSON.stringify(contractors)}`,
+    `WhatsApp message: ${JSON.stringify(String(text || ''))}`
+  ].join('\n');
+  const schema = {
+    type:'object', additionalProperties:false,
+    properties:{
+      updates:{type:'array',items:{
+        type:'object',additionalProperties:false,
+        properties:{
+          external_id:{type:'string'},
+          action:{type:'string',enum:['update','clarify']},
+          collection_at:{type:['string','null']},
+          delivery_at:{type:['string','null']},
+          collection_confidence:{type:'string',enum:['unknown','expected','confirmed']},
+          delivery_confidence:{type:'string',enum:['unknown','expected','confirmed']},
+          contractor:{type:['string','null']},
+          transport_method:{type:'string',enum:['unchanged','BTSA','subcontractor']},
+          status:{type:'string',enum:['unchanged','unscheduled','scheduled','in_transit','completed','cancelled']},
+          clarification:{type:'string'},
+          summary:{type:'string'}
+        },
+        required:['external_id','action','collection_at','delivery_at','collection_confidence','delivery_confidence','contractor','transport_method','status','clarification','summary']
+      }}
+    },required:['updates']
+  };
+  const response = await fetch('https://api.openai.com/v1/responses',{
+    method:'POST',
+    headers:{'authorization':`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'},
+    body:JSON.stringify({
+      model:OPENAI_MODEL,
+      input:[
+        {role:'system',content:`You interpret informal South African WhatsApp scheduling updates for a motorcycle transport business. Messages often come from speech-to-text and may contain missing punctuation, wrong capitals, minor spelling errors, shortened SLA references, and multiple orders. Match an order only when the number or customer/context identifies exactly one known order. Treat SLA381, SLA 381, SL381 and spoken variants as possible SLA-381. Correct obvious contractor spelling against the supplied list, including shortened company names. Resolve relative dates in ${TZ}. Do not invent a date, time, contractor, status, or order. A phrase such as this afternoon may be represented at 15:00 with expected confidence; today without a stated time uses 09:00. Null means unchanged. If a material instruction is ambiguous, use action clarify and state one short question. Return one item per intended order.`},
+        {role:'user',content:prompt}
+      ],
+      text:{format:{type:'json_schema',name:'btsa_scheduling_updates',strict:true,schema}}
+    })
+  });
+  if (!response.ok) throw new Error(`OpenAI interpreter HTTP ${response.status}: ${await response.text()}`);
+  const raw = responseText(await response.json());
+  if (!raw) throw new Error('OpenAI interpreter returned no structured text');
+  return JSON.parse(raw);
+}
+function validIso(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+async function applyInterpretedUpdate(plan, messageKey) {
+  const order = db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(String(plan.external_id || '').trim());
+  if (!order || plan.action === 'clarify') {
+    const question = plan.clarification || `Which order does this update refer to: ${plan.summary || 'the message received'}?`;
+    await sendGroup(question,`ai-clarify-${messageKey}-${order?.id || 'unknown'}`,order?.id || null);
+    return {clarified:true};
+  }
+  const fields=[]; const values=[];
+  const collectionAt=validIso(plan.collection_at); const deliveryAt=validIso(plan.delivery_at);
+  if(collectionAt){fields.push('collection_at=?','collection_confidence=?');values.push(collectionAt,plan.collection_confidence);}
+  if(deliveryAt){fields.push('delivery_at=?','delivery_confidence=?');values.push(deliveryAt,plan.delivery_confidence);}
+  if(plan.contractor){
+    const contractor=normalizedContractor(plan.contractor);
+    if(contractor){fields.push('contractor=?','transport_method=?');values.push(contractor,/^btsa$/i.test(contractor)?'BTSA':'subcontractor');}
+  } else if(plan.transport_method!=='unchanged') { fields.push('transport_method=?'); values.push(plan.transport_method); }
+  if(plan.status!=='unchanged'){
+    fields.push('status=?'); values.push(plan.status);
+    if(['completed','cancelled'].includes(plan.status)){fields.push('completed_at=?');values.push(nowIso());}
+    else {fields.push('completed_at=NULL');}
+  } else if(collectionAt||deliveryAt){fields.push('status=?');values.push('scheduled');}
+  if(!fields.length){
+    await sendGroup(plan.clarification || `I understood ${orderLabel(order)}, but no scheduling change was clear. What should I update?`,`ai-empty-${messageKey}-${order.id}`,order.id);
+    return {clarified:true};
+  }
+  fields.push('updated_at=?'); values.push(nowIso(),order.id);
+  db.prepare(`UPDATE orders SET ${fields.join(',')} WHERE id=?`).run(...values);
+  const updated=db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
+  recalc(updated); await syncCalendar(updated);
+  await sendGroup(`*${updated.external_id} updated*\n${plan.summary}\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor||updated.transport_method||'Not assigned'}\nStatus: ${String(updated.status).replaceAll('_',' ')}`,`ai-update-${messageKey}-${updated.id}`,updated.id);
+  return {updated:true,orderId:updated.id};
+}
 async function syncCalendar(o) {
   if (!CALENDAR_WEBHOOK_URL) return;
   const payload = JSON.stringify({ action:'upsert', order:o, timezone:TZ });
@@ -306,16 +401,23 @@ async function inbound(message) {
     const mid = message.id?._serialized || '';
     if (mid && seen.has(mid)) return;
     if (mid) { seen.add(mid); if (seen.size>5000) seen.clear(); }
-    if (mid) {
-      const claimed = db.prepare('INSERT OR IGNORE INTO events(created_at,event_type,event_key,details) VALUES(?,?,?,?)')
-        .run(nowIso(),'inbound_claim',`inbound-message-${mid}`,JSON.stringify({from:message.from}));
-      if (Number(claimed.changes) === 0) return;
-    }
     lastInboundAt = nowIso();
     const ingested = await ingestGroupOrder(message.body, mid);
     if (ingested) {
       event(ingested.order.id, 'inbound_processed', mid, { text: message.body, newOrder: true, deduplicated: ingested.deduplicated });
       return;
+    }
+    if (OPENAI_API_KEY) {
+      try {
+        const interpreted = await interpretSchedulingMessage(message.body);
+        if (interpreted?.updates?.length) {
+          for (let index=0; index<interpreted.updates.length; index++) await applyInterpretedUpdate(interpreted.updates[index],`${mid}-${index}`);
+          event(null,'ai_inbound_processed',mid,{text:message.body,updates:interpreted.updates.length});
+          return;
+        }
+      } catch (error) {
+        console.error('AI interpreter failed; using local parser:',error.message);
+      }
     }
     const updates = splitOrderUpdates(message.body);
     if (updates.length > 1) {
@@ -406,4 +508,18 @@ client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
 function removeLocks(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const f=path.join(dir,e.name);if(e.isDirectory())removeLocks(f);else if(['SingletonLock','SingletonSocket','SingletonCookie'].includes(e.name)){try{fs.unlinkSync(f);}catch(_){}}}}
 removeLocks(AUTH_DIR); client.initialize();
-const PORT=Number(process.env.PORT||4000); app.listen(PORT,()=>console.log(`BTSA Scheduling Agent listening on ${PORT}; SQLite ${DB_PATH}; shadow=${SHADOW_MODE}`));
+async function interpreterSelfTest(){
+  const key='interpreter-self-test-v1';
+  if(!OPENAI_API_KEY||db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
+  const sample=`SLA381 in transit delivery will be today BTSA doing the delivery\nSL382 in transit with Cheetah Express delivery will be today at approximately 11:30\nSLA385 Cheeta Express delivered an hour ago\nSLA386 in transit with Speedway express shared revenue trip delivery expected this afternoon`;
+  const result=await interpretSchedulingMessage(sample);
+  const ids=(result?.updates||[]).map(update=>orderKey(update.external_id));
+  const expected=['SLA381','SLA382','SLA385','SLA386'];
+  if(expected.some(id=>!ids.includes(id)))throw new Error(`Interpreter self-test order mismatch: ${ids.join(',')}`);
+  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+  console.log(`AI scheduling interpreter verified with ${result.updates.length} structured updates`);
+}
+const PORT=Number(process.env.PORT||4000); app.listen(PORT,()=>{
+  console.log(`BTSA Scheduling Agent listening on ${PORT}; SQLite ${DB_PATH}; shadow=${SHADOW_MODE}; ai=${Boolean(OPENAI_API_KEY)}`);
+  interpreterSelfTest().catch(error=>console.error('AI interpreter self-test failed:',error.message));
+});
