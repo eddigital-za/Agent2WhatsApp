@@ -203,6 +203,7 @@ function parseDate(text) {
   const today = atLocal(localDate(), 9, 0);
   let date = null;
   if (/\btoday\b/.test(t)) date = today;
+  else if (/\bthis afternoon\b/.test(t)) date = atLocal(localDate(), 15, 0);
   else if (/\btomorrow\b/.test(t)) date = addDays(today, 1);
   else {
     const iso = t.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
@@ -222,6 +223,7 @@ function parseDate(text) {
 function confidence(text) { return /\b(probably|maybe|expected|likely|should|provisional|tentative)\b/i.test(text) ? 'expected' : 'confirmed'; }
 function normalizedContractor(value) {
   const input = String(value || '').toLowerCase();
+  if (input.includes('cheeta express')) return 'Cheetah Express';
   return db.prepare('SELECT name FROM contractors WHERE active=1 ORDER BY length(name) DESC').all()
     .find(row => {
       const name = String(row.name).toLowerCase();
@@ -232,17 +234,19 @@ function normalizedContractor(value) {
 }
 function orderKey(value) { return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 function findOrderFromText(text) {
-  const ids = db.prepare("SELECT * FROM orders WHERE completed_at IS NULL ORDER BY created_at DESC").all();
+  const ids = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all();
   const lower = String(text || '').toLowerCase();
   const compact = orderKey(text);
-  const exact = ids.filter(o => compact.includes(orderKey(o.external_id)));
+  const mentioned = String(text || '').match(/\bSL(?:A)?[\s-]?(\d+)\b/i);
+  const mentionedKey = mentioned ? `SLA${mentioned[1]}` : null;
+  const exact = mentionedKey ? ids.filter(o => orderKey(o.external_id) === mentionedKey) : ids.filter(o => compact.includes(orderKey(o.external_id)));
   if (exact.length === 1) return exact[0];
-  const name = ids.filter(o => o.client_name && lower.includes(String(o.client_name).toLowerCase()));
+  const name = ids.filter(o => !o.completed_at && o.client_name && lower.includes(String(o.client_name).toLowerCase()));
   return name.length === 1 ? name[0] : null;
 }
 function splitOrderUpdates(text) {
   const body = String(text || '');
-  const matches = [...body.matchAll(/\bSLA[\s-]?(\d+)\b/gi)];
+  const matches = [...body.matchAll(/\bSL(?:A)?[\s-]?(\d+)\b/gi)];
   if (matches.length <= 1) return [body];
   return matches.map((match,index) => body.slice(match.index, matches[index + 1]?.index || body.length).trim()).filter(Boolean);
 }
@@ -291,7 +295,7 @@ async function applyUpdate(o, text) {
   const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(o.id);
   recalc(updated);
   await syncCalendar(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
-  await sendGroup(`*${updated.external_id} updated*\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor || updated.transport_method || 'Not assigned'}\nStatus: ${updated.status}`, `update-confirm-${updated.id}-${Date.now()}`, updated.id);
+  await sendGroup(`*${updated.external_id} updated*\nCollection: ${fmt(updated.collection_at)} (${updated.collection_confidence})\nDelivery: ${fmt(updated.delivery_at)} (${updated.delivery_confidence})\nAssigned: ${updated.contractor || updated.transport_method || 'Not assigned'}\nStatus: ${String(updated.status).replaceAll('_',' ')}`, `update-confirm-${updated.id}-${Date.now()}`, updated.id);
   return true;
 }
 
@@ -302,6 +306,11 @@ async function inbound(message) {
     const mid = message.id?._serialized || '';
     if (mid && seen.has(mid)) return;
     if (mid) { seen.add(mid); if (seen.size>5000) seen.clear(); }
+    if (mid) {
+      const claimed = db.prepare('INSERT OR IGNORE INTO events(created_at,event_type,event_key,details) VALUES(?,?,?,?)')
+        .run(nowIso(),'inbound_claim',`inbound-message-${mid}`,JSON.stringify({from:message.from}));
+      if (Number(claimed.changes) === 0) return;
+    }
     lastInboundAt = nowIso();
     const ingested = await ingestGroupOrder(message.body, mid);
     if (ingested) {
@@ -388,7 +397,7 @@ setInterval(()=>{
   if(localHour()===EVENING_HOUR)summary('evening').catch(console.error);
 },60000);
 
-client.on('message',inbound); client.on('message_create',inbound);
+client.on('message',inbound);
 client.on('qr',qr=>{latestQr=qr;console.log('Scheduling WhatsApp QR generated');});
 client.on('authenticated',()=>{latestQr=null;console.log('Scheduling WhatsApp authenticated');});
 client.on('ready',()=>console.log('BTSA Scheduling Agent ready'));
