@@ -228,11 +228,11 @@ async function askForMissing(o) {
   if (out.messageId) db.prepare('INSERT OR REPLACE INTO question_links(message_id,order_id,created_at) VALUES(?,?,?)').run(out.messageId, o.id, nowIso());
 }
 
-function nextWeekday(base, weekday, forceNextWeek) {
+function nextWeekday(base, weekday) {
   const p = localDate(base);
   const local = atLocal(p, 9, 0);
   let delta = (weekday - local.getUTCDay() + 7) % 7;
-  if (forceNextWeek || delta === 0) delta += 7;
+  if (delta === 0) delta = 7;
   return addDays(local, delta);
 }
 function parseDate(text) {
@@ -245,16 +245,25 @@ function parseDate(text) {
   else {
     const iso = t.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
     const za = t.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](20\d{2}))?\b/);
+    const named = t.match(/\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)\b/);
     if (iso) date = atLocal(`${iso[1]}-${iso[2]}-${iso[3]}`, 9, 0);
     else if (za) date = atLocal(`${za[3] || localParts().year}-${String(za[2]).padStart(2,'0')}-${String(za[1]).padStart(2,'0')}`, 9, 0);
+    else if (named) {
+      const months={january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
+      let year=Number(localParts().year);
+      date=atLocal(`${year}-${String(months[named[2]]).padStart(2,'0')}-${String(named[1]).padStart(2,'0')}`,9,0);
+      if(date<addDays(today,-1))date=atLocal(`${year+1}-${String(months[named[2]]).padStart(2,'0')}-${String(named[1]).padStart(2,'0')}`,9,0);
+    }
     else {
       const weekdays = { sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6 };
-      for (const [name, day] of Object.entries(weekdays)) if (new RegExp(`\\b${name}\\b`).test(t)) { date = nextWeekday(new Date(), day, /\bnext\s+/.test(t)); break; }
+      for (const [name, day] of Object.entries(weekdays)) if (new RegExp(`\\b${name}\\b`).test(t)) { date = nextWeekday(new Date(), day); break; }
     }
   }
   if (!date) return null;
   const tm = t.match(/\b([01]?\d|2[0-3])[:h]([0-5]\d)\b/);
   if (tm) date = atLocal(localDate(date), Number(tm[1]), Number(tm[2]));
+  else if(/\bafternoon\b/.test(t))date=atLocal(localDate(date),15,0);
+  else if(/\bmorning\b/.test(t))date=atLocal(localDate(date),9,0);
   return date;
 }
 function confidence(text) { return /\b(probably|maybe|expected|likely|should|provisional|tentative)\b/i.test(text) ? 'expected' : 'confirmed'; }
@@ -289,7 +298,7 @@ function linkedRowForQuotedIds(table,selectColumn,quotedIds) {
   return null;
 }
 async function quotedContext(message) {
-  let text='';
+  let text=message?._data?.quotedMsg?.body||message?._data?.quotedMsg?.caption||message?._data?.quotedMsg?.content||'';
   const ids=[];
   const raw=message?._data?.quotedStanzaID||message?._data?.quotedMsg?.id?._serialized||message?._data?.quotedMsg?.id?.id||'';
   if(raw)ids.push(String(raw));
@@ -304,6 +313,13 @@ async function quotedContext(message) {
     }
   }
   return {text,ids:[...new Set(ids)]};
+}
+function sourceSegmentForOrder(text,externalId){
+  return splitOrderUpdates(text).find(segment=>orderKey(segment).includes(orderKey(externalId)))||String(text||'');
+}
+function stageClause(text,stage){
+  const other=stage==='collection'?'delivery':'collection';
+  return String(text||'').match(new RegExp(`\\b${stage}\\b([\\s\\S]*?)(?=\\b${other}\\b|\\bSL(?:A)?[\\s-]?\\d+\\b|$)`,'i'))?.[0]||'';
 }
 function splitOrderUpdates(text) {
   const body = String(text || '');
@@ -399,7 +415,7 @@ async function confirmProof(proofId,orderId){
   const order=db.prepare('SELECT * FROM orders WHERE id=?').get(orderId);
   if(!proof||!order)throw new Error('Proof or order not found');
   if(proof.status==='confirmed')return;
-  const when=nowIso();
+  const when=proof.created_at||nowIso();
   if(proof.stage==='delivery')db.prepare("UPDATE orders SET delivery_at=?,delivery_confidence='confirmed',status='completed',completed_at=?,updated_at=? WHERE id=?").run(when,when,when,order.id);
   else db.prepare("UPDATE orders SET collection_at=?,collection_confidence='confirmed',status='in_transit',updated_at=? WHERE id=?").run(when,when,order.id);
   db.prepare("UPDATE proofs SET order_id=?,status='confirmed',confirmed_at=? WHERE id=?").run(order.id,when,proof.id);
@@ -517,7 +533,7 @@ function validIso(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
-async function applyInterpretedUpdate(plan, messageKey) {
+async function applyInterpretedUpdate(plan, messageKey, sourceText='') {
   const order = db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(String(plan.external_id || '').trim());
   if (!order || plan.action === 'clarify') {
     const question = plan.clarification || `Which order does this update refer to: ${plan.summary || 'the message received'}?`;
@@ -525,16 +541,23 @@ async function applyInterpretedUpdate(plan, messageKey) {
     return {clarified:true};
   }
   const fields=[]; const values=[];
-  const collectionAt=validIso(plan.collection_at); const deliveryAt=validIso(plan.delivery_at);
+  const segment=sourceSegmentForOrder(sourceText,plan.external_id);
+  const collectionClause=stageClause(segment,'collection'); const deliveryClause=stageClause(segment,'delivery');
+  const parsedCollection=parseDate(collectionClause); const parsedDelivery=parseDate(deliveryClause);
+  const collectionAt=parsedCollection?.toISOString()||validIso(plan.collection_at); const deliveryAt=parsedDelivery?.toISOString()||validIso(plan.delivery_at);
+  if(parsedCollection&&/\bweek of\b/i.test(collectionClause))plan.collection_confidence='expected';
+  else if(parsedCollection)plan.collection_confidence=confidence(collectionClause);
+  if(parsedDelivery)plan.delivery_confidence=confidence(deliveryClause);
   if(collectionAt){fields.push('collection_at=?','collection_confidence=?');values.push(collectionAt,plan.collection_confidence);}
   if(deliveryAt){fields.push('delivery_at=?','delivery_confidence=?');values.push(deliveryAt,plan.delivery_confidence);}
   if(plan.contractor){
     const contractor=normalizedContractor(plan.contractor);
     if(contractor){fields.push('contractor=?','transport_method=?');values.push(contractor,/^btsa$/i.test(contractor)?'BTSA':'subcontractor');}
   } else if(plan.transport_method!=='unchanged') { fields.push('transport_method=?'); values.push(plan.transport_method); }
-  if(plan.status!=='unchanged'){
-    fields.push('status=?'); values.push(plan.status);
-    if(['completed','cancelled'].includes(plan.status)){fields.push('completed_at=?');values.push(nowIso());}
+  const effectiveStatus=(collectionAt||deliveryAt)&&['unchanged','unscheduled'].includes(plan.status)?'scheduled':plan.status;
+  if(effectiveStatus!=='unchanged'){
+    fields.push('status=?'); values.push(effectiveStatus);
+    if(['completed','cancelled'].includes(effectiveStatus)){fields.push('completed_at=?');values.push(nowIso());}
     else {fields.push('completed_at=NULL');}
   } else if(collectionAt||deliveryAt){fields.push('status=?');values.push('scheduled');}
   if(!fields.length){
@@ -646,7 +669,7 @@ async function inbound(message) {
       try {
         const interpreted = await interpretSchedulingMessage(message.body,quotedText,quotedOrder?.external_id||'');
         if (interpreted?.updates?.length) {
-          for (let index=0; index<interpreted.updates.length; index++) await applyInterpretedUpdate(interpreted.updates[index],`${mid}-${index}`);
+          for (let index=0; index<interpreted.updates.length; index++) await applyInterpretedUpdate(interpreted.updates[index],`${mid}-${index}`,message.body);
           event(null,'ai_inbound_processed',mid,{text:message.body,updates:interpreted.updates.length});
           return;
         }
@@ -727,6 +750,28 @@ async function summary(period){
   await sendGroup(`*BTSA scheduling ${period} summary*\nOpen orders: ${open.length}\n${lines.join('\n')||'No open orders.'}`,key);
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
+async function repairSept19Updates(){
+  const key='repair-2026-09-19-1755-updates-v1';
+  if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
+  const corrections=[
+    ['SLA-387',atLocal('2026-09-20',9,0).toISOString(),atLocal('2026-09-25',9,0).toISOString(),'confirmed','confirmed','Ross - Speedway Express','subcontractor','scheduled',null],
+    ['SLA-390',atLocal('2026-09-21',9,0).toISOString(),atLocal('2026-09-21',15,0).toISOString(),'confirmed','confirmed','BTSA','BTSA','scheduled',null],
+    ['SLA-391',atLocal('2026-10-09',9,0).toISOString(),null,'expected','unknown',null,null,'scheduled',null],
+    ['SLA-386',null,atLocal('2026-09-19',15,0).toISOString(),'unknown','confirmed',null,null,'completed',atLocal('2026-09-19',15,0).toISOString()]
+  ];
+  for(const [externalId,collectionAt,deliveryAt,collectionConfidence,deliveryConfidence,contractor,transportMethod,status,completedAt] of corrections){
+    const order=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(externalId);
+    if(!order)continue;
+    db.prepare(`UPDATE orders SET collection_at=?,delivery_at=?,collection_confidence=?,delivery_confidence=?,contractor=COALESCE(?,contractor),transport_method=COALESCE(?,transport_method),status=?,completed_at=?,updated_at=? WHERE id=?`)
+      .run(collectionAt,deliveryAt,collectionConfidence,deliveryConfidence,contractor,transportMethod,status,completedAt,nowIso(),order.id);
+    recalc(db.prepare('SELECT * FROM orders WHERE id=?').get(order.id));
+  }
+  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+  await sendGroup(`*Schedule corrections applied*\nSLA-387: Collection Sun 20 Sept morning; delivery Fri 25 Sept; Ross - Speedway Express.\nSLA-390: Collection Mon 21 Sept; delivery Monday afternoon; BTSA.\nSLA-391: Collection expected for the week of 9 October.\nSLA-386: Delivered Saturday afternoon; completed.`,`${key}-message`);
+  const proof=db.prepare("SELECT * FROM proofs WHERE stage='delivery' AND status='awaiting_confirmation' AND created_at BETWEEN ? AND ? ORDER BY id DESC LIMIT 1").get('2026-09-19T15:55:00.000Z','2026-09-19T16:05:00.000Z');
+  const order381=db.prepare("SELECT * FROM orders WHERE external_id='SLA-381' COLLATE NOCASE").get();
+  if(proof&&order381)await confirmProof(proof.id,order381.id);
+}
 setInterval(()=>dueReminders().catch(console.error),60000);
 setInterval(()=>processOutbox().catch(console.error),60000);
 setInterval(()=>{
@@ -738,7 +783,7 @@ setInterval(()=>{
 client.on('message',inbound);
 client.on('qr',qr=>{latestQr=qr;console.log('Scheduling WhatsApp QR generated');});
 client.on('authenticated',()=>{latestQr=null;console.log('Scheduling WhatsApp authenticated');});
-client.on('ready',()=>console.log('BTSA Scheduling Agent ready'));
+client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');repairSept19Updates().catch(error=>console.error('Sept 19 repair failed:',error?.message||String(error)));});
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
