@@ -17,7 +17,6 @@ const CALENDAR_WEBHOOK_URL = process.env.CALENDAR_WEBHOOK_URL || '';
 const CALENDAR_WEBHOOK_SECRET = process.env.CALENDAR_WEBHOOK_SECRET || '';
 const SHADOW_MODE = String(process.env.SHADOW_MODE || 'true').toLowerCase() === 'true';
 const MORNING_HOUR = Number(process.env.MORNING_SUMMARY_HOUR || 7);
-const EVENING_HOUR = Number(process.env.EVENING_SUMMARY_HOUR || 17);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const SOCIAL_PROOF_WEBHOOK_URL = process.env.SOCIAL_PROOF_WEBHOOK_URL || '';
@@ -749,7 +748,7 @@ async function dueReminders(){
 async function summary(period){
   const key=`${period}-summary-${localDate()}`; if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY COALESCE(collection_at,delivery_at,created_at)").all();
-  const lines=open.slice(0,30).map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}\nVia: ${o.contractor||o.transport_method||'Unassigned'}`);
+  const lines=open.slice(0,30).map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nRoute: ${o.route||'Not recorded'}\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}\nVia: ${o.contractor||o.transport_method||'Unassigned'}`);
   await sendGroup(`📋 *${period[0].toUpperCase()+period.slice(1)} schedule | ${open.length} open*\n\n${lines.join('\n\n')||'No open orders.'}`,key);
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
@@ -786,12 +785,10 @@ async function requeueSept19SocialProof(){
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
   console.log('Queued SLA-381 delivery proof for Social Agent retry');
 }
-setInterval(()=>dueReminders().catch(console.error),60000);
 setInterval(()=>processOutbox().catch(console.error),60000);
 setInterval(()=>{
   if(localMinute()!==0)return;
   if(localHour()===MORNING_HOUR)summary('morning').catch(console.error);
-  if(localHour()===EVENING_HOUR)summary('evening').catch(console.error);
 },60000);
 
 client.on('message',inbound);
