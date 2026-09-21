@@ -623,6 +623,9 @@ async function applyUpdate(o, text) {
 }
 
 const seen = new Set();
+function isOtherDepartmentMessage(text) {
+  return /\b(invoice|invoiced|quickbooks|payment|paid|statement|receipt)\b/i.test(String(text||''));
+}
 async function inbound(message) {
   try {
     if (message.fromMe || message.from !== GROUP_ID || (!message.body&&!message.hasMedia)) return;
@@ -633,6 +636,10 @@ async function inbound(message) {
     const ingested = message.body ? await ingestGroupOrder(message.body, mid) : null;
     if (ingested) {
       event(ingested.order.id, 'inbound_processed', mid, { text: message.body, newOrder: true, deduplicated: ingested.deduplicated });
+      return;
+    }
+    if(isOtherDepartmentMessage(message.body)){
+      event(null,'inbound_ignored',mid,{text:message.body,reason:'other_department'});
       return;
     }
     const quote=await quotedContext(message);
