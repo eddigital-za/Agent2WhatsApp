@@ -752,8 +752,8 @@ async function dueReminders(){
     recalc(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
   }
 }
-async function summary(period){
-  const key=`${period}-summary-${localDate()}`; if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
+async function summary(period,requestedKey=''){
+  const key=requestedKey||`${period}-summary-${localDate()}`; if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY COALESCE(collection_at,delivery_at,created_at)").all();
   const lines=open.slice(0,30).map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nRoute: ${o.route||'Not recorded'}\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}\nVia: ${o.contractor||o.transport_method||'Unassigned'}`);
   await sendGroup(`📋 *${period[0].toUpperCase()+period.slice(1)} schedule | ${open.length} open*\n\n${lines.join('\n\n')||'No open orders.'}`,key);
@@ -801,7 +801,7 @@ setInterval(()=>{
 client.on('message',inbound);
 client.on('qr',qr=>{latestQr=qr;console.log('Scheduling WhatsApp QR generated');});
 client.on('authenticated',()=>{latestQr=null;console.log('Scheduling WhatsApp authenticated');});
-client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');repairSept19Updates().then(requeueSept19SocialProof).catch(error=>console.error('Sept 19 repair failed:',error?.message||String(error)));});
+client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');repairSept19Updates().then(requeueSept19SocialProof).then(()=>summary('current','manual-clean-summary-2026-09-21-v1')).catch(error=>console.error('Scheduling startup task failed:',error?.message||String(error)));});
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
