@@ -819,7 +819,37 @@ setInterval(()=>{
 client.on('message',inbound);
 client.on('qr',qr=>{latestQr=qr;console.log('Scheduling WhatsApp QR generated');});
 client.on('authenticated',()=>{latestQr=null;console.log('Scheduling WhatsApp authenticated');});
-client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');});
+async function reconcileSept23OrderThread(){
+  const key='reconcile-2026-09-23-order-thread-v1';
+  if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
+  const mappings=[
+    ['WA-D244A6671E','SLA-398'],['WA-025033D25A','SLA-399'],['WA-F49FEBA238','SLA-400'],
+    ['WA-E327FDDA06','SLA-402'],['WA-CA8C9B6858','SLA-403'],['WA-5D9A34AC78','SLA-404'],
+    ['WA-7FB913C79F','SLA-405'],['WA-CF47CEEAB1','SLA-406'],['WA-C1543FBA46','SLA-407'],
+    ['WA-D8C557CB9E','SLA-408']
+  ];
+  for(const [wa,sla] of mappings){
+    const waRow=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(wa);
+    const slaRow=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(sla);
+    if(waRow&&!slaRow)db.prepare('UPDATE orders SET external_id=?,updated_at=? WHERE id=?').run(sla,nowIso(),waRow.id);
+  }
+  const schedules=[
+    ['SLA-404','2026-09-25','2026-09-25'],['SLA-405','2026-09-25','2026-09-25'],
+    ['SLA-406','2026-09-24','2026-09-25'],['SLA-407','2026-09-25','2026-09-25'],
+    ['SLA-408','2026-09-25','2026-09-25']
+  ];
+  for(const [sla,c,d] of schedules){
+    const o=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(sla);
+    if(!o)continue;
+    db.prepare("UPDATE orders SET collection_at=?,delivery_at=?,collection_confidence='confirmed',delivery_confidence='confirmed',contractor='BTSA',transport_method='BTSA',status='scheduled',updated_at=? WHERE id=?")
+      .run(atLocal(c,9,0).toISOString(),atLocal(d,9,0).toISOString(),nowIso(),o.id);
+    recalc(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
+  }
+  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+  await summary('updated','updated-summary-2026-09-23-order-thread-v1');
+  console.log('Reconciled 23 Sep Order Agent thread to SLA refs and sent updated schedule');
+}
+client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');reconcileSept23OrderThread().catch(e=>console.error('Sept23 reconciliation failed:',e));});
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
