@@ -628,6 +628,9 @@ function isOtherDepartmentMessage(text) {
 }
 async function inbound(message) {
   try {
+    if (!message.fromMe && String(message.from || '').endsWith('@g.us')) {
+      try { const chat = await message.getChat(); console.log('[GROUP-DISCOVERY]', JSON.stringify({ id: message.from, name: chat?.name || '' })); } catch (_) { console.log('[GROUP-DISCOVERY]', JSON.stringify({ id: message.from, name: '' })); }
+    }
     if (message.fromMe || message.from !== GROUP_ID || (!message.body&&!message.hasMedia)) return;
     const mid = message.id?._serialized || '';
     if (mid && seen.has(mid)) return;
