@@ -756,22 +756,13 @@ async function summary(period,requestedKey=''){
   const groups=new Map();
   for(const o of open){
     const contractor=contractorName(o);
-    if(!groups.has(contractor))groups.set(contractor,new Map());
-    const dateValue=o.collection_at||o.delivery_at;
-    const dateLabel=dateValue
-      ? new Intl.DateTimeFormat('en-ZA',{timeZone:TZ,weekday:'short',day:'2-digit',month:'short'}).format(new Date(dateValue))
-      : 'Date not scheduled';
-    if(!groups.get(contractor).has(dateLabel))groups.get(contractor).set(dateLabel,[]);
-    groups.get(contractor).get(dateLabel).push(o);
+    if(!groups.has(contractor))groups.set(contractor,[]);
+    groups.get(contractor).push(o);
   }
   const sections=[];
-  for(const [contractor,dates] of groups){
-    const dateSections=[];
-    for(const [dateLabel,orders] of dates){
-      const rows=orders.map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nRoute: ${o.route||'Not recorded'}\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}`);
-      dateSections.push(`_${dateLabel}_\n${rows.join('\n\n')}`);
-    }
-    sections.push(`*${contractor}*\n${dateSections.join('\n\n')}`);
+  for(const [contractor,orders] of groups){
+    const rows=orders.map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nRoute: ${o.route||'Not recorded'}\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}`);
+    sections.push(`*${contractor}*\n${rows.join('\n\n')}`);
   }
   await sendGroup(`📋 *${period[0].toUpperCase()+period.slice(1)} schedule | ${open.length} open*\n\n${sections.join('\n\n──────────\n\n')||'No open orders.'}`,key);
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
@@ -824,6 +815,7 @@ async function reconcileSept23OrderThread(){
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const mappings=[
     ['WA-D244A6671E','SLA-398'],['WA-025033D25A','SLA-399'],['WA-F49FEBA238','SLA-400'],
+    ['WA-694FEBBC1A','SLA-401'],
     ['WA-E327FDDA06','SLA-402'],['WA-CA8C9B6858','SLA-403'],['WA-5D9A34AC78','SLA-404'],
     ['WA-7FB913C79F','SLA-405'],['WA-CF47CEEAB1','SLA-406'],['WA-C1543FBA46','SLA-407'],
     ['WA-D8C557CB9E','SLA-408']
@@ -849,7 +841,12 @@ async function reconcileSept23OrderThread(){
   await summary('updated','updated-summary-2026-09-23-order-thread-v1');
   console.log('Reconciled 23 Sep Order Agent thread to SLA refs and sent updated schedule');
 }
-client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');reconcileSept23OrderThread().catch(e=>console.error('Sept23 reconciliation failed:',e));});
+client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');reconcileSept23OrderThread().then(async()=>{
+  const silver=db.prepare("SELECT * FROM orders WHERE external_id='WA-694FEBBC1A' COLLATE NOCASE").get();
+  const existing401=db.prepare("SELECT * FROM orders WHERE external_id='SLA-401' COLLATE NOCASE").get();
+  if(silver&&!existing401)db.prepare("UPDATE orders SET external_id='SLA-401',updated_at=? WHERE id=?").run(nowIso(),silver.id);
+  await summary('corrected','corrected-summary-2026-09-23-v2');
+}).catch(e=>console.error('Sept23 reconciliation failed:',e));});
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
