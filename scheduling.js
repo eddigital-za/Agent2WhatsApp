@@ -11,7 +11,7 @@ app.use(express.json({ limit: '2mb' }));
 const TZ = 'Africa/Johannesburg';
 const AUTH_DIR = '/app/.wwebjs_auth';
 const DB_PATH = path.join(AUTH_DIR, 'btsa-scheduling.sqlite');
-const GROUP_ID = process.env.ORDERS_GROUP_ID || '';
+const GROUP_ID = process.env.SCHEDULING_GROUP_ID || process.env.ORDERS_GROUP_ID || '';
 const API_KEY = process.env.INTAKE_API_KEY || '';
 const CALENDAR_WEBHOOK_URL = process.env.CALENDAR_WEBHOOK_URL || '';
 const CALENDAR_WEBHOOK_SECRET = process.env.CALENDAR_WEBHOOK_SECRET || '';
@@ -581,17 +581,8 @@ async function syncCalendar(o) {
   if (!response.ok) throw new Error(`Calendar webhook HTTP ${response.status}`);
 }
 function recalc(o) {
-  const now = new Date();
-  const candidates = [];
-  for (const [kind, value] of [['collection',o.collection_at],['delivery',o.delivery_at]]) {
-    if (!value) continue;
-    const when = new Date(value);
-    candidates.push({ at:addDays(when,-2), action:`${kind}_two_day` });
-    candidates.push({ at:addDays(when,-1), action:`${kind}_one_day` });
-    candidates.push({ at:when, action:`${kind}_due` });
-  }
-  const next = candidates.filter(x=>x.at>now).sort((a,b)=>a.at-b.at)[0];
-  db.prepare('UPDATE orders SET next_action=?,next_action_at=?,updated_at=? WHERE id=?').run(next?.action || null,next?.at.toISOString() || null,nowIso(),o.id);
+  // Individual date reminders are intentionally disabled. The 07:00 grouped report is the reminder surface.
+  db.prepare('UPDATE orders SET next_action=NULL,next_action_at=NULL,updated_at=? WHERE id=?').run(nowIso(),o.id);
 }
 async function applyUpdate(o, text) {
   const date = parseDate(text);
@@ -628,9 +619,6 @@ function isOtherDepartmentMessage(text) {
 }
 async function inbound(message) {
   try {
-    if (!message.fromMe && String(message.from || '').endsWith('@g.us')) {
-      try { const chat = await message.getChat(); console.log('[GROUP-DISCOVERY]', JSON.stringify({ id: message.from, name: chat?.name || '' })); } catch (_) { console.log('[GROUP-DISCOVERY]', JSON.stringify({ id: message.from, name: '' })); }
-    }
     if (message.fromMe || message.from !== GROUP_ID || (!message.body&&!message.hasMedia)) return;
     const mid = message.id?._serialized || '';
     if (mid && seen.has(mid)) return;
@@ -757,11 +745,38 @@ async function dueReminders(){
 }
 async function summary(period,requestedKey=''){
   const key=requestedKey||`${period}-summary-${localDate()}`; if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
-  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY COALESCE(collection_at,delivery_at,created_at)").all();
-  const lines=open.slice(0,30).map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nRoute: ${o.route||'Not recorded'}\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}\nVia: ${o.contractor||o.transport_method||'Unassigned'}`);
-  await sendGroup(`📋 *${period[0].toUpperCase()+period.slice(1)} schedule | ${open.length} open*\n\n${lines.join('\n\n')||'No open orders.'}`,key);
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed')").all();
+  const contractorName=o=>o.contractor||o.transport_method||'UNASSIGNED';
+  const dateKey=o=>o.collection_at||o.delivery_at||'9999-12-31T23:59:59.999Z';
+  open.sort((a,b)=>{
+    const ca=contractorName(a).localeCompare(contractorName(b),undefined,{sensitivity:'base'});
+    if(ca)return ca;
+    return dateKey(a).localeCompare(dateKey(b));
+  });
+  const groups=new Map();
+  for(const o of open){
+    const contractor=contractorName(o);
+    if(!groups.has(contractor))groups.set(contractor,new Map());
+    const dateValue=o.collection_at||o.delivery_at;
+    const dateLabel=dateValue
+      ? new Intl.DateTimeFormat('en-ZA',{timeZone:TZ,weekday:'short',day:'2-digit',month:'short'}).format(new Date(dateValue))
+      : 'Date not scheduled';
+    if(!groups.get(contractor).has(dateLabel))groups.get(contractor).set(dateLabel,[]);
+    groups.get(contractor).get(dateLabel).push(o);
+  }
+  const sections=[];
+  for(const [contractor,dates] of groups){
+    const dateSections=[];
+    for(const [dateLabel,orders] of dates){
+      const rows=orders.map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nRoute: ${o.route||'Not recorded'}\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}`);
+      dateSections.push(`_${dateLabel}_\n${rows.join('\n\n')}`);
+    }
+    sections.push(`*${contractor}*\n${dateSections.join('\n\n')}`);
+  }
+  await sendGroup(`📋 *${period[0].toUpperCase()+period.slice(1)} schedule | ${open.length} open*\n\n${sections.join('\n\n──────────\n\n')||'No open orders.'}`,key);
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
+
 async function repairSept19Updates(){
   const key='repair-2026-09-19-1755-updates-v1';
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
@@ -804,7 +819,7 @@ setInterval(()=>{
 client.on('message',inbound);
 client.on('qr',qr=>{latestQr=qr;console.log('Scheduling WhatsApp QR generated');});
 client.on('authenticated',()=>{latestQr=null;console.log('Scheduling WhatsApp authenticated');});
-client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');repairSept19Updates().then(requeueSept19SocialProof).then(()=>summary('current','manual-clean-summary-2026-09-21-v1')).catch(error=>console.error('Scheduling startup task failed:',error?.message||String(error)));});
+client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');});
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
