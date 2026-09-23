@@ -841,11 +841,34 @@ async function reconcileSept23OrderThread(){
   await summary('updated','updated-summary-2026-09-23-order-thread-v1');
   console.log('Reconciled 23 Sep Order Agent thread to SLA refs and sent updated schedule');
 }
+async function applyMultiStageSept23(){
+  const key='multistage-402-403-2026-09-23-v1';
+  if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
+  const updates=[
+    ['SLA-402',null,null,null,'in_transit','Durrell: collect Witbank and deliver to Cheetah Express JHB depot. Cheetah Express: JHB depot to Brackenfell final delivery.'],
+    ['SLA-403','2026-09-23','2026-09-26','BTSA','in_transit','Cheetah Express collected in Cape Town 23 Sep and transports to JHB depot. BTSA collects from Cheetah JHB depot Fri 25 Sep and delivers PMB Sat 26 Sep.']
+  ];
+  for(const [sla,cDate,dDate,contractor,status,note] of updates){
+    const o=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(sla);
+    if(!o)continue;
+    if(sla==='SLA-403'){
+      db.prepare("UPDATE orders SET collection_at=?,delivery_at=?,collection_confidence='confirmed',delivery_confidence='confirmed',contractor=?,transport_method='multi-stage',status=?,updated_at=? WHERE id=?")
+        .run(atLocal(cDate,9,0).toISOString(),atLocal(dDate,9,0).toISOString(),contractor,status,nowIso(),o.id);
+    } else {
+      db.prepare("UPDATE orders SET transport_method='multi-stage',status=?,updated_at=? WHERE id=?").run(status,nowIso(),o.id);
+    }
+    event(o.id,'multi_stage_plan',key+'-'+sla,{note});
+    recalc(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
+  }
+  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+  await sendGroup('*Multi-stage updates*\n\n*SLA-402 | Suzuki GSX1300 B-KING*\nStage 1: Durrell | Witbank → Cheetah Express JHB depot\nStage 2: Cheetah Express | JHB depot → Brackenfell\n\n*SLA-403 | Kawasaki ZW14*\nStage 1: Cheetah Express | CPT → JHB depot | collected Wed 23 Sept\nStage 2: BTSA | collect JHB depot Fri 25 Sept → deliver PMB Sat 26 Sept',key+'-message');
+}
 client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');reconcileSept23OrderThread().then(async()=>{
   const silver=db.prepare("SELECT * FROM orders WHERE external_id='WA-694FEBBC1A' COLLATE NOCASE").get();
   const existing401=db.prepare("SELECT * FROM orders WHERE external_id='SLA-401' COLLATE NOCASE").get();
   if(silver&&!existing401)db.prepare("UPDATE orders SET external_id='SLA-401',updated_at=? WHERE id=?").run(nowIso(),silver.id);
-  await summary('corrected','corrected-summary-2026-09-23-v2');
+  await applyMultiStageSept23();
+  await summary('corrected','corrected-summary-2026-09-23-v3');
 }).catch(e=>console.error('Sept23 reconciliation failed:',e));});
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
