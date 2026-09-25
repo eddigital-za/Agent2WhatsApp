@@ -111,21 +111,22 @@ client.on("message", async (message) => {
     const ALLOWED_DIRECT_ID =
       process.env.ALLOWED_DIRECT_ID || "263311610368253@lid";
 
-    // Allowed BTSA Social group
+    // Allowed BTSA groups. ALLOWED_GROUP_ID remains the primary Orders group.
+    // EXTRA_ALLOWED_GROUP_IDS can contain comma-separated additional BTSA groups.
     const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
+    const EXTRA_ALLOWED_GROUP_IDS = String(process.env.EXTRA_ALLOWED_GROUP_IDS || "")
+      .split(",").map(v => v.trim()).filter(Boolean);
+    const allowedGroups = new Set([ALLOWED_GROUP_ID, ...EXTRA_ALLOWED_GROUP_IDS].filter(Boolean));
 
     // Check whether this is a group message
     const isGroup = message.from.endsWith("@g.us");
 
     if (isGroup) {
-      // Until we know the BTSA Social group ID, log group IDs but DO NOT forward them
-      if (!ALLOWED_GROUP_ID) {
+      if (!allowedGroups.size) {
         console.log("GROUP DETECTED:", message.from);
         return;
       }
-
-      // Ignore every group except BTSA Social
-      if (message.from !== ALLOWED_GROUP_ID) {
+      if (!allowedGroups.has(message.from)) {
         console.log("Ignored group message from:", message.from);
         return;
       }
