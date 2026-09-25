@@ -717,7 +717,7 @@ app.post('/contractors',auth,(req,res)=>{
   db.prepare(`INSERT INTO contractors(name,active,created_at,updated_at) VALUES(?,1,?,?) ON CONFLICT(name) DO UPDATE SET active=1,updated_at=excluded.updated_at`).run(name,now,now);
   res.json({success:true,contractor:db.prepare('SELECT name,active,created_at,updated_at FROM contractors WHERE name=? COLLATE NOCASE').get(name)});
 });
-app.post('/order',async(req,res)=>{
+app.post('/order',auth,async(req,res)=>{
   try{
     const b=req.body||{}; const externalId=String(b.externalId||b.entryId||b.orderId||'').trim();
     if(!externalId)return res.status(400).json({error:'externalId is required'});
