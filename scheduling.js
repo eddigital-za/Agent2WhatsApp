@@ -16,6 +16,7 @@ const API_KEY = process.env.INTAKE_API_KEY || '';
 const CALENDAR_WEBHOOK_URL = process.env.CALENDAR_WEBHOOK_URL || '';
 const CALENDAR_WEBHOOK_SECRET = process.env.CALENDAR_WEBHOOK_SECRET || '';
 const SHADOW_MODE = String(process.env.SHADOW_MODE || 'true').toLowerCase() === 'true';
+const WHATSAPP_OUTBOUND_ENABLED = String(process.env.WHATSAPP_OUTBOUND_ENABLED || 'true').toLowerCase() === 'true';
 const MORNING_HOUR = Number(process.env.MORNING_SUMMARY_HOUR || 7);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -163,6 +164,7 @@ let latestQr = null;
 let lastInboundAt = null;
 
 async function sendGroup(text, key, orderId = null) {
+  if (!WHATSAPP_OUTBOUND_ENABLED) { console.log('[WHATSAPP OUTBOUND DISABLED]', key || 'unkeyed'); return { disabled: true }; }
   if (!GROUP_ID) throw new Error('ORDERS_GROUP_ID is not configured');
   if (key && db.prepare('SELECT 1 FROM events WHERE event_key=?').get(key)) return { deduplicated: true };
   if (SHADOW_MODE) {
@@ -744,28 +746,29 @@ async function dueReminders(){
   }
 }
 async function summary(period,requestedKey=''){
-  const key=requestedKey||`${period}-summary-${localDate()}`; if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
+  const key=requestedKey||`${period}-summary-${localDate()}`;
+  if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed')").all();
-  const contractorName=o=>o.contractor||o.transport_method||'UNASSIGNED';
-  const dateKey=o=>o.collection_at||o.delivery_at||'9999-12-31T23:59:59.999Z';
-  open.sort((a,b)=>{
-    const ca=contractorName(a).localeCompare(contractorName(b),undefined,{sensitivity:'base'});
-    if(ca)return ca;
-    return dateKey(a).localeCompare(dateKey(b));
-  });
-  const groups=new Map();
-  for(const o of open){
-    const contractor=contractorName(o);
-    if(!groups.has(contractor))groups.set(contractor,[]);
-    groups.get(contractor).push(o);
-  }
-  const sections=[];
-  for(const [contractor,orders] of groups){
-    const rows=orders.map(o=>`*${o.external_id} | ${o.bike||'Motorcycle'}*\nRoute: ${o.route||'Not recorded'}\nC: ${fmt(o.collection_at)}\nD: ${fmt(o.delivery_at)}`);
-    sections.push(`*${contractor}*\n${rows.join('\n\n')}`);
-  }
-  await sendGroup(`📋 *${period[0].toUpperCase()+period.slice(1)} schedule | ${open.length} open*\n\n${sections.join('\n\n──────────\n\n')||'No open orders.'}`,key);
-  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+  const today=localDate();
+  const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
+  const collectionsToday=open.filter(o=>dateOnly(o.collection_at)===today).length;
+  const deliveriesToday=open.filter(o=>dateOnly(o.delivery_at)===today).length;
+  const unscheduled=open.filter(o=>o.status==='unscheduled').length;
+  const inTransit=open.filter(o=>o.status==='in_transit').length;
+  const scheduled=open.filter(o=>o.status==='scheduled').length;
+  const needsAttention=open.filter(o=>!o.collection_at||!o.delivery_at||!(o.contractor||o.transport_method)).length;
+  const text=[
+    `*BTSA Scheduling | ${today}*`,
+    `Collections today: *${collectionsToday}*`,
+    `Deliveries today: *${deliveriesToday}*`,
+    `Scheduled: *${scheduled}*`,
+    `In transit: *${inTransit}*`,
+    `Unscheduled: *${unscheduled}*`,
+    `Needs attention: *${needsAttention}*`,
+    `Open orders: *${open.length}*`
+  ].join('\n');
+  const sent=await sendGroup(text,key);
+  if(!sent.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
 
 async function repairSept19Updates(){
