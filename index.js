@@ -276,14 +276,17 @@ client.on("message", async (message) => {
 
     const ALLOWED_DIRECT_ID = process.env.ALLOWED_DIRECT_ID || "263311610368253@lid";
     const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
+    const EXTRA_ALLOWED_GROUP_IDS = String(process.env.EXTRA_ALLOWED_GROUP_IDS || "")
+      .split(",").map(v => v.trim()).filter(Boolean);
+    const allowedGroups = new Set([ALLOWED_GROUP_ID, ...EXTRA_ALLOWED_GROUP_IDS].filter(Boolean));
     const isGroup = message.from.endsWith("@g.us");
 
     if (isGroup) {
-      if (!ALLOWED_GROUP_ID) {
+      if (!allowedGroups.size) {
         console.log("GROUP DETECTED:", message.from);
         return;
       }
-      if (message.from !== ALLOWED_GROUP_ID) return;
+      if (!allowedGroups.has(message.from)) return;
     } else if (message.from !== ALLOWED_DIRECT_ID) {
       return;
     }
