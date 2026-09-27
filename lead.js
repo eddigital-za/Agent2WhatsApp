@@ -278,11 +278,26 @@ async function maybeSendDailyReport() {
   const reportDate = previousLocalDate();
   if (db.prepare("SELECT 1 FROM report_runs WHERE report_date=?").get(reportDate)) return;
   const [start, end] = localDateBounds(reportDate);
-  const m = db.prepare(`SELECT COUNT(*) submissions, COUNT(DISTINCT phone) unique_leads, SUM(first_touch_sent_at IS NOT NULL) first_touch_sent, SUM(replied_at IS NOT NULL) replied, SUM(duplicate_suppressed_at IS NOT NULL) duplicates_suppressed, SUM(manual_review=1) manual_review FROM leads WHERE submitted_at>=? AND submitted_at<?`).get(start, end);
-  const followups = db.prepare(`SELECT COUNT(*) c FROM events WHERE event_type='followup_sent' AND created_at>=? AND created_at<?`).get(start, end).c;
-  const replies = db.prepare(`SELECT COUNT(*) c FROM events WHERE event_type='reply_received' AND created_at>=? AND created_at<?`).get(start, end).c;
-  const replyRate = m.unique_leads ? Math.round((m.replied / m.unique_leads) * 100) : 0;
-  const text = `BTSA LEAD REPORT — ${reportDate}\n\nSubmissions: ${m.submissions || 0}\nUnique leads: ${m.unique_leads || 0}\nDuplicate/repeat submissions suppressed: ${m.duplicates_suppressed || 0}\nFirst-touch WhatsApps sent: ${m.first_touch_sent || 0}\nLeads replied: ${m.replied || 0}/${m.unique_leads || 0} (${replyRate}%)\nReplies received yesterday: ${replies || 0}\n24h follow-ups sent yesterday: ${followups || 0}\nManual-review enquiries: ${m.manual_review || 0}`;
+  const m = db.prepare(`SELECT
+    COUNT(*) submissions,
+    COUNT(DISTINCT phone) unique_leads,
+    SUM(first_touch_sent_at IS NOT NULL) first_touch_sent,
+    SUM(duplicate_suppressed_at IS NOT NULL) duplicates_suppressed,
+    SUM(manual_review=1) manual_review,
+    SUM(first_touch_sent_at IS NOT NULL AND replied_at IS NOT NULL AND (followup_sent_at IS NULL OR replied_at < followup_sent_at)) first_touch_responses,
+    SUM(followup_sent_at IS NOT NULL) followups_sent,
+    SUM(followup_sent_at IS NOT NULL AND replied_at IS NOT NULL AND replied_at >= followup_sent_at) followup_responses,
+    SUM(first_touch_sent_at IS NOT NULL AND replied_at IS NOT NULL) workflow_responses
+    FROM leads WHERE submitted_at>=? AND submitted_at<?`).get(start, end);
+  const firstTouchSent = Number(m.first_touch_sent || 0);
+  const firstTouchResponses = Number(m.first_touch_responses || 0);
+  const followupsSent = Number(m.followups_sent || 0);
+  const followupResponses = Number(m.followup_responses || 0);
+  const workflowResponses = Number(m.workflow_responses || 0);
+  const firstTouchRate = firstTouchSent ? Math.round((firstTouchResponses / firstTouchSent) * 100) : 0;
+  const followupRate = followupsSent ? Math.round((followupResponses / followupsSent) * 100) : 0;
+  const workflowRate = firstTouchSent ? Math.round((workflowResponses / firstTouchSent) * 100) : 0;
+  const text = `BTSA LEAD REPORT — ${reportDate}\n\nSubmissions: ${m.submissions || 0}\nUnique leads: ${m.unique_leads || 0}\nDuplicate/repeat submissions suppressed: ${m.duplicates_suppressed || 0}\nFirst-touch WhatsApps sent: ${firstTouchSent}\nReplied before 24h follow-up: ${firstTouchResponses}/${firstTouchSent} (${firstTouchRate}%)\n24h follow-ups sent: ${followupsSent}\nReplied after 24h follow-up: ${followupResponses}/${followupsSent} (${followupRate}%)\nTotal workflow responses: ${workflowResponses}/${firstTouchSent} (${workflowRate}%)\nManual-review enquiries: ${m.manual_review || 0}`;
   try {
     await sendWhatsApp({ chatId: REPORT_CHAT_ID, text, idempotencyKey: `lead-daily-report-${reportDate}` });
     db.prepare("INSERT INTO report_runs(report_date,sent_at) VALUES(?,?)").run(reportDate, isoNow());
