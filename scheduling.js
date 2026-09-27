@@ -880,8 +880,9 @@ async function requeueSept19SocialProof(){
   console.log('Queued SLA-381 delivery proof for Social Agent retry');
 }
 const ONE_TIME_REPORT = process.env.ONE_TIME_REPORT || '';
-if(ONE_TIME_REPORT && !db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get('manual-reconcile-2026-09-27')){
-  setTimeout(async()=>{ try { const sent=await sendGroup(ONE_TIME_REPORT,'manual-reconcile-2026-09-27'); if(!sent?.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run('manual-reconcile-2026-09-27',nowIso()); } catch(e){ console.error('One-time report send failed:',e.message); } },8000);
+const ONE_TIME_REPORT_KEY = process.env.ONE_TIME_REPORT_KEY || ONE_TIME_REPORT_KEY;
+if(ONE_TIME_REPORT && !db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(ONE_TIME_REPORT_KEY)){
+  setTimeout(async()=>{ try { const sent=await sendGroup(ONE_TIME_REPORT,ONE_TIME_REPORT_KEY); if(!sent?.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(ONE_TIME_REPORT_KEY,nowIso()); } catch(e){ console.error('One-time report send failed:',e.message); } },8000);
 }
 syncSlaSheet().catch(console.error);
 setInterval(()=>syncSlaSheet().catch(console.error),SLA_SYNC_INTERVAL_MS);
