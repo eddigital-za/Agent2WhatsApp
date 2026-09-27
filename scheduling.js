@@ -823,29 +823,41 @@ async function dueReminders(){
 async function summary(period,requestedKey=''){
   const key=requestedKey||`${period}-summary-${localDate()}`;
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
-  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed')").all();
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY contractor COLLATE NOCASE, external_id").all();
   const today=localDate();
   const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
   const collectionsToday=open.filter(o=>dateOnly(o.collection_at)===today).length;
   const deliveriesToday=open.filter(o=>dateOnly(o.delivery_at)===today).length;
-  const unscheduled=open.filter(o=>o.status==='unscheduled').length;
   const inTransit=open.filter(o=>o.status==='in_transit').length;
   const scheduled=open.filter(o=>o.status==='scheduled').length;
+  const unscheduled=open.filter(o=>o.status==='unscheduled').length;
   const needsAttention=open.filter(o=>!o.collection_at||!o.delivery_at||!(o.contractor||o.transport_method)).length;
+  const groups=new Map();
+  for(const o of open){
+    const via=o.contractor||o.transport_method||'UNASSIGNED';
+    if(!groups.has(via))groups.set(via,[]);
+    groups.get(via).push(o);
+  }
+  const sections=[...groups.entries()].map(([via,orders])=>{
+    const cards=orders.map(o=>[
+      `*${o.external_id} | ${o.bike||'Motorcycle'}*`,
+      `Route: ${o.route||'Not recorded'}`,
+      `C: ${fmt(o.collection_at)}`,
+      `D: ${fmt(o.delivery_at)}`,
+      `Status: ${String(o.status).replaceAll('_',' ')}`
+    ].join('\n')).join('\n\n');
+    return `*${via}*\n${cards}`;
+  }).join('\n\n──────────\n\n');
   const text=[
-    `*BTSA Scheduling | ${today}*`,
-    `Collections today: *${collectionsToday}*`,
-    `Deliveries today: *${deliveriesToday}*`,
-    `Scheduled: *${scheduled}*`,
-    `In transit: *${inTransit}*`,
-    `Unscheduled: *${unscheduled}*`,
-    `Needs attention: *${needsAttention}*`,
-    `Open orders: *${open.length}*`
+    `📋 *Morning schedule | ${open.length} open*`,
+    `Today: ${collectionsToday} collections | ${deliveriesToday} deliveries`,
+    `Scheduled: ${scheduled} | In transit: ${inTransit} | Unscheduled: ${unscheduled} | Needs attention: ${needsAttention}`,
+    '',
+    sections
   ].join('\n');
   const sent=await sendGroup(text,key);
   if(!sent.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
-
 async function repairSept19Updates(){
   const key='repair-2026-09-19-1755-updates-v1';
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
