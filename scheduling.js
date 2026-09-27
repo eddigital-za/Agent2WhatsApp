@@ -22,6 +22,11 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const SOCIAL_PROOF_WEBHOOK_URL = process.env.SOCIAL_PROOF_WEBHOOK_URL || '';
 const AGENT_HANDOFF_SECRET = process.env.AGENT_HANDOFF_SECRET || '';
+const SLA_SHEET_CSV_URL = process.env.SLA_SHEET_CSV_URL || 'https://docs.google.com/spreadsheets/d/1jkgivHJBWzVYMgCoUIb65EaRddyM2NoXml7mQnBVVS4/gviz/tq?tqx=out:csv&sheet=Sheet1';
+const SLA_SYNC_MIN_REF = Number(process.env.SLA_SYNC_MIN_REF || 398);
+const SLA_SYNC_INTERVAL_MS = Number(process.env.SLA_SYNC_INTERVAL_MS || 300000);
+let lastSheetSync = { ok:false, at:null, rows:0, upserts:0, error:'not run yet' };
+
 
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 const PROOF_DIR = path.join(AUTH_DIR, 'proofs');
@@ -733,7 +738,77 @@ app.post('/order',auth,async(req,res)=>{
     res.json({success:true,deduplicated:false,order:db.prepare('SELECT * FROM orders WHERE id=?').get(o.id)});
   }catch(e){console.error('Order intake error:',e);res.status(500).json({error:e.message});}
 });
+
+app.get('/sync-status',(req,res)=>res.json(lastSheetSync));
+app.get('/dashboard',(req,res)=>{
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY external_id DESC").all();
+  const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const today=localDate();
+  const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
+  const counts={
+    collections:open.filter(o=>dateOnly(o.collection_at)===today).length,
+    deliveries:open.filter(o=>dateOnly(o.delivery_at)===today).length,
+    transit:open.filter(o=>o.status==='in_transit').length,
+    unscheduled:open.filter(o=>o.status==='unscheduled').length,
+    attention:open.filter(o=>!o.collection_at||!o.delivery_at||!(o.contractor||o.transport_method)).length
+  };
+  const cards=open.map(o=>`<details class="card"><summary><b>${esc(o.external_id)}</b> · ${esc(o.bike||'Motorcycle')}<span>${esc(String(o.status).replaceAll('_',' '))}</span></summary><div class="detail"><b>Route:</b> ${esc(o.route||'Not recorded')}<br><b>Client:</b> ${esc(o.client_name||'')}<br><b>Contractor:</b> ${esc(o.contractor||o.transport_method||'Unassigned')}<br><b>Collection:</b> ${esc(fmt(o.collection_at))}<br><b>Delivery:</b> ${esc(fmt(o.delivery_at))}</div></details>`).join('');
+  res.type('html').send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><title>BTSA Scheduling</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;margin:0;background:#f4f4f4;color:#111}header{position:sticky;top:0;background:#111;color:#fff;padding:16px;z-index:2}h1{font-size:20px;margin:0 0 4px}.sync{font-size:12px;opacity:.75}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:12px}.stat{background:#fff;border-radius:12px;padding:14px}.stat b{display:block;font-size:26px}.list{padding:0 12px 30px}.card{background:#fff;border-radius:12px;margin:9px 0;padding:14px}.card summary{list-style:none}.card summary span{float:right;font-size:12px;text-transform:capitalize}.detail{padding-top:12px;line-height:1.6;font-size:14px}@media(min-width:700px){.grid{grid-template-columns:repeat(5,1fr)}.list{max-width:900px;margin:auto}}</style></head><body><header><h1>BTSA Scheduling</h1><div class="sync">Live orders · Sheet sync: ${esc(lastSheetSync.ok?'OK '+(lastSheetSync.at||''):'ERROR '+(lastSheetSync.error||''))}</div></header><div class="grid"><div class="stat"><b>${counts.collections}</b>Collections today</div><div class="stat"><b>${counts.deliveries}</b>Deliveries today</div><div class="stat"><b>${counts.transit}</b>In transit</div><div class="stat"><b>${counts.unscheduled}</b>Unscheduled</div><div class="stat"><b>${counts.attention}</b>Needs attention</div></div><div class="list">${cards||'<div class="card">No open orders.</div>'}</div></body></html>`);
+});
 app.post('/send',auth,async(req,res)=>{try{res.json(await sendGroup(req.body.text,req.body.idempotencyKey||`manual-${Date.now()}`));}catch(e){res.status(500).json({error:e.message});}});
+
+function parseCsv(text){
+  const rows=[]; let row=[], field='', q=false;
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
+    if(q){
+      if(ch==='"' && text[i+1]==='"'){ field+='"'; i++; }
+      else if(ch==='"') q=false;
+      else field+=ch;
+    }else{
+      if(ch==='"') q=true;
+      else if(ch===','){ row.push(field); field=''; }
+      else if(ch==='\n'){ row.push(field.replace(/\r$/,'')); rows.push(row); row=[]; field=''; }
+      else field+=ch;
+    }
+  }
+  if(field.length||row.length){ row.push(field.replace(/\r$/,'')); rows.push(row); }
+  return rows;
+}
+async function syncSlaSheet(){
+  try{
+    const r=await fetch(SLA_SHEET_CSV_URL,{headers:{'user-agent':'BTSA-Scheduling/1.0'}});
+    if(!r.ok) throw new Error(`SLA sheet HTTP ${r.status}`);
+    const rows=parseCsv(await r.text());
+    if(rows.length<2) throw new Error('SLA sheet returned no data rows');
+    let upserts=0, seen=0;
+    for(let i=1;i<rows.length;i++){
+      const a=rows[i]; const slaRef=i-1; // Sheet row 2 = SLA-0; current operational refs are 400-series.
+      if(slaRef<SLA_SYNC_MIN_REF) continue;
+      const route=String(a[4]||'').trim(), clientName=String(a[5]||'').trim();
+      const make=String(a[15]||'').trim(), model=String(a[16]||'').trim();
+      if(!route && !clientName && !make && !model) continue;
+      seen++;
+      const externalId=`SLA-${slaRef}`;
+      const bike=[make,model].filter(Boolean).join(' ');
+      const existing=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(externalId);
+      if(existing){
+        db.prepare('UPDATE orders SET client_name=?,route=?,bike=?,updated_at=? WHERE id=?')
+          .run(clientName,route,bike,nowIso(),existing.id);
+      }else{
+        const now=nowIso();
+        db.prepare('INSERT INTO orders(external_id,client_name,route,bike,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)')
+          .run(externalId,clientName,route,bike,'unscheduled',now,now);
+      }
+      upserts++;
+    }
+    lastSheetSync={ok:true,at:nowIso(),rows:seen,upserts,error:null};
+    console.log('SLA sheet sync complete',lastSheetSync);
+  }catch(e){
+    lastSheetSync={ok:false,at:nowIso(),rows:0,upserts:0,error:e.message};
+    console.error('SLA sheet sync failed:',e.message);
+  }
+}
 
 async function dueReminders(){
   const rows=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND next_action_at IS NOT NULL AND next_action_at<=? ORDER BY next_action_at LIMIT 20").all(nowIso());
@@ -804,6 +879,8 @@ async function requeueSept19SocialProof(){
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
   console.log('Queued SLA-381 delivery proof for Social Agent retry');
 }
+syncSlaSheet().catch(console.error);
+setInterval(()=>syncSlaSheet().catch(console.error),SLA_SYNC_INTERVAL_MS);
 setInterval(()=>processOutbox().catch(console.error),60000);
 setInterval(()=>{
   if(localMinute()!==0)return;
