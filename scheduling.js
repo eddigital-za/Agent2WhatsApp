@@ -901,11 +901,23 @@ const ONE_TIME_REPORT_KEY = process.env.ONE_TIME_REPORT_KEY || 'manual-reconcile
 if(ONE_TIME_REPORT && !db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(ONE_TIME_REPORT_KEY)){
   setTimeout(async()=>{ try { const sent=await sendGroup(ONE_TIME_REPORT,ONE_TIME_REPORT_KEY); if(!sent?.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(ONE_TIME_REPORT_KEY,nowIso()); } catch(e){ console.error('One-time report send failed:',e.message); } },8000);
 }
-syncSlaSheet().then(async()=>{
-  const manualKey=String(process.env.RUN_SUMMARY_ON_START_KEY||'').trim();
-  if(manualKey) await summary('manual',manualKey);
-}).catch(console.error);
+syncSlaSheet().catch(console.error);
 setInterval(()=>syncSlaSheet().catch(console.error),SLA_SYNC_INTERVAL_MS);
+
+async function runStartupSummaryWhenReady(){
+  const manualKey=String(process.env.RUN_SUMMARY_ON_START_KEY||'').trim();
+  if(!manualKey) return;
+  for(let i=0;i<30;i++){
+    if(waReady){
+      try { await summary('manual',manualKey); console.log('Manual morning summary sent',manualKey); }
+      catch(e){ console.error('Manual morning summary failed:',e.message); }
+      return;
+    }
+    await new Promise(r=>setTimeout(r,2000));
+  }
+  console.error('Manual morning summary not sent: WhatsApp did not become ready');
+}
+runStartupSummaryWhenReady().catch(console.error);
 setInterval(()=>processOutbox().catch(console.error),60000);
 setInterval(()=>{
   if(localMinute()!==0)return;
