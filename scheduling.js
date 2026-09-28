@@ -901,8 +901,43 @@ const ONE_TIME_REPORT_KEY = process.env.ONE_TIME_REPORT_KEY || 'manual-reconcile
 if(ONE_TIME_REPORT && !db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(ONE_TIME_REPORT_KEY)){
   setTimeout(async()=>{ try { const sent=await sendGroup(ONE_TIME_REPORT,ONE_TIME_REPORT_KEY); if(!sent?.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(ONE_TIME_REPORT_KEY,nowIso()); } catch(e){ console.error('One-time report send failed:',e.message); } },8000);
 }
-syncSlaSheet().catch(console.error);
-setInterval(()=>syncSlaSheet().catch(console.error),SLA_SYNC_INTERVAL_MS);
+if(SLA_SYNC_ENABLED){
+  syncSlaSheet().catch(console.error);
+  setInterval(()=>syncSlaSheet().catch(console.error),SLA_SYNC_INTERVAL_MS);
+}else console.log('SLA sheet sync disabled');
+
+function reconcileConfirmedSchedule(){
+  const key=String(process.env.RECONCILE_SCHEDULE_KEY||'').trim();
+  if(!key || db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key)) return;
+  const active=[
+    ['SLA-389','Vespa 150','Stellenbosch to Pretoria','Cheetah Express','in_transit',null,null],
+    ['SLA-391','2x BMW GS1200','CPT to DBN',null,'scheduled','2026-10-09T09:00:00+02:00',null],
+    ['SLA-402','Suzuki GSX1300 B-KING','Witbank to Brackenfell','Cheetah Express','in_transit','2026-09-25T09:00:00+02:00',null],
+    ['SLA-404','Ducati Scrambler 1100','Newcastle to Sandton','BTSA','in_transit','2026-09-25T09:00:00+02:00','2026-09-28T09:00:00+02:00'],
+    ['SLA-409','BMW F800GS','Ballito to Hout Bay',null,'unscheduled',null,null],
+    ['SLA-410','Honda Transalp 2025','Durban to Rondebosch, Cape Town',null,'unscheduled',null,null],
+    ['SLA-411','Triumph Tiger 800XC','Durban to Cape Town to Durban',null,'unscheduled',null,null],
+    ['SLA-412','Yamaha MT-07','Cape Town to Pretoria','Cheetah Express','unscheduled',null,null],
+    ['SLA-413','Changan 1300 Star','Pretoria to Scottburgh','BTSA','scheduled','2026-09-28T09:00:00+02:00','2026-09-29T09:00:00+02:00'],
+    ['SLA-414','Lifan CG175','Durban to Bethlehem','BTSA','unscheduled',null,null],
+    ['SLA-415','Volkswagen Passat CC','Durban to JHB','BTSA','scheduled','2026-09-28T09:00:00+02:00','2026-09-29T09:00:00+02:00'],
+    ['SLA-416','BMW R50/2','Johannesburg to Hillcrest','BTSA','scheduled','2026-09-28T09:00:00+02:00','2026-09-29T09:00:00+02:00'],
+    ['SLA-417','Suzuki RM125','JHB to Durban',null,'unscheduled',null,null]
+  ];
+  const keep=new Set(active.map(x=>x[0]));
+  const rows=db.prepare("SELECT id,external_id FROM orders WHERE external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380").all();
+  const now=nowIso();
+  for(const o of rows) if(!keep.has(o.external_id)) db.prepare("UPDATE orders SET status='completed',completed_at=COALESCE(completed_at,?),updated_at=? WHERE id=?").run(now,now,o.id);
+  for(const [external_id,bike,route,contractor,status,collection_at,delivery_at] of active){
+    const o=db.prepare('SELECT id FROM orders WHERE external_id=?').get(external_id);
+    if(o) db.prepare("UPDATE orders SET bike=?,route=?,contractor=?,transport_method=?,status=?,collection_at=?,delivery_at=?,completed_at=NULL,updated_at=? WHERE id=?").run(bike,route,contractor,contractor,status,collection_at,delivery_at,now,o.id);
+    else db.prepare("INSERT INTO orders(external_id,bike,route,contractor,transport_method,status,collection_at,delivery_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(external_id,bike,route,contractor,contractor,status,collection_at,delivery_at,now,now);
+  }
+  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,now);
+  console.log('Confirmed schedule reconciled', {key,active:active.length});
+}
+
+reconcileConfirmedSchedule();
 
 async function runStartupSummaryWhenReady(){
   const manualKey=String(process.env.RUN_SUMMARY_ON_START_KEY||'').trim();
