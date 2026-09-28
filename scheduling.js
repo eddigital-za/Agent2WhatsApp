@@ -908,7 +908,7 @@ async function runStartupSummaryWhenReady(){
   const manualKey=String(process.env.RUN_SUMMARY_ON_START_KEY||'').trim();
   if(!manualKey) return;
   for(let i=0;i<30;i++){
-    if(waReady){
+    if(client.info){
       try { await summary('manual',manualKey); console.log('Manual morning summary sent',manualKey); }
       catch(e){ console.error('Manual morning summary failed:',e.message); }
       return;
