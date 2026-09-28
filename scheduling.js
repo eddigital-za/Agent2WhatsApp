@@ -901,7 +901,10 @@ const ONE_TIME_REPORT_KEY = process.env.ONE_TIME_REPORT_KEY || 'manual-reconcile
 if(ONE_TIME_REPORT && !db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(ONE_TIME_REPORT_KEY)){
   setTimeout(async()=>{ try { const sent=await sendGroup(ONE_TIME_REPORT,ONE_TIME_REPORT_KEY); if(!sent?.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(ONE_TIME_REPORT_KEY,nowIso()); } catch(e){ console.error('One-time report send failed:',e.message); } },8000);
 }
-syncSlaSheet().catch(console.error);
+syncSlaSheet().then(async()=>{
+  const manualKey=String(process.env.RUN_SUMMARY_ON_START_KEY||'').trim();
+  if(manualKey) await summary('manual',manualKey);
+}).catch(console.error);
 setInterval(()=>syncSlaSheet().catch(console.error),SLA_SYNC_INTERVAL_MS);
 setInterval(()=>processOutbox().catch(console.error),60000);
 setInterval(()=>{
