@@ -783,7 +783,12 @@ async function syncSlaSheet(){
     if(rows.length<2) throw new Error('SLA sheet returned no data rows');
     let upserts=0, seen=0;
     for(let i=1;i<rows.length;i++){
-      const a=rows[i]; const slaRef=i-1; // Sheet row 2 = SLA-0; current operational refs are 400-series.
+      const a=rows[i];
+      // Verified operational mapping: Sheet Entry ID + 2 = SLA reference.
+      // Never derive an SLA reference from physical spreadsheet row position.
+      const entryId=Number(String(a[0]||'').trim());
+      if(!Number.isInteger(entryId)) continue;
+      const slaRef=entryId+2;
       if(slaRef<SLA_SYNC_MIN_REF) continue;
       const route=String(a[4]||'').trim(), clientName=String(a[5]||'').trim();
       const make=String(a[15]||'').trim(), model=String(a[16]||'').trim();
@@ -823,7 +828,7 @@ async function dueReminders(){
 async function summary(period,requestedKey=''){
   const key=requestedKey||`${period}-summary-${localDate()}`;
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
-  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY contractor COLLATE NOCASE, external_id").all();
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380 ORDER BY contractor COLLATE NOCASE, CAST(substr(external_id,5) AS INTEGER)").all();
   const today=localDate();
   const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
   const collectionsToday=open.filter(o=>dateOnly(o.collection_at)===today).length;
@@ -892,7 +897,7 @@ async function requeueSept19SocialProof(){
   console.log('Queued SLA-381 delivery proof for Social Agent retry');
 }
 const ONE_TIME_REPORT = process.env.ONE_TIME_REPORT || '';
-const ONE_TIME_REPORT_KEY = process.env.ONE_TIME_REPORT_KEY || ONE_TIME_REPORT_KEY;
+const ONE_TIME_REPORT_KEY = process.env.ONE_TIME_REPORT_KEY || 'manual-reconcile';
 if(ONE_TIME_REPORT && !db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(ONE_TIME_REPORT_KEY)){
   setTimeout(async()=>{ try { const sent=await sendGroup(ONE_TIME_REPORT,ONE_TIME_REPORT_KEY); if(!sent?.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(ONE_TIME_REPORT_KEY,nowIso()); } catch(e){ console.error('One-time report send failed:',e.message); } },8000);
 }
