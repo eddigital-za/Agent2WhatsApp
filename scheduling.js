@@ -741,7 +741,7 @@ app.post('/order',auth,async(req,res)=>{
 
 app.get('/sync-status',(req,res)=>res.json(lastSheetSync));
 app.get('/dashboard',(req,res)=>{
-  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') ORDER BY external_id DESC").all();
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' ORDER BY external_id DESC").all();
   const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   const today=localDate();
   const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
@@ -775,39 +775,82 @@ function parseCsv(text){
   if(field.length||row.length){ row.push(field.replace(/\r$/,'')); rows.push(row); }
   return rows;
 }
+
+function sheetOrders(rows){
+  const orders=new Map(), missing=[];
+  for(let i=1;i<rows.length;i++){
+    const a=rows[i], source=String(a[37]||'').trim();
+    if(!/^[0-9a-f]{16}$/i.test(source)) continue;
+    const route=String(a[4]||'').trim(), clientName=String(a[5]||'').trim();
+    if(!route || route==='""' || !clientName || /test/i.test(route)) continue;
+    const raw=String(a[0]||'').trim();
+    if(!/^[1-9]\d*$/.test(raw)){missing.push(i+1);continue;}
+    const entryId=Number(raw);
+    if(entryId<SLA_SYNC_MIN_REF)continue;
+    const item={entryId,externalId:`SLA-${entryId}`,clientName,route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
+    const prior=orders.get(entryId);
+    if(prior && JSON.stringify(prior)!==JSON.stringify(item))throw new Error(`Conflicting duplicate Entry ID ${entryId}`);
+    orders.set(entryId,item);
+  }
+  if(missing.length)throw new Error(`Missing Entry ID on sheet rows: ${missing.join(', ')}`);
+  return [...orders.values()];
+}
+function sameSheetOrder(o,item){
+  const norm=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  return norm(o.bike)===norm(item.bike) && !!norm(item.bike) &&
+    (norm(o.client_name)===norm(item.clientName) || !o.client_name || norm(o.route)===norm(item.route));
+}
+function applySheetOrders(items){
+  const key='sureforms-entry-id-repair-2026-10-03-v1';
+  const migrate=!db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key);
+  const oldRows=migrate?db.prepare("SELECT * FROM orders WHERE external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380").all():[];
+  if(migrate){
+    const backup=path.join(AUTH_DIR,'btsa-scheduling-before-entry-id-repair-2026-10-03.sqlite');
+    if(!fs.existsSync(backup))db.exec(`VACUUM INTO '${backup.replaceAll("'","''")}'`);
+  }
+  const legacyRowRefs={"435":365,"437":366,"438":367,"439":368,"440":369,"441":370,"442":371,"443":372,"444":373,"445":374,"446":375,"447":376,"448":377,"449":378,"450":379,"451":380,"452":381,"453":382,"454":383,"455":384,"456":385,"457":386,"458":387,"459":388,"460":389,"461":390,"462":391,"463":397,"464":398,"465":399,"466":400,"468":401,"469":402,"470":403,"471":404,"472":405,"473":406,"474":407,"475":408,"476":409,"477":410,"478":411,"479":412,"480":413,"481":414,"482":415,"483":416,"484":417,"485":418,"486":419,"487":420,"488":421,"489":422,"490":423};
+  let migrated=0;
+  db.exec('BEGIN IMMEDIATE');
+  try{
+    if(migrate){
+      for(const o of oldRows)db.prepare('UPDATE orders SET external_id=? WHERE id=?').run(`LEGACY-${o.external_id}-${o.id}`,o.id);
+      const used=new Set();
+      for(const item of items){
+        const candidates=oldRows.filter(o=>!used.has(o.id)&&sameSheetOrder(o,item));
+        const preferred=candidates.find(o=>o.external_id===`SLA-${legacyRowRefs[item.entryId]}`);
+        const match=preferred || (candidates.length===1?candidates[0]:null);
+        if(match){db.prepare('UPDATE orders SET external_id=? WHERE id=?').run(item.externalId,match.id);used.add(match.id);migrated++;}
+      }
+    }
+    for(const item of items){
+      const existing=db.prepare('SELECT * FROM orders WHERE external_id=?').get(item.externalId);
+      const closed=/^(delivered|completed|cancelled|canceled)$/.test(item.sheetStatus);
+      let status=/^cancel/.test(item.sheetStatus)?'cancelled':closed?'completed':
+        item.sheetStatus==='in transit'?'in_transit':item.sheetStatus==='scheduled'?'scheduled':
+        (existing&&!['completed','cancelled'].includes(existing.status)?existing.status:'unscheduled');
+      const now=nowIso(), completedAt=closed?(existing?.completed_at||now):null;
+      if(existing){
+        db.prepare('UPDATE orders SET client_name=?,route=?,bike=?,contractor=?,status=?,completed_at=?,next_action=NULL,next_action_at=NULL,updated_at=? WHERE id=?')
+          .run(item.clientName,item.route,item.bike,item.contractor||existing.contractor||'',status,completedAt,now,existing.id);
+      }else{
+        db.prepare('INSERT INTO orders(external_id,client_name,route,bike,contractor,status,completed_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+          .run(item.externalId,item.clientName,item.route,item.bike,item.contractor,status,completedAt,now,now);
+      }
+    }
+    if(migrate)db.prepare('INSERT INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+    db.exec('COMMIT');
+  }catch(e){db.exec('ROLLBACK');throw e;}
+  return {migrated,legacyRetained:migrate?oldRows.length-migrated:0};
+}
 async function syncSlaSheet(){
   try{
     const r=await fetch(SLA_SHEET_CSV_URL,{headers:{'user-agent':'BTSA-Scheduling/1.0'}});
-    if(!r.ok) throw new Error(`SLA sheet HTTP ${r.status}`);
+    if(!r.ok)throw new Error(`SLA sheet HTTP ${r.status}`);
     const rows=parseCsv(await r.text());
-    if(rows.length<2) throw new Error('SLA sheet returned no data rows');
-    let upserts=0, seen=0;
-    for(let i=1;i<rows.length;i++){
-      const a=rows[i];
-      // Verified operational mapping: Sheet Entry ID + 2 = SLA reference.
-      // Never derive an SLA reference from physical spreadsheet row position.
-      const entryId=Number(String(a[0]||'').trim());
-      if(!Number.isInteger(entryId)) continue;
-      const slaRef=entryId+2;
-      if(slaRef<SLA_SYNC_MIN_REF) continue;
-      const route=String(a[4]||'').trim(), clientName=String(a[5]||'').trim();
-      const make=String(a[15]||'').trim(), model=String(a[16]||'').trim();
-      if(!route && !clientName && !make && !model) continue;
-      seen++;
-      const externalId=`SLA-${slaRef}`;
-      const bike=[make,model].filter(Boolean).join(' ');
-      const existing=db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(externalId);
-      if(existing){
-        db.prepare('UPDATE orders SET client_name=?,route=?,bike=?,updated_at=? WHERE id=?')
-          .run(clientName,route,bike,nowIso(),existing.id);
-      }else{
-        const now=nowIso();
-        db.prepare('INSERT INTO orders(external_id,client_name,route,bike,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)')
-          .run(externalId,clientName,route,bike,'unscheduled',now,now);
-      }
-      upserts++;
-    }
-    lastSheetSync={ok:true,at:nowIso(),rows:seen,upserts,error:null};
+    if(rows.length<2)throw new Error('SLA sheet returned no data rows');
+    const items=sheetOrders(rows), migration=applySheetOrders(items);
+    const open=db.prepare("SELECT external_id FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' ORDER BY external_id").all().map(o=>o.external_id);
+    lastSheetSync={ok:true,at:nowIso(),rows:items.length,upserts:items.length,...migration,openIds:open,error:null};
     console.log('SLA sheet sync complete',lastSheetSync);
   }catch(e){
     lastSheetSync={ok:false,at:nowIso(),rows:0,upserts:0,error:e.message};
@@ -826,6 +869,8 @@ async function dueReminders(){
   }
 }
 async function summary(period,requestedKey=''){
+  await syncSlaSheet();
+  if(!lastSheetSync.ok)throw new Error('Schedule report withheld: '+lastSheetSync.error);
   const key=requestedKey||`${period}-summary-${localDate()}`;
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380 ORDER BY contractor COLLATE NOCASE, CAST(substr(external_id,5) AS INTEGER)").all();
@@ -901,43 +946,8 @@ const ONE_TIME_REPORT_KEY = process.env.ONE_TIME_REPORT_KEY || 'manual-reconcile
 if(ONE_TIME_REPORT && !db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(ONE_TIME_REPORT_KEY)){
   setTimeout(async()=>{ try { const sent=await sendGroup(ONE_TIME_REPORT,ONE_TIME_REPORT_KEY); if(!sent?.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(ONE_TIME_REPORT_KEY,nowIso()); } catch(e){ console.error('One-time report send failed:',e.message); } },8000);
 }
-if(SLA_SYNC_ENABLED){
-  syncSlaSheet().catch(console.error);
-  setInterval(()=>syncSlaSheet().catch(console.error),SLA_SYNC_INTERVAL_MS);
-}else console.log('SLA sheet sync disabled');
-
-function reconcileConfirmedSchedule(){
-  const key=String(process.env.RECONCILE_SCHEDULE_KEY||'').trim();
-  if(!key || db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key)) return;
-  const active=[
-    ['SLA-389','Vespa 150','Stellenbosch to Pretoria','Cheetah Express','in_transit',null,null],
-    ['SLA-391','2x BMW GS1200','CPT to DBN',null,'scheduled','2026-10-09T09:00:00+02:00',null],
-    ['SLA-402','Suzuki GSX1300 B-KING','Witbank to Brackenfell','Cheetah Express','in_transit','2026-09-25T09:00:00+02:00',null],
-    ['SLA-404','Ducati Scrambler 1100','Newcastle to Sandton','BTSA','in_transit','2026-09-25T09:00:00+02:00','2026-09-28T09:00:00+02:00'],
-    ['SLA-409','BMW F800GS','Ballito to Hout Bay',null,'unscheduled',null,null],
-    ['SLA-410','Honda Transalp 2025','Durban to Rondebosch, Cape Town',null,'unscheduled',null,null],
-    ['SLA-411','Triumph Tiger 800XC','Durban to Cape Town to Durban',null,'unscheduled',null,null],
-    ['SLA-412','Yamaha MT-07','Cape Town to Pretoria','Cheetah Express','unscheduled',null,null],
-    ['SLA-413','Changan 1300 Star','Pretoria to Scottburgh','BTSA','scheduled','2026-09-28T09:00:00+02:00','2026-09-29T09:00:00+02:00'],
-    ['SLA-414','Lifan CG175','Durban to Bethlehem','BTSA','unscheduled',null,null],
-    ['SLA-415','Volkswagen Passat CC','Durban to JHB','BTSA','scheduled','2026-09-28T09:00:00+02:00','2026-09-29T09:00:00+02:00'],
-    ['SLA-416','BMW R50/2','Johannesburg to Hillcrest','BTSA','scheduled','2026-09-28T09:00:00+02:00','2026-09-29T09:00:00+02:00'],
-    ['SLA-417','Suzuki RM125','JHB to Durban',null,'unscheduled',null,null]
-  ];
-  const keep=new Set(active.map(x=>x[0]));
-  const rows=db.prepare("SELECT id,external_id FROM orders WHERE external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380").all();
-  const now=nowIso();
-  for(const o of rows) if(!keep.has(o.external_id)) db.prepare("UPDATE orders SET status='completed',completed_at=COALESCE(completed_at,?),updated_at=? WHERE id=?").run(now,now,o.id);
-  for(const [external_id,bike,route,contractor,status,collection_at,delivery_at] of active){
-    const o=db.prepare('SELECT id FROM orders WHERE external_id=?').get(external_id);
-    if(o) db.prepare("UPDATE orders SET bike=?,route=?,contractor=?,transport_method=?,status=?,collection_at=?,delivery_at=?,completed_at=NULL,updated_at=? WHERE id=?").run(bike,route,contractor,contractor,status,collection_at,delivery_at,now,o.id);
-    else db.prepare("INSERT INTO orders(external_id,bike,route,contractor,transport_method,status,collection_at,delivery_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(external_id,bike,route,contractor,contractor,status,collection_at,delivery_at,now,now);
-  }
-  db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,now);
-  console.log('Confirmed schedule reconciled', {key,active:active.length});
-}
-
-reconcileConfirmedSchedule();
+syncSlaSheet().catch(console.error);
+setInterval(()=>syncSlaSheet().catch(console.error),SLA_SYNC_INTERVAL_MS);
 
 async function runStartupSummaryWhenReady(){
   const manualKey=String(process.env.RUN_SUMMARY_ON_START_KEY||'').trim();
@@ -1015,13 +1025,7 @@ async function applyMultiStageSept23(){
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
   await sendGroup('*Multi-stage updates*\n\n*SLA-402 | Suzuki GSX1300 B-KING*\nStage 1: Durrell | Witbank → Cheetah Express JHB depot\nStage 2: Cheetah Express | JHB depot → Brackenfell\n\n*SLA-403 | Kawasaki ZW14*\nStage 1: Cheetah Express | CPT → JHB depot | collected Wed 23 Sept\nStage 2: BTSA | collect JHB depot Fri 25 Sept → deliver PMB Sat 26 Sept',key+'-message');
 }
-client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');reconcileSept23OrderThread().then(async()=>{
-  const silver=db.prepare("SELECT * FROM orders WHERE external_id='WA-694FEBBC1A' COLLATE NOCASE").get();
-  const existing401=db.prepare("SELECT * FROM orders WHERE external_id='SLA-401' COLLATE NOCASE").get();
-  if(silver&&!existing401)db.prepare("UPDATE orders SET external_id='SLA-401',updated_at=? WHERE id=?").run(nowIso(),silver.id);
-  await applyMultiStageSept23();
-  await summary('corrected','corrected-summary-2026-09-23-v3');
-}).catch(e=>console.error('Sept23 reconciliation failed:',e));});
+client.on('ready',()=>{console.log('BTSA Scheduling Agent ready');});
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
