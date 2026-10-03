@@ -116,7 +116,8 @@ client.on("message", async (message) => {
     const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID;
     const EXTRA_ALLOWED_GROUP_IDS = String(process.env.EXTRA_ALLOWED_GROUP_IDS || "")
       .split(",").map(v => v.trim()).filter(Boolean);
-    const allowedGroups = new Set([ALLOWED_GROUP_ID, ...EXTRA_ALLOWED_GROUP_IDS].filter(Boolean));
+    const ORDER_INTAKE_GROUP_ID = process.env.ORDER_INTAKE_GROUP_ID || "";
+    const allowedGroups = new Set([ALLOWED_GROUP_ID, ORDER_INTAKE_GROUP_ID, ...EXTRA_ALLOWED_GROUP_IDS].filter(Boolean));
 
     // Check whether this is a group message
     const isGroup = message.from.endsWith("@g.us");
@@ -303,7 +304,7 @@ client.on("message", async (message) => {
 
     // Orders-group messages also feed the dedicated conversational manual-order intake.
     // This is additive: the existing Make/Social handoff remains unchanged.
-    if (isGroup && message.from === ALLOWED_GROUP_ID && process.env.ORDER_INTAKE_WEBHOOK_URL) {
+    if (isGroup && message.from === ORDER_INTAKE_GROUP_ID && process.env.ORDER_INTAKE_WEBHOOK_URL) {
       try {
         const intakeResponse = await fetch(process.env.ORDER_INTAKE_WEBHOOK_URL, {
           method: "POST",
