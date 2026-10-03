@@ -524,7 +524,7 @@ async function interpretSchedulingMessage(text, quotedText = '', forcedExternalI
     body:JSON.stringify({
       model:OPENAI_MODEL,
       input:[
-        {role:'system',content:`You interpret informal South African WhatsApp scheduling updates for a motorcycle transport business. Messages often come from speech-to-text and may contain missing punctuation, wrong capitals, minor spelling errors, shortened SLA references, and multiple orders. Match an order only when the number or customer/context identifies exactly one known order. Treat SLA381, SLA 381, SL381, 381 and spoken variants as possible SLA-381. A quoted-message database link fixes the order and must be used. Otherwise quoted reminder text may identify the order. A generic message such as delivered, collected, done or cancelled with no explicit order and no quoted context is ambiguous: never guess from recency; return clarify with an empty external_id. Correct obvious contractor spelling against the supplied list, including shortened company names. Resolve relative dates in ${TZ} and return local wall-clock ISO values; 11:30 means 11:30 in ${TZ}, never 11:30 UTC. Always return the explicitly requested status, even when the known order already has that status: delivered means completed, cancelled means cancelled, and in transit means in_transit. Do not invent a date, time, contractor, status, or order. Null means unchanged. The human-facing SLA number is the order identifier. Never ask the user for an external ID, database ID, order number, WhatsApp ID, row number, or any other identifier when an SLA reference is present. If the user says SLA-416, use the known SLA-416 record. If an SLA reference is not currently found in Known orders, do not ask for another identifier; ask only whether that SLA should be added/synced, or report that the SLA is not yet in the scheduling database. If a material instruction is ambiguous, use action clarify and state one short operational question. Return one item per intended order.`},
+        {role:'system',content:`You interpret informal South African WhatsApp scheduling updates for a motorcycle transport business. Messages often come from speech-to-text and may contain missing punctuation, wrong capitals, minor spelling errors, shortened SLA references, and multiple orders. Match an order only when the number or customer/context identifies exactly one known order. Treat SLA381, SLA 381, SL381, 381 and spoken variants as possible SLA-381. A quoted-message database link fixes the order and must be used. Otherwise quoted reminder text may identify the order. A generic message such as delivered, collected, done or cancelled with no explicit order and no quoted context is ambiguous: never guess from recency; return clarify with an empty external_id. Correct obvious contractor spelling against the supplied list, including shortened company names. Resolve relative dates in ${TZ} and return local wall-clock ISO values; 11:30 means 11:30 in ${TZ}, never 11:30 UTC. Always return the explicitly requested status, even when the known order already has that status: delivered means completed, cancelled means cancelled, and in transit means in_transit. Do not invent a date, time, contractor, status, or order. Null means unchanged. The human-facing SLA reference is the order identifier. It may be a form reference such as SLA-416 or a manual reference such as M-0001. Never ask the user for an external ID, database ID, order number, WhatsApp ID, row number, or any other identifier when an SLA reference is present. If the user says SLA-416, use the known SLA-416 record. If an SLA reference is not currently found in Known orders, do not ask for another identifier; ask only whether that SLA should be added/synced, or report that the SLA is not yet in the scheduling database. If a material instruction is ambiguous, use action clarify and state one short operational question. Return one item per intended order.`},
         {role:'user',content:prompt}
       ],
       text:{format:{type:'json_schema',name:'btsa_scheduling_updates',strict:true,schema}}
@@ -741,7 +741,7 @@ app.post('/order',auth,async(req,res)=>{
 
 app.get('/sync-status',(req,res)=>res.json(lastSheetSync));
 app.get('/dashboard',(req,res)=>{
-  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id DESC").all();
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id GLOB 'M-[0-9]*' OR external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id DESC").all();
   const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   const today=localDate();
   const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
@@ -784,15 +784,23 @@ function sheetOrders(rows){
     const route=String(a[4]||'').trim(), clientName=String(a[5]||'').trim();
     if(!route || route==='""' || !clientName || /test/i.test(route)) continue;
     const raw=String(a[0]||'').trim();
-    if(!/^[1-9]\d*$/.test(raw)){missing.push(i+1);continue;}
-    const entryId=Number(raw);
-    if(entryId<SLA_SYNC_MIN_REF)continue;
-    const item={entryId,externalId:`SLA-${entryId}`,clientName,route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
-    const prior=orders.get(entryId);
-    if(prior && JSON.stringify(prior)!==JSON.stringify(item))throw new Error(`Conflicting duplicate Entry ID ${entryId}`);
-    orders.set(entryId,item);
+    const manualRef=String(a[39]||'').trim().toUpperCase();
+    let entryId=null, externalId='';
+    if(/^M-\d{4,}$/.test(manualRef)){
+      externalId=manualRef;
+    }else if(/^[1-9]\d*$/.test(raw)){
+      entryId=Number(raw);
+      if(entryId<SLA_SYNC_MIN_REF)continue;
+      externalId=`SLA-${entryId}`;
+    }else{
+      missing.push(i+1); continue;
+    }
+    const item={entryId,externalId,clientName,route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
+    const prior=orders.get(externalId);
+    if(prior && JSON.stringify(prior)!==JSON.stringify(item))throw new Error(`Conflicting duplicate SLA reference ${externalId}`);
+    orders.set(externalId,item);
   }
-  if(missing.length)throw new Error(`Missing Entry ID on sheet rows: ${missing.join(', ')}`);
+  if(missing.length)throw new Error(`Missing Entry ID/SLA Ref on sheet rows: ${missing.join(', ')}`);
   return [...orders.values()];
 }
 function sameSheetOrder(o,item){
@@ -803,7 +811,7 @@ function sameSheetOrder(o,item){
 function applySheetOrders(items){
   const key='sureforms-entry-id-repair-2026-10-03-v1';
   const migrate=!db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key);
-  const oldRows=migrate?db.prepare("SELECT * FROM orders WHERE external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380").all():[];
+  const oldRows=migrate?db.prepare("SELECT * FROM orders WHERE (external_id GLOB 'M-[0-9]*' OR (external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380))").all():[];
   if(migrate){
     const backup=path.join(AUTH_DIR,'btsa-scheduling-before-entry-id-repair-2026-10-03.sqlite');
     if(!fs.existsSync(backup))db.exec(`VACUUM INTO '${backup.replaceAll("'","''")}'`);
@@ -854,7 +862,7 @@ async function syncSlaSheet(){
     const rows=parseCsv(await r.text());
     if(rows.length<2)throw new Error('SLA sheet returned no data rows');
     const items=sheetOrders(rows), migration=applySheetOrders(items);
-    const open=db.prepare("SELECT external_id FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id").all().map(o=>o.external_id);
+    const open=db.prepare("SELECT external_id FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id GLOB 'M-[0-9]*' OR external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id").all().map(o=>o.external_id);
     lastSheetSync={ok:true,at:nowIso(),rows:items.length,upserts:items.length,...migration,openIds:open,error:null};
     console.log('SLA sheet sync complete',lastSheetSync);
   }catch(e){
@@ -878,7 +886,7 @@ async function summary(period,requestedKey=''){
   if(!lastSheetSync.ok)throw new Error('Schedule report withheld: '+lastSheetSync.error);
   const key=requestedKey||`${period}-summary-${localDate()}`;
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
-  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380 ORDER BY contractor COLLATE NOCASE, CAST(substr(external_id,5) AS INTEGER)").all();
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND (external_id GLOB 'M-[0-9]*' OR (external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380)) ORDER BY contractor COLLATE NOCASE, CAST(substr(external_id,5) AS INTEGER)").all();
   const today=localDate();
   const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
   const collectionsToday=open.filter(o=>dateOnly(o.collection_at)===today).length;
