@@ -17,7 +17,7 @@ const CALENDAR_WEBHOOK_URL = process.env.CALENDAR_WEBHOOK_URL || '';
 const CALENDAR_WEBHOOK_SECRET = process.env.CALENDAR_WEBHOOK_SECRET || '';
 const SHADOW_MODE = String(process.env.SHADOW_MODE || 'true').toLowerCase() === 'true';
 const WHATSAPP_OUTBOUND_ENABLED = String(process.env.WHATSAPP_OUTBOUND_ENABLED || 'true').toLowerCase() === 'true';
-const MORNING_HOUR = Number(process.env.MORNING_SUMMARY_HOUR || 7);
+const MORNING_HOUR = Number(process.env.MORNING_SUMMARY_HOUR || 6);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const SOCIAL_PROOF_WEBHOOK_URL = process.env.SOCIAL_PROOF_WEBHOOK_URL || '';
@@ -828,6 +828,10 @@ function applySheetOrders(items){
       let status=/^cancel/.test(item.sheetStatus)?'cancelled':closed?'completed':
         item.sheetStatus==='in transit'?'in_transit':item.sheetStatus==='scheduled'?'scheduled':
         (existing&&(!migrate || !['completed','cancelled'].includes(existing.status))?existing.status:'unscheduled');
+      const reopenKey='reopen-sla-448-2026-10-03';
+      const reopen=item.entryId===448 && item.sheetStatus==='new order' &&
+        !db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(reopenKey);
+      if(reopen)status='unscheduled';
       const now=nowIso(), completedAt=(closed || ['completed','cancelled'].includes(status))?(existing?.completed_at||now):null;
       if(existing){
         db.prepare('UPDATE orders SET client_name=?,route=?,bike=?,contractor=?,status=?,completed_at=?,next_action=NULL,next_action_at=NULL,updated_at=? WHERE id=?')
@@ -836,6 +840,7 @@ function applySheetOrders(items){
         db.prepare('INSERT INTO orders(external_id,client_name,route,bike,contractor,status,completed_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
           .run(item.externalId,item.clientName,item.route,item.bike,item.contractor,status,completedAt,now,now);
       }
+      if(reopen)db.prepare('INSERT INTO report_runs(run_key,sent_at) VALUES(?,?)').run(reopenKey,now);
     }
     if(migrate)db.prepare('INSERT INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
     db.exec('COMMIT');
