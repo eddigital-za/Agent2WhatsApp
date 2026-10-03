@@ -827,8 +827,8 @@ function applySheetOrders(items){
       const closed=/^(delivered|completed|cancelled|canceled)$/.test(item.sheetStatus);
       let status=/^cancel/.test(item.sheetStatus)?'cancelled':closed?'completed':
         item.sheetStatus==='in transit'?'in_transit':item.sheetStatus==='scheduled'?'scheduled':
-        (existing&&!['completed','cancelled'].includes(existing.status)?existing.status:'unscheduled');
-      const now=nowIso(), completedAt=closed?(existing?.completed_at||now):null;
+        (existing&&(!migrate || !['completed','cancelled'].includes(existing.status))?existing.status:'unscheduled');
+      const now=nowIso(), completedAt=(closed || ['completed','cancelled'].includes(status))?(existing?.completed_at||now):null;
       if(existing){
         db.prepare('UPDATE orders SET client_name=?,route=?,bike=?,contractor=?,status=?,completed_at=?,next_action=NULL,next_action_at=NULL,updated_at=? WHERE id=?')
           .run(item.clientName,item.route,item.bike,item.contractor||existing.contractor||'',status,completedAt,now,existing.id);
