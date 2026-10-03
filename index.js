@@ -156,7 +156,27 @@ client.on("message", async (message) => {
 
       // Keep the existing media object as well
       media: null,
+
+      // Reply/quoted-message context for conversational order lookup.
+      quotedText: null,
+      quotedMessageId: null,
+      quotedAuthor: null,
+      quotedFrom: null,
     };
+
+    // Preserve the message being replied to. Failure here must never block
+    // the existing WhatsApp/Make workflows.
+    if (message.hasQuotedMsg) {
+      try {
+        const quoted = await message.getQuotedMessage();
+        payload.quotedText = quoted?.body || "";
+        payload.quotedMessageId = quoted?.id?._serialized || "";
+        payload.quotedAuthor = quoted?.author || "";
+        payload.quotedFrom = quoted?.from || "";
+      } catch (quotedError) {
+        console.error("Could not read quoted WhatsApp message:", quotedError?.message || quotedError);
+      }
+    }
 
     // Download attached media if present
     if (message.hasMedia) {
