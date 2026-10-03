@@ -741,7 +741,7 @@ app.post('/order',auth,async(req,res)=>{
 
 app.get('/sync-status',(req,res)=>res.json(lastSheetSync));
 app.get('/dashboard',(req,res)=>{
-  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' ORDER BY external_id DESC").all();
+  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id DESC").all();
   const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   const today=localDate();
   const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
@@ -849,7 +849,7 @@ async function syncSlaSheet(){
     const rows=parseCsv(await r.text());
     if(rows.length<2)throw new Error('SLA sheet returned no data rows');
     const items=sheetOrders(rows), migration=applySheetOrders(items);
-    const open=db.prepare("SELECT external_id FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' ORDER BY external_id").all().map(o=>o.external_id);
+    const open=db.prepare("SELECT external_id FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id").all().map(o=>o.external_id);
     lastSheetSync={ok:true,at:nowIso(),rows:items.length,upserts:items.length,...migration,openIds:open,error:null};
     console.log('SLA sheet sync complete',lastSheetSync);
   }catch(e){
