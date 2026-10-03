@@ -140,6 +140,7 @@ client.on("message", async (message) => {
     const payload = {
       from: message.from,
       phone: message.from.replace("@c.us", ""),
+      author: message.author || message.from,
       text: message.body || "",
       messageId: message.id?._serialized || "",
       timestamp: message.timestamp,
@@ -299,6 +300,25 @@ client.on("message", async (message) => {
       mediaDataPresent: Boolean(payload.mediaData),
       mediaUrl: payload.mediaUrl,
     });
+
+    // Orders-group messages also feed the dedicated conversational manual-order intake.
+    // This is additive: the existing Make/Social handoff remains unchanged.
+    if (isGroup && message.from === ALLOWED_GROUP_ID && process.env.ORDER_INTAKE_WEBHOOK_URL) {
+      try {
+        const intakeResponse = await fetch(process.env.ORDER_INTAKE_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!intakeResponse.ok) {
+          console.error("Order intake webhook failed:", intakeResponse.status, await intakeResponse.text());
+        } else {
+          console.log("Message forwarded to Order Intake successfully");
+        }
+      } catch (intakeError) {
+        console.error("Order intake forwarding failed:", intakeError?.message || intakeError);
+      }
+    }
 
     if (!process.env.MAKE_WEBHOOK_URL) {
       console.error("MAKE_WEBHOOK_URL is not configured");
