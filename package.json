@@ -1,19 +1,15 @@
 {
-  "name": "btsa-finance-whatsapp",
+  "name": "btsa-finance-report",
   "version": "1.0.0",
-  "description": "Standalone BTSA Finance WhatsApp reporting service",
+  "description": "BTSA Finance reporting service using shared WhatsApp transport",
   "main": "finance.js",
   "engines": {
     "node": "20.x"
   },
   "scripts": {
-    "start": "node finance.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "start": "node finance.js"
   },
   "dependencies": {
-    "cors": "2.8.5",
-    "express": "4.21.2",
-    "qrcode-terminal": "0.12.0",
-    "whatsapp-web.js": "1.34.7"
+    "express": "4.21.2"
   }
 }
