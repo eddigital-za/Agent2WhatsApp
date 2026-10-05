@@ -1,6 +1,6 @@
 {
   "name": "btsa-finance-report",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "BTSA Finance reporting service using shared WhatsApp transport",
   "main": "finance.js",
   "engines": {
