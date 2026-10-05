@@ -1,7 +1,4 @@
 const express = require('express');
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
@@ -9,18 +6,7 @@ app.use(express.json({ limit: '20mb' }));
 const TZ = 'Africa/Johannesburg';
 const WEEKLY_TARGET = Number(process.env.WEEKLY_REVENUE_TARGET || process.env.MONTHLY_REVENUE_TARGET || 96154);
 const ANNUAL_TARGET = Number(process.env.ANNUAL_REVENUE_TARGET || 5000000);
-const SESSION_DIR = '/app/.wwebjs_auth';
-
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: SESSION_DIR, clientId: 'btsa-finance' }),
-  puppeteer: {
-    headless: true,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  },
-});
-
-let latestQr = null;
+const WHATSAPP_SEND_URL = process.env.WHATSAPP_SEND_URL || 'https://agent2whatsapp-production.up.railway.app/send';
 
 function fmtMoney(v) {
   return `R${Math.round(Number(v || 0)).toLocaleString('en-ZA')}`;
@@ -199,27 +185,11 @@ function renderReport(s) {
 
 app.get('/health', (req, res) => res.json({
   ok: true,
-  whatsappReady: Boolean(client.info),
+  transport: 'Agent2WhatsApp',
   weeklyTarget: WEEKLY_TARGET,
   annualTarget: ANNUAL_TARGET,
   reportPeriod: 'previous-completed-week',
 }));
-
-app.get('/qr', (req, res) => {
-  if (!latestQr) return res.send("<html><body style='font-family:Arial;text-align:center;padding:40px'><h2>Waiting for WhatsApp QR...</h2><p>If already linked, the Finance session may simply be starting.</p></body></html>");
-  res.send(`<!DOCTYPE html><html><head><title>BTSA Finance WhatsApp</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script></head><body style="font-family:Arial;text-align:center;padding:40px"><h2>Link BTSA Finance Agent</h2><p>WhatsApp → Linked Devices → Link a Device</p><div id="qrcode"></div><script>new QRCode(document.getElementById('qrcode'),{text:${JSON.stringify(latestQr)},width:320,height:320});</script></body></html>`);
-});
-
-app.get('/groups', async (req, res) => {
-  try {
-    if (!client.info) return res.status(503).json({ error: 'WhatsApp not ready' });
-    const chats = await client.getChats();
-    const groups = chats.filter(c => c.isGroup).map(c => ({ id: c.id?._serialized, name: c.name }));
-    res.json({ groups });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 app.post('/report', async (req, res) => {
   try {
@@ -228,47 +198,26 @@ app.post('/report', async (req, res) => {
     const summary = summarizeInvoices(invoices, new Date());
     const text = renderReport(summary);
     const chatId = process.env.FINANCE_GROUP_ID;
-    if (chatId) {
-      if (!client.info) return res.status(503).json({ error: 'WhatsApp not ready', report: text });
-      const sent = await client.sendMessage(chatId, text);
-      return res.json({ success: true, sent: true, chatId, messageId: sent?.id?._serialized || null, report: text, summary });
+    if (!chatId) return res.status(500).json({ success: false, error: 'FINANCE_GROUP_ID not set', report: text, summary });
+
+    const sendResponse = await fetch(WHATSAPP_SEND_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chatId, text }),
+    });
+    const sendBody = await sendResponse.text();
+    let sendResult = null;
+    try { sendResult = JSON.parse(sendBody); } catch (_) { sendResult = { raw: sendBody }; }
+    if (!sendResponse.ok) {
+      console.error('Shared WhatsApp send failed:', sendResponse.status, sendResult);
+      return res.status(502).json({ success: false, sent: false, error: 'Shared WhatsApp send failed', upstreamStatus: sendResponse.status, upstream: sendResult, report: text, summary });
     }
-    res.json({ success: true, sent: false, reason: 'FINANCE_GROUP_ID not set', report: text, summary });
+    return res.json({ success: true, sent: true, chatId, transport: 'Agent2WhatsApp', upstream: sendResult, report: text, summary });
   } catch (e) {
     console.error('Report error:', e);
     res.status(500).json({ error: e.message || String(e) });
   }
 });
 
-client.on('qr', qr => { latestQr = qr; console.log('New WhatsApp QR generated. Open /qr to scan it.'); });
-client.on('authenticated', () => { latestQr = null; console.log('Finance WhatsApp authenticated.'); });
-client.on('ready', () => console.log('BTSA Finance WhatsApp is ready.'));
-client.on('auth_failure', m => console.error('Finance WhatsApp auth failure:', m));
-client.on('disconnected', r => console.log('Finance WhatsApp disconnected:', r));
-client.on('message', async message => {
-  try {
-    if (message.fromMe) return;
-    if (message.from?.endsWith('@g.us')) {
-      const chat = await message.getChat().catch(() => null);
-      console.log('FINANCE GROUP DETECTED:', message.from, chat?.name || 'unknown');
-    }
-  } catch (e) {
-    console.error('Inbound finance group log error:', e.message || e);
-  }
-});
-
-function removeChromiumLocks(dir) {
-  if (!fs.existsSync(dir)) return;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) removeChromiumLocks(full);
-    else if (['SingletonLock', 'SingletonSocket', 'SingletonCookie'].includes(entry.name)) {
-      try { fs.unlinkSync(full); } catch (_) {}
-    }
-  }
-}
-
-removeChromiumLocks(SESSION_DIR);
-client.initialize();
 const PORT = Number(process.env.PORT || 4000);
-app.listen(PORT, () => console.log(`BTSA Finance WhatsApp listening on ${PORT}`));
+app.listen(PORT, () => console.log(`BTSA Finance report service listening on ${PORT}`));
