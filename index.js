@@ -4,6 +4,8 @@ const qrcode = require("qrcode-terminal");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const { parseRoutes, forwardRoute } = require("./group-routing");
+const groupRoutes = parseRoutes(process.env.WHATSAPP_GROUP_ROUTES);
 
 // Create the Express application
 const app = express();
@@ -117,7 +119,7 @@ client.on("message", async (message) => {
     const EXTRA_ALLOWED_GROUP_IDS = String(process.env.EXTRA_ALLOWED_GROUP_IDS || "")
       .split(",").map(v => v.trim()).filter(Boolean);
     const ORDER_INTAKE_GROUP_ID = process.env.ORDER_INTAKE_GROUP_ID || "";
-    const allowedGroups = new Set([ALLOWED_GROUP_ID, ORDER_INTAKE_GROUP_ID, ...EXTRA_ALLOWED_GROUP_IDS].filter(Boolean));
+    const allowedGroups = new Set([ALLOWED_GROUP_ID, ORDER_INTAKE_GROUP_ID, ...EXTRA_ALLOWED_GROUP_IDS, ...Object.keys(groupRoutes)].filter(Boolean));
 
     // Check whether this is a group message
     const isGroup = message.from.endsWith("@g.us");
@@ -321,6 +323,13 @@ client.on("message", async (message) => {
       mediaDataPresent: Boolean(payload.mediaData),
       mediaUrl: payload.mediaUrl,
     });
+
+    // Explicit routes take ownership of this group. Do not also forward to legacy Make.
+    if (isGroup && groupRoutes[message.from]) {
+      await forwardRoute(groupRoutes[message.from], payload);
+      console.log("Message forwarded to configured group route successfully");
+      return;
+    }
 
     // Orders-group messages also feed the dedicated conversational manual-order intake.
     // This is additive: the existing Make/Social handoff remains unchanged.
