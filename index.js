@@ -42,7 +42,7 @@ const client = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHAR
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   },
 });
-installIngress(app,client,{controllers:[process.env.ALLOWED_DIRECT_ID||"263311610368253@lid"]});
+installIngress(app,client,{groups:()=>[process.env.ORDER_INTAKE_GROUP_ID].filter(Boolean),controllers:[process.env.ALLOWED_DIRECT_ID||"263311610368253@lid"]});
 const sharedBridge = installBridge(app, client, MessageMedia);
 
 
