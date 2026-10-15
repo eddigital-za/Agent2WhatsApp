@@ -1,3 +1,4 @@
+const { SharedClient, installIngress } = require("./shared-transport");
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -161,10 +162,11 @@ function auth(req, res, next) {
   next();
 }
 
-const client = new Client({
+const client = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHARED_BRIDGE_URL) : new Client({
   authStrategy: new LocalAuth({ dataPath: AUTH_DIR, clientId: 'btsa-scheduling' }),
   puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium', args: ['--no-sandbox','--disable-setuid-sandbox'] }
 });
+installIngress(app, client);
 let latestQr = null;
 let lastInboundAt = null;
 
@@ -1043,7 +1045,7 @@ client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
 function removeLocks(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){const f=path.join(dir,e.name);if(e.isDirectory())removeLocks(f);else if(['SingletonLock','SingletonSocket','SingletonCookie'].includes(e.name)){try{fs.unlinkSync(f);}catch(_){}}}}
-removeLocks(AUTH_DIR); client.initialize();
+removeLocks(AUTH_DIR); client.initialize().catch(error => console.error("WhatsApp initialization failed:", error.message));
 async function interpreterSelfTest(){
   const key='interpreter-self-test-v2';
   if(!OPENAI_API_KEY||db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
