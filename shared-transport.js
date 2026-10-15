@@ -35,17 +35,18 @@ class SharedClient extends EventEmitter {
   constructor(base){super();this.base=base;this.info={sharedTransport:true};}
   async initialize(){
     const status=await request(this.base,"/bridge/status");
-    this.info=status.whatsappReady?{sharedTransport:true}:null;
-    if(this.info)this.emit("ready");
+    this.bridgeReady=Boolean(status.whatsappReady);
+    if(this.bridgeReady)this.emit("ready");
     else console.error("Shared bridge WhatsApp session is not ready");
   }
   async sendMessage(chatId,message,options={}){
     const body=typeof message==="string"?{chatId,text:message}:{chatId,media:message,options};
     return request(this.base,"/bridge/send",body);
   }
+  async getChats(){return (await request(this.base,"/bridge/groups")).map(g=>({isGroup:true,id:{_serialized:g.id},name:g.name}));}
   async destroy(){}
 }
-function installIngress(app,client) {
+function installIngress(app,client,options={}) {
   const stateFile=path.join("/app/.wwebjs_auth","shared-inbound-ids.json");
   let completed=new Set();
   try {completed=new Set(JSON.parse(fs.readFileSync(stateFile,"utf8")));}catch(e){if(e.code!=="ENOENT")throw e;}
@@ -57,12 +58,12 @@ function installIngress(app,client) {
     fs.renameSync(tmp,stateFile);
   }
   app.get("/bridge/config",auth,(_req,res)=>res.json({
-    active:Boolean(process.env.SHARED_BRIDGE_URL),groups:groups(),sharedTransport:Boolean(process.env.SHARED_BRIDGE_URL)
+    active:Boolean(process.env.SHARED_BRIDGE_URL),groups:options.groups?options.groups():groups(),directInbound:Boolean(options.directInbound),controllers:options.controllers||[],sharedTransport:Boolean(process.env.SHARED_BRIDGE_URL),accountPrefix:String(client.info?.wid?.user||"").slice(0,4)
   }));
   app.post("/bridge/inbound",auth,async(req,res)=>{
     if(!process.env.SHARED_BRIDGE_URL)return res.status(409).json({error:"Shared mode disabled"});
     const p=req.body||{};
-    if(!groups().includes(p.from)||!p.messageId||typeof p.text!=="string")return res.status(400).json({error:"Invalid inbound message"});
+    if((!(options.groups?options.groups():groups()).includes(p.from)&&!(options.directInbound&&!String(p.from).endsWith("@g.us"))&&!(options.controllers||[]).includes(p.from))||!p.messageId||typeof p.text!=="string")return res.status(400).json({error:"Invalid inbound message"});
     if(completed.has(p.messageId)||active.has(p.messageId))return res.json({deduplicated:true});
     active.add(p.messageId);
     try {
@@ -71,6 +72,7 @@ function installIngress(app,client) {
         id:{_serialized:p.messageId},timestamp:p.timestamp,type:p.type,
         hasMedia:Boolean(p.hasMedia),hasQuotedMsg:Boolean(p.quotedMessageId||p.quotedText),
         _data:{},
+        getContact:async()=>({number:p.phone||""}),
         downloadMedia:async()=>p.mediaData?{data:p.mediaData,mimetype:p.mediaType,filename:p.mediaFilename}:null,
         getQuotedMessage:async()=>({body:p.quotedText||"",id:{_serialized:p.quotedMessageId||""},author:p.quotedAuthor||"",from:p.quotedFrom||""}),
         reply:async(text)=>client.sendMessage(p.from,text),
