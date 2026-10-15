@@ -630,15 +630,29 @@ function isOtherDepartmentMessage(text) {
 }
 async function inbound(message) {
   try {
-    if(!message.fromMe && sharedBridge.hasRoute(message.from)){
-      await sharedBridge.forward(message.from,await serializeMessage(message,getInboundMedia,client));
+    // Claim native WhatsApp events before any asynchronous media work. The
+    // existing event ledger survives reconnects and deployments.
+    if (message.fromMe || message.id?.fromMe || message._data?.id?.fromMe) return;
+    if (sharedBridge.pending(message.from)) return;
+    const routed = sharedBridge.hasRoute(message.from);
+    if (!routed && (message.from !== GROUP_ID || (!message.body && !message.hasMedia))) return;
+    const id = message.id || {};
+    const mid = id._serialized || id.$1 ||
+      (id.fromMe !== undefined && id.remote && id.id ? `${id.fromMe}_${id.remote}_${id.id}` : '');
+    if (!mid) { console.warn('Ignored inbound event without a stable message ID'); return; }
+    if (!id._serialized) id._serialized = mid;
+    const claim = db.prepare('INSERT OR IGNORE INTO events(created_at,order_id,event_type,event_key,details) VALUES(?,?,?,?,?)')
+      .run(nowIso(), null, 'whatsapp_inbound_claimed', `whatsapp-inbound-${mid}`, null);
+    if (!claim.changes) { console.log('Duplicate WhatsApp inbound ignored'); return; }
+    if (routed) {
+      try {
+        await sharedBridge.forward(message.from, await serializeMessage(message, getInboundMedia, client));
+      } catch (error) {
+        // Another agent's intake failure must never generate a Scheduling reply.
+        console.error('Shared inbound forwarding failed:', error?.message || String(error));
+      }
       return;
     }
-    if(sharedBridge.pending(message.from))return;
-    if (message.fromMe || message.from !== GROUP_ID || (!message.body&&!message.hasMedia)) return;
-    const mid = message.id?._serialized || '';
-    if (mid && seen.has(mid)) return;
-    if (mid) { seen.add(mid); if (seen.size>5000) seen.clear(); }
     lastInboundAt = nowIso();
     const ingested = message.body ? await ingestGroupOrder(message.body, mid) : null;
     if (ingested) {
@@ -716,7 +730,7 @@ async function inbound(message) {
   } catch (e) {
     const detail=e?.message||String(e);
     console.error('Inbound scheduling error:',detail,e?.stack||'');
-    if(message.hasMedia){
+    if(message.from === GROUP_ID && !message.fromMe && !message.id?.fromMe && message.hasMedia){
       try{await sendGroup('I received the photo but could not process it. Please resend it once.',`proof-error-${message.id?._serialized||Date.now()}`);}catch(replyError){console.error('Failed to send proof error reply:',replyError?.message||String(replyError));}
     }
   }
