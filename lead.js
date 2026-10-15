@@ -1,3 +1,4 @@
+const { SharedClient, installIngress } = require("./shared-transport");
 const express = require("express");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const { DatabaseSync } = require("node:sqlite");
@@ -133,10 +134,11 @@ function recordAcceptedSend(idempotencyKey, record) {
   fs.renameSync(tmp, SEND_LEDGER_PATH);
 }
 
-const client = new Client({
+const client = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHARED_BRIDGE_URL) : new Client({
   authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth" }),
   puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium", args: ["--no-sandbox", "--disable-setuid-sandbox"] },
 });
+installIngress(app,client,{directInbound:true,groups:()=>[REPORT_CHAT_ID]});
 let latestQr = null;
 let lastInboundAt = null;
 
@@ -200,6 +202,7 @@ app.post("/send", async (req, res) => {
 
 const IGNORED_MESSAGE_TYPES = new Set(["e2e_notification","notification_template","notification_template_v2","protocol","ciphertext","revoked"]);
 async function resolveInboundPhone(message) {
+  if (process.env.SHARED_BRIDGE_URL) { const contact = await message.getContact(); if(contact?.number)return contact.number; }
   const sourceId = message.author || message.from || "";
   if (sourceId.endsWith("@lid")) {
     try { const m = await client.getContactLidAndPhone([sourceId]); const pn = m?.[0]?.pn || ""; if (pn) return pn.replace("@c.us", ""); } catch (_) {}
@@ -322,7 +325,7 @@ function removeChromiumLocks(dir) {
   }
 }
 removeChromiumLocks("/app/.wwebjs_auth");
-client.initialize();
+client.initialize().catch(error=>console.error("Shared transport initialization failed:",error.message));
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
 setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);
