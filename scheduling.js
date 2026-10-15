@@ -1,13 +1,14 @@
+const { installBridge, serializeMessage } = require("./bridge-server");
 const { SharedClient, installIngress } = require("./shared-transport");
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const { DatabaseSync } = require('node:sqlite');
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '30mb' }));
 
 const TZ = 'Africa/Johannesburg';
 const AUTH_DIR = '/app/.wwebjs_auth';
@@ -167,6 +168,7 @@ const client = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHAR
   puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium', args: ['--no-sandbox','--disable-setuid-sandbox'] }
 });
 installIngress(app, client);
+const sharedBridge=installBridge(app,client,MessageMedia);
 let latestQr = null;
 let lastInboundAt = null;
 
@@ -628,6 +630,11 @@ function isOtherDepartmentMessage(text) {
 }
 async function inbound(message) {
   try {
+    if(!message.fromMe && sharedBridge.hasRoute(message.from)){
+      await sharedBridge.forward(message.from,await serializeMessage(message,getInboundMedia,client));
+      return;
+    }
+    if(sharedBridge.pending(message.from))return;
     if (message.fromMe || message.from !== GROUP_ID || (!message.body&&!message.hasMedia)) return;
     const mid = message.id?._serialized || '';
     if (mid && seen.has(mid)) return;
