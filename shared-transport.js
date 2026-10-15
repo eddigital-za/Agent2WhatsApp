@@ -57,7 +57,7 @@ function installIngress(app,client) {
     fs.renameSync(tmp,stateFile);
   }
   app.get("/bridge/config",auth,(_req,res)=>res.json({
-    active:Boolean(process.env.SHARED_BRIDGE_URL),groups:groups(),sharedTransport:Boolean(process.env.SHARED_BRIDGE_URL)
+    active:Boolean(process.env.SHARED_BRIDGE_URL),groups:groups(),sharedTransport:Boolean(process.env.SHARED_BRIDGE_URL),accountPrefix:String(client.info?.wid?.user||"").slice(0,4)
   }));
   app.post("/bridge/inbound",auth,async(req,res)=>{
     if(!process.env.SHARED_BRIDGE_URL)return res.status(409).json({error:"Shared mode disabled"});
