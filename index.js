@@ -1,5 +1,6 @@
+const { installBridge } = require("./bridge-server");
 const express = require("express");
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const cors = require("cors");
 const fs = require("fs");
@@ -9,7 +10,7 @@ const path = require("path");
 const app = express();
 
 // Parse JSON request bodies
-app.use(express.json());
+app.use(express.json({ limit: "30mb" }));
 
 // Allow cross-origin requests for easier integration
 app.use(cors());
@@ -40,6 +41,8 @@ const client = new Client({
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   },
 });
+const sharedBridge = installBridge(app, client, MessageMedia);
+
 
 let latestQr = null;
 
@@ -101,6 +104,85 @@ client.on("authenticated", () => {
   console.log("WhatsApp Session authenticated successfully!");
 });
 
+function repairSerializedMessageId(message) {
+  const id = message?.id;
+  if (!id) return null;
+
+  const serialized = id._serialized || id.$1 ||
+    (id.fromMe !== undefined && id.remote && id.id
+      ? `${id.fromMe}_${id.remote}_${id.id}`
+      : null);
+
+  if (serialized && !id._serialized) {
+    id._serialized = serialized;
+    console.log("Repaired WhatsApp serialized message ID:", serialized);
+  }
+  return serialized;
+}
+
+async function downloadMediaFromEventData(message) {
+  const d = message?._data || {};
+  const mediaArgs = {
+    directPath: d.directPath,
+    encFilehash: d.encFilehash,
+    filehash: d.filehash,
+    mediaKey: d.mediaKey,
+    mediaKeyTimestamp: d.mediaKeyTimestamp,
+    type: d.type || message.type,
+    mimetype: d.mimetype,
+    filename: d.filename || null,
+  };
+
+  if (!mediaArgs.directPath || !mediaArgs.mediaKey) {
+    throw new Error("event media metadata incomplete");
+  }
+
+  return await client.pupPage.evaluate(async (args) => {
+    const managerModule = window.require("WAWebDownloadManager");
+    const manager = managerModule.downloadManager || managerModule;
+    const mockQpl = {
+      addAnnotations() { return this; },
+      addPoint() { return this; },
+    };
+
+    const decrypted = await manager.downloadAndMaybeDecrypt({
+      directPath: args.directPath,
+      encFilehash: args.encFilehash,
+      filehash: args.filehash,
+      mediaKey: args.mediaKey,
+      mediaKeyTimestamp: args.mediaKeyTimestamp,
+      type: args.type,
+      signal: new AbortController().signal,
+      downloadQpl: mockQpl,
+    });
+
+    const data = await window.WWebJS.arrayBufferToBase64Async(decrypted);
+    return {
+      data,
+      mimetype: args.mimetype || "application/octet-stream",
+      filename: args.filename || null,
+    };
+  }, mediaArgs);
+}
+
+async function getInboundMedia(message) {
+  try {
+    const media = await getInboundMedia(message);
+    if (media?.data) return media;
+    throw new Error("downloadMedia returned no data");
+  } catch (primaryError) {
+    console.warn(
+      "Standard downloadMedia failed; using event-data fallback:",
+      primaryError?.message || String(primaryError)
+    );
+    const media = await downloadMediaFromEventData(message);
+    if (!media?.data) throw new Error("event-data fallback returned no data");
+    console.log("Event-data media fallback succeeded");
+    return media;
+  }
+}
+
+
 // Forward incoming WhatsApp messages to Make.com
 client.on("message", async (message) => {
   try {
@@ -127,7 +209,7 @@ client.on("message", async (message) => {
         console.log("GROUP DETECTED:", message.from);
         return;
       }
-      if (!allowedGroups.has(message.from)) {
+      if (!allowedGroups.has(message.from) && !sharedBridge.hasRoute(message.from) && !sharedBridge.pending(message.from)) {
         console.log("Ignored group message from:", message.from);
         return;
       }
@@ -138,6 +220,7 @@ client.on("message", async (message) => {
       }
     }
 
+    repairSerializedMessageId(message);
     const payload = {
       from: message.from,
       phone: message.from.replace("@c.us", ""),
@@ -321,6 +404,13 @@ client.on("message", async (message) => {
       mediaDataPresent: Boolean(payload.mediaData),
       mediaUrl: payload.mediaUrl,
     });
+
+    if (isGroup && sharedBridge.hasRoute(message.from)) {
+      await sharedBridge.forward(message.from, payload);
+      return;
+    }
+    // A worker still using its own browser retains ownership until cutover.
+    if (isGroup && sharedBridge.pending(message.from)) return;
 
     // Orders-group messages also feed the dedicated conversational manual-order intake.
     // This is additive: the existing Make/Social handoff remains unchanged.
