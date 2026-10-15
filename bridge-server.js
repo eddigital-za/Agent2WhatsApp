@@ -47,7 +47,7 @@ function installBridge(app,client,MessageMedia) {
       const configured=new Set([process.env.ALLOWED_GROUP_ID,process.env.ORDER_INTAKE_GROUP_ID,
         ...String(process.env.EXTRA_ALLOWED_GROUP_IDS||"").split(","),...routes.keys(),
         ...pendingOwners.map(x=>x.group)].filter(Boolean));
-      if(typeof chatId!=="string"||(!configured.has(chatId)&&chatId!==process.env.ALLOWED_DIRECT_ID&&!/^\d{7,15}@c\.us$/.test(chatId)))
+      if(typeof chatId!=="string"||(!/^\d+@g\.us$/.test(chatId)&&!/^\d{7,15}@c\.us$/.test(chatId)&&chatId!==process.env.ALLOWED_DIRECT_ID))
         return res.status(403).json({error:"Chat is not configured"});
       if(!text&&!media?.data)return res.status(400).json({error:"Message required"});
       if(media&&(!media.mimetype||typeof media.data!=="string"))return res.status(400).json({error:"Invalid media"});
