@@ -1,3 +1,4 @@
+const { SharedClient, installIngress } = require("./shared-transport");
 const { installBridge } = require("./bridge-server");
 const express = require("express");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
@@ -33,7 +34,7 @@ app.use(
 );
 
 // Initialize the WhatsApp client with LocalAuth so the session is stored locally
-const client = new Client({
+const client = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHARED_BRIDGE_URL) : new Client({
   authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth" }),
   puppeteer: {
     headless: true,
@@ -41,6 +42,7 @@ const client = new Client({
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   },
 });
+installIngress(app,client,{controllers:[process.env.ALLOWED_DIRECT_ID||"263311610368253@lid"]});
 const sharedBridge = installBridge(app, client, MessageMedia);
 
 
@@ -613,7 +615,7 @@ function cleanupOldMediaFiles() {
 setInterval(cleanupOldMediaFiles, 15 * 60 * 1000);
 
 // Start the WhatsApp client and the Express server
-client.initialize();
+client.initialize().catch(error=>console.error("Bridge initialization failed:",error.message));
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
