@@ -1,10 +1,22 @@
 "use strict";
 const {auth,request} = require("./shared-transport");
+const fs=require("node:fs");
+const routeFile="/app/.wwebjs_auth/shared-bridge-routes.json";
 function installBridge(app,client,MessageMedia) {
   let routes = new Map();
   let pendingOwners = [];
   let directOwner=null; let controllerOwner=null; let controllers=[];
   const recent=new Map();
+  try {
+    const saved=JSON.parse(fs.readFileSync(routeFile,"utf8"));
+    const allowed=new Set(JSON.parse(process.env.SHARED_BRIDGE_WORKERS||"[]"));
+    routes=new Map((saved.routes||[]).filter(([,url])=>allowed.has(url)));
+    pendingOwners=(saved.pendingOwners||[]).filter(x=>allowed.has(x.url));
+    directOwner=allowed.has(saved.directOwner)?saved.directOwner:null;
+    controllerOwner=allowed.has(saved.controllerOwner)?saved.controllerOwner:null;
+    controllers=saved.controllers||[];
+  }catch(e){if(e.code!=="ENOENT")console.error("Saved bridge routes unavailable:",e.message);}
+
   app.get("/bridge/status",auth,(_req,res)=>{
     const account=String(client.info?.wid?.user||"");
     res.json({whatsappReady:Boolean(client.info),accountPrefix:account.slice(0,4),routeCount:routes.size,
@@ -29,11 +41,14 @@ function installBridge(app,client,MessageMedia) {
       if(config.active&&config.controllers?.length){nextController=url;nextControllers=config.controllers;}
       for(const group of config.groups||[]){
         if(!/^\d+@g\.us$/.test(group))throw new Error("Invalid worker group");
-        if(!config.active){pending.push({group,destination:parsed.hostname});continue;}
+        if(!config.active){pending.push({group,url,destination:parsed.hostname});continue;}
         if(next.has(group))throw new Error("Conflicting group owners; routing unchanged");
         next.set(group,url);
       }
     }
+    fs.mkdirSync("/app/.wwebjs_auth",{recursive:true});
+    fs.writeFileSync(routeFile+".tmp",JSON.stringify({routes:[...next],pendingOwners:pending,directOwner:nextDirect,controllerOwner:nextController,controllers:nextControllers}),{mode:0o600});
+    fs.renameSync(routeFile+".tmp",routeFile);
     routes=next;pendingOwners=pending;directOwner=nextDirect;controllerOwner=nextController;controllers=nextControllers;
     return {routeCount:routes.size,pendingOwners};
   }
@@ -56,6 +71,8 @@ function installBridge(app,client,MessageMedia) {
       res.json({success:true,id:{_serialized:sent?.id?._serialized||""}});
     }catch(e){console.error("Shared outbound failed:",e.message);res.status(500).json({error:"Send outcome requires reconciliation"});}
   });
+  client.on("ready",()=>{if(process.env.SHARED_BRIDGE_WORKERS&&process.env.SHARED_BRIDGE_WORKERS!=="[]")
+    refresh().then(()=>console.log("Shared bridge routes restored")).catch(e=>console.error("Route refresh failed; retained saved routes:",e.message));});
   return {
     hasRoute:group=>routes.has(group)||(!String(group).endsWith("@g.us")&&Boolean(controllers.includes(group)?controllerOwner:directOwner)),
     pending:group=>pendingOwners.some(x=>x.group===group),
