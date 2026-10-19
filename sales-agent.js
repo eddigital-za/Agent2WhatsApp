@@ -1,6 +1,7 @@
 "use strict";
 
 function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId, reasonerUrl, token, normalizePhone, localPhone, logEvent }) {
+  const approvalGroup = () => typeof approvalGroupId === "function" ? approvalGroupId() : approvalGroupId;
   db.exec(`
     CREATE TABLE IF NOT EXISTS sales_messages(
       id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, phone TEXT NOT NULL,
@@ -18,7 +19,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
 
   const now = () => new Date().toISOString();
   const caseRef = () => `SA-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-  const ready = () => Boolean(approvalGroupId && reasonerUrl && token && customerClient?.info && approvalClient?.info);
+  const ready = () => Boolean(approvalGroup() && reasonerUrl && token && customerClient?.info && approvalClient?.info);
   function remember(phone, direction, body, messageId) {
     db.prepare("INSERT OR IGNORE INTO sales_messages(created_at,phone,direction,body,message_id) VALUES(?,?,?,?,?)")
       .run(now(), phone, direction, String(body || ""), messageId || null);
@@ -35,7 +36,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return r.json();
   }
   async function group(text) {
-    const sent = await approvalClient.sendMessage(approvalGroupId, text);
+    const sent = await approvalClient.sendMessage(approvalGroup(), text);
     return sent?.id?._serialized || null;
   }
   function pendingForApproval(message) {
@@ -79,7 +80,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   }
 
   async function onApproval(message) {
-    if (message.from !== approvalGroupId || message.fromMe) return false;
+    if (message.from !== approvalGroup() || message.fromMe) return false;
     const row = await findPending(message);
     if (!row) {
       await group("I can help, but I can't tell which pending client this is for. Please reply directly to the approval message you mean.");
