@@ -4,9 +4,10 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("fs");
 const path = require("path");
+const { installSalesAgent } = require("./sales-agent");
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "30mb" }));
 
 const ALLOWED_ORIGINS = new Set([
   "https://biketransport.co.za",
@@ -134,13 +135,26 @@ function recordAcceptedSend(idempotencyKey, record) {
   fs.renameSync(tmp, SEND_LEDGER_PATH);
 }
 
-const client = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHARED_BRIDGE_URL) : new Client({
+const approvalClient = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHARED_BRIDGE_URL) : null;
+const client = process.env.CUSTOMER_SESSION_LOCAL === "true" ? new Client({
   authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth" }),
   puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium", args: ["--no-sandbox", "--disable-setuid-sandbox"] },
-});
-installIngress(app,client,{directInbound:true,groups:()=>[REPORT_CHAT_ID]});
+}) : (approvalClient || new Client({
+  authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth" }),
+  puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium", args: ["--no-sandbox", "--disable-setuid-sandbox"] },
+}));
+const APPROVAL_GROUP_ID = process.env.SALES_APPROVAL_GROUP_ID || "";
+installIngress(app,client,{directInbound:process.env.CUSTOMER_SESSION_LOCAL !== "true",groups:()=>[REPORT_CHAT_ID,APPROVAL_GROUP_ID].filter(Boolean)});
 let latestQr = null;
 let lastInboundAt = null;
+
+const sales = installSalesAgent({
+  db, customerClient: client, approvalClient: approvalClient || client,
+  approvalGroupId: APPROVAL_GROUP_ID,
+  reasonerUrl: process.env.SALES_REASONER_URL || "",
+  token: process.env.SALES_AGENT_TOKEN || "",
+  normalizePhone: normalizeZaPhone, localPhone: localNineDigit, logEvent,
+});
 
 async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
   if (!text) throw new Error("Text is required");
@@ -159,7 +173,7 @@ async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
 app.get("/health", (req, res) => {
   let dbOk = false;
   try { db.prepare("SELECT 1").get(); dbOk = true; } catch (_) {}
-  res.json({ ok: true, whatsappReady: Boolean(client.info), databaseReady: dbOk, lastInboundAt });
+  res.json({ ok: true, customerWhatsappReady: Boolean(client.info), approvalWhatsappReady: Boolean((approvalClient || client).info), databaseReady: dbOk, salesReady: sales.ready(), mode: "approval_required", lastInboundAt });
 });
 app.get("/qr", (req, res) => {
   if (!latestQr) return res.send("<html><body style='font-family:Arial;text-align:center;padding:40px'><h2>Waiting for WhatsApp QR...</h2><p>If already linked, the session may simply be starting.</p></body></html>");
@@ -214,6 +228,7 @@ async function resolveInboundPhone(message) {
 const seenInbound = new Set();
 async function handleInbound(message) {
   try {
+    if (message.from === APPROVAL_GROUP_ID) { await sales.onApproval(message); return; }
     if (message.fromMe || message.from === "status@broadcast" || message.from.endsWith("@broadcast") || message.from.endsWith("@g.us") || IGNORED_MESSAGE_TYPES.has(message.type)) return;
     const messageId = message.id?._serialized || "";
     if (messageId && seenInbound.has(messageId)) return;
@@ -229,6 +244,7 @@ async function handleInbound(message) {
       logEvent({ phone, type: "unmatched_reply", key: messageId || null, source: "whatsapp" });
     }
     console.log("Inbound reply recorded", { phone, leadId: lead?.id || null, messageId });
+    await sales.onCustomer(message, lead, phone);
   } catch (e) { console.error("Inbound handler error:", e.message); }
 }
 client.on("message", handleInbound);
@@ -315,6 +331,7 @@ client.on("change_state", state => console.log("WhatsApp state:", state));
 client.on("ready", () => console.log("BTSA Lead WhatsApp service is ready."));
 client.on("auth_failure", message => console.error("Authentication failed:", message));
 client.on("disconnected", reason => console.log("WhatsApp disconnected:", reason));
+if (approvalClient && approvalClient !== client) approvalClient.on("ready", () => console.log("BTSA approval bridge is ready."));
 
 function removeChromiumLocks(dir) {
   if (!fs.existsSync(dir)) return;
@@ -326,6 +343,7 @@ function removeChromiumLocks(dir) {
 }
 removeChromiumLocks("/app/.wwebjs_auth");
 client.initialize().catch(error=>console.error("Shared transport initialization failed:",error.message));
+if (approvalClient && approvalClient !== client) approvalClient.initialize().catch(error=>console.error("Approval transport initialization failed:",error.message));
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
 setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);
