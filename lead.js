@@ -231,7 +231,9 @@ async function handleInbound(message) {
     if (!approvalGroupId && String(message.from || "").endsWith("@g.us")) {
       try {
         const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
-        const markerMatch = /^approval test(?: 2| 3)?$/i.test(String(message.body || "").trim());
+        const markerText = String(message.body || message._data?.body || message._data?.caption || "").trim();
+        const markerMatch = /^approval test(?: 2| 3| 4)?$/i.test(markerText);
+        if (/^approval test/i.test(markerText)) console.log("Approval marker received", message.from, markerText);
         const chat = markerMatch ? null : await message.getChat();
         if (markerMatch || String(chat?.name || "").trim().toLowerCase() === wanted.trim().toLowerCase()) {
           approvalGroupId = message.from;
