@@ -343,18 +343,23 @@ function removeChromiumLocks(dir) {
 }
 removeChromiumLocks("/app/.wwebjs_auth");
 client.initialize().catch(error=>console.error("Shared transport initialization failed:",error.message));
-if (approvalClient && approvalClient !== client) approvalClient.initialize().then(async()=>{
-  if (!approvalGroupId) {
-    const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
-    const groups = await approvalClient.getChats();
-    const found = groups.find(g => String(g.name || "").trim().toLowerCase() === wanted.trim().toLowerCase());
-    if (!found) throw new Error(`Approval group not found: ${wanted}`);
-    approvalGroupId = found.id._serialized;
-    console.log("Discovered sales approval group", approvalGroupId);
-  }
-  await bridgeRequest(process.env.SHARED_BRIDGE_URL,"/bridge/refresh",{});
-  console.log("Sales approval route refreshed");
-}).catch(error=>console.error("Approval transport initialization failed:",error.message));
+async function discoverApprovalRoute() {
+  if (!approvalClient || approvalClient === client) return;
+  try {
+    if (!approvalGroupId) {
+      const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
+      const groups = await approvalClient.getChats();
+      const found = groups.find(g => String(g.name || "").trim().toLowerCase() === wanted.trim().toLowerCase());
+      if (!found) throw new Error(`Approval group not found: ${wanted}`);
+      approvalGroupId = found.id._serialized;
+      console.log("Discovered sales approval group", approvalGroupId);
+    }
+    await bridgeRequest(process.env.SHARED_BRIDGE_URL,"/bridge/refresh",{});
+    console.log("Sales approval route refreshed");
+  } catch (error) { console.error("Approval route discovery will retry:", error.message); }
+}
+if (approvalClient && approvalClient !== client) approvalClient.initialize().then(discoverApprovalRoute).catch(error=>console.error("Approval transport initialization failed:",error.message));
+setInterval(() => { if (!sales.ready()) discoverApprovalRoute(); }, 30000);
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
 setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);
