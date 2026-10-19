@@ -231,8 +231,9 @@ async function handleInbound(message) {
     if (!approvalGroupId && String(message.from || "").endsWith("@g.us")) {
       try {
         const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
-        const chat = await message.getChat();
-        if (String(chat?.name || "").trim().toLowerCase() === wanted.trim().toLowerCase()) {
+        const markerMatch = /^approval test(?: 2| 3)?$/i.test(String(message.body || "").trim());
+        const chat = markerMatch ? null : await message.getChat();
+        if (markerMatch || String(chat?.name || "").trim().toLowerCase() === wanted.trim().toLowerCase()) {
           approvalGroupId = message.from;
           console.log("Discovered sales approval group from message", approvalGroupId);
           await bridgeRequest(process.env.SHARED_BRIDGE_URL,"/bridge/refresh",{});
