@@ -1,4 +1,4 @@
-const { SharedClient, installIngress } = require("./shared-transport");
+const { SharedClient, installIngress, request: bridgeRequest } = require("./shared-transport");
 const express = require("express");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const { DatabaseSync } = require("node:sqlite");
@@ -143,14 +143,14 @@ const client = process.env.CUSTOMER_SESSION_LOCAL === "true" ? new Client({
   authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth" }),
   puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium", args: ["--no-sandbox", "--disable-setuid-sandbox"] },
 }));
-const APPROVAL_GROUP_ID = process.env.SALES_APPROVAL_GROUP_ID || "";
-installIngress(app,client,{directInbound:process.env.CUSTOMER_SESSION_LOCAL !== "true",groups:()=>[REPORT_CHAT_ID,APPROVAL_GROUP_ID].filter(Boolean)});
+let approvalGroupId = process.env.SALES_APPROVAL_GROUP_ID || "";
+installIngress(app,client,{directInbound:process.env.CUSTOMER_SESSION_LOCAL !== "true",groups:()=>[REPORT_CHAT_ID,approvalGroupId].filter(Boolean)});
 let latestQr = null;
 let lastInboundAt = null;
 
 const sales = installSalesAgent({
   db, customerClient: client, approvalClient: approvalClient || client,
-  approvalGroupId: APPROVAL_GROUP_ID,
+  approvalGroupId: () => approvalGroupId,
   reasonerUrl: process.env.SALES_REASONER_URL || "",
   token: process.env.SALES_AGENT_TOKEN || "",
   normalizePhone: normalizeZaPhone, localPhone: localNineDigit, logEvent,
@@ -228,7 +228,7 @@ async function resolveInboundPhone(message) {
 const seenInbound = new Set();
 async function handleInbound(message) {
   try {
-    if (message.from === APPROVAL_GROUP_ID) { await sales.onApproval(message); return; }
+    if (message.from === approvalGroupId) { await sales.onApproval(message); return; }
     if (message.fromMe || message.from === "status@broadcast" || message.from.endsWith("@broadcast") || message.from.endsWith("@g.us") || IGNORED_MESSAGE_TYPES.has(message.type)) return;
     const messageId = message.id?._serialized || "";
     if (messageId && seenInbound.has(messageId)) return;
@@ -343,7 +343,18 @@ function removeChromiumLocks(dir) {
 }
 removeChromiumLocks("/app/.wwebjs_auth");
 client.initialize().catch(error=>console.error("Shared transport initialization failed:",error.message));
-if (approvalClient && approvalClient !== client) approvalClient.initialize().catch(error=>console.error("Approval transport initialization failed:",error.message));
+if (approvalClient && approvalClient !== client) approvalClient.initialize().then(async()=>{
+  if (!approvalGroupId) {
+    const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
+    const groups = await approvalClient.getChats();
+    const found = groups.find(g => String(g.name || "").trim().toLowerCase() === wanted.trim().toLowerCase());
+    if (!found) throw new Error(`Approval group not found: ${wanted}`);
+    approvalGroupId = found.id._serialized;
+    console.log("Discovered sales approval group", approvalGroupId);
+  }
+  await bridgeRequest(process.env.SHARED_BRIDGE_URL,"/bridge/refresh",{});
+  console.log("Sales approval route refreshed");
+}).catch(error=>console.error("Approval transport initialization failed:",error.message));
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
 setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);
