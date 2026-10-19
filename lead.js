@@ -228,6 +228,18 @@ async function resolveInboundPhone(message) {
 const seenInbound = new Set();
 async function handleInbound(message) {
   try {
+    if (!approvalGroupId && String(message.from || "").endsWith("@g.us")) {
+      try {
+        const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
+        const chat = await message.getChat();
+        if (String(chat?.name || "").trim().toLowerCase() === wanted.trim().toLowerCase()) {
+          approvalGroupId = message.from;
+          console.log("Discovered sales approval group from message", approvalGroupId);
+          await bridgeRequest(process.env.SHARED_BRIDGE_URL,"/bridge/refresh",{});
+          console.log("Sales approval route refreshed");
+        }
+      } catch (error) { console.error("Message-based approval discovery failed:", error.message); }
+    }
     if (message.from === approvalGroupId) { await sales.onApproval(message); return; }
     if (message.fromMe || message.from === "status@broadcast" || message.from.endsWith("@broadcast") || message.from.endsWith("@g.us") || IGNORED_MESSAGE_TYPES.has(message.type)) return;
     const messageId = message.id?._serialized || "";
