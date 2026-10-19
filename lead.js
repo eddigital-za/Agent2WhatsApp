@@ -348,7 +348,9 @@ async function discoverApprovalRoute() {
   try {
     if (!approvalGroupId) {
       const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
-      const groups = await approvalClient.getChats();
+      // The customer (072) session is a member of the approval group and can
+      // enumerate chats reliably even when the shared 067 bridge cannot.
+      const groups = await client.getChats();
       const found = groups.find(g => String(g.name || "").trim().toLowerCase() === wanted.trim().toLowerCase());
       if (!found) throw new Error(`Approval group not found: ${wanted}`);
       approvalGroupId = found.id._serialized;
