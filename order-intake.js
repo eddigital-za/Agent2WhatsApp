@@ -2,6 +2,7 @@ const express=require('express');
 const fs=require('fs');
 const path=require('path');
 const {DatabaseSync}=require('node:sqlite');
+const {installSalesReasoner}=require('./sales-reasoner');
 
 const app=express();
 app.use(express.json({limit:'2mb'}));
@@ -14,6 +15,8 @@ const ORDERS_GROUP_ID=process.env.ORDERS_GROUP_ID||'';
 const WHATSAPP_SEND_URL=process.env.WHATSAPP_SEND_URL||'https://agent2whatsapp-production.up.railway.app/send';
 const COMMIT_WEBHOOK_URL=process.env.COMMIT_WEBHOOK_URL||'';
 const HISTORY_WEBHOOK_URL=process.env.HISTORY_WEBHOOK_URL||'';
+
+installSalesReasoner(app,{apiKey:OPENAI_API_KEY,model:OPENAI_MODEL});
 
 fs.mkdirSync(DB_DIR,{recursive:true});
 const db=new DatabaseSync(DB_PATH);
