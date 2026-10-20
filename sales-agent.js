@@ -3,6 +3,7 @@
 function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId, reasonerUrl, token, normalizePhone, localPhone, logEvent }) {
   const approvalGroup = () => typeof approvalGroupId === "function" ? approvalGroupId() : approvalGroupId;
   db.exec(`
+    CREATE TABLE IF NOT EXISTS sales_inbound_claims(message_id TEXT PRIMARY KEY, claimed_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sales_messages(
       id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, phone TEXT NOT NULL,
       direction TEXT NOT NULL, body TEXT NOT NULL, message_id TEXT UNIQUE
@@ -19,7 +20,12 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
 
   const now = () => new Date().toISOString();
   const caseRef = () => `SA-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-  const ready = () => Boolean(approvalGroup() && reasonerUrl && token && customerClient?.info && approvalClient?.info);
+  const ready = () => Boolean(process.env.SALES_ENABLED === "true" && approvalGroup() && reasonerUrl && token && customerClient?.info && approvalClient?.info);
+  function claim(message, kind) {
+    const id = message.id?._serialized;
+    if (!id || String(id).startsWith("true_")) return false;
+    return db.prepare("INSERT OR IGNORE INTO sales_inbound_claims(message_id,claimed_at) VALUES(?,?)").run(kind + ":" + id, now()).changes === 1;
+  }
   function remember(phone, direction, body, messageId) {
     db.prepare("INSERT OR IGNORE INTO sales_messages(created_at,phone,direction,body,message_id) VALUES(?,?,?,?,?)")
       .run(now(), phone, direction, String(body || ""), messageId || null);
@@ -61,7 +67,10 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   }
 
   async function onCustomer(message, lead, phone) {
-    if (!ready()) throw new Error("Sales agent configuration is incomplete");
+    if (!ready() || message.fromMe || !lead) return false;
+    const testPhones = String(process.env.SALES_TEST_PHONES || "").split(",").filter(Boolean).map(normalizePhone);
+    if (process.env.SALES_TEST_MODE !== "false" && !testPhones.includes(normalizePhone(phone))) return false;
+    if (!claim(message, "customer")) return false;
     const text = String(message.body || "").trim();
     if (!text || message.hasMedia) {
       await group(`I received ${message.hasMedia ? "a media message" : "an empty message"} from ${lead?.name || `…${phone.slice(-4)}`}. I haven't replied. Please handle this one manually.`);
@@ -80,10 +89,13 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   }
 
   async function onApproval(message) {
-    if (message.from !== approvalGroup() || message.fromMe) return false;
+    if (!ready() || message._viaSharedBridge !== true || message.from !== approvalGroup() || message.fromMe) return false;
+    const owner = String(customerClient.info?.wid?.user || "");
+    const author = String(message._approvalAuthorPhone || "");
+    if (!/^\d{9,15}$/.test(owner) || !author || normalizePhone(author) !== normalizePhone(owner)) return false;
+    if (!claim(message, "approval")) return false;
     const row = await findPending(message);
     if (!row) {
-      await group("I can help, but I can't tell which pending client this is for. Please reply directly to the approval message you mean.");
       return true;
     }
     let audio = null;
@@ -97,6 +109,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       instruction, audio
     });
     if (out.intent === "send" && out.finalReply) {
+      // Atomic send-once lock; uncertain sends stay locked for manual reconciliation.
+      const locked = db.prepare("UPDATE sales_approvals SET state='sending',decided_at=? WHERE id=? AND state='pending'").run(now(), row.id);
+      if (locked.changes !== 1) return true;
       const sent = await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`, out.finalReply);
       remember(row.phone, "agent", out.finalReply, sent?.id?._serialized);
       db.prepare("UPDATE sales_approvals SET state='sent',decided_at=?,decision_text=? WHERE id=?").run(now(), instruction || out.transcript || "voice approval", row.id);
@@ -115,3 +130,4 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
 }
 
 module.exports = { installSalesAgent };
+
