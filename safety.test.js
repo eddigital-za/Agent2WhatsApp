@@ -23,6 +23,26 @@ test("outbound reservations deduplicate concurrent sends and persist across rest
  guard.pause();
  await assert.rejects(client.sendMessage("other","five"),/paused/);
 });
+test("fresh test enquiries exclude old form facts and an unquoted correction selects only the latest case", async () => {
+ process.env.SALES_ENABLED="true";process.env.SALES_TEST_MODE="true";process.env.SALES_TEST_PHONES="27760000000";
+ const db=new DatabaseSync(":memory:");let sent=0;const cards=[],payloads=[];
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sent++;}};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:"card-"+cards.length}};}};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)").run("SA-OLD","27760000000","old enquiry","R2750",new Date().toISOString());
+ const savedFetch=global.fetch;
+ global.fetch=async(url,opts)=>{payloads.push(JSON.parse(opts.body));return {ok:true,json:async()=>url.endsWith("customer")?{proposedReply:"What bike and which collection/delivery areas?"}:{intent:"revise",finalReply:"What bike are you moving, and which areas?",response:""}};};
+ try {
+  await agent.onCustomer({from:"27760000000@c.us",body:"What's your Durban to Johannesburg rate?",id:{_serialized:"false_new"},timestamp:Math.floor(Date.now()/1000)}, {id:317,name:"test",pickup:"OLD ADDRESS",dropoff:"OTHER OLD ADDRESS",bike_make:"test",estimated_price:"2750"},"27760000000");
+  assert.equal(payloads[0].lead.pickup,undefined);assert.equal(payloads[0].lead.estimated_price,undefined);
+  assert.equal(cards[0].includes("OLD ADDRESS"),false);assert.equal(cards[0].includes("2750"),false);
+  assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-OLD'").get().state,"superseded");
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,id:{_serialized:"false_feedback"},body:"You need to qualify the lead first",timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(cards.length,2);assert.match(cards[1],/Revised reply/);assert.equal(sent,0);
+  assert.notEqual(payloads[1].caseRef,"SA-OLD");
+ } finally {global.fetch=savedFetch;db.close();}
+});
 test("global limit and uncertain sends fail closed",async()=>{
  const file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),"btsa-safety-")),"state.json");
  let sent=0;const c={sendMessage:async()=>{sent++;throw Error("uncertain");}};
