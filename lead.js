@@ -280,11 +280,25 @@ async function handleInbound(message) {
         }
       } catch (error) { console.error("Message-based approval discovery failed:", error.message); }
     }
-    if (groupId === approvalGroupId) { await sales.onApproval(message); return; }
+    if (groupId === approvalGroupId) {
+      // Approval commands are accepted only when the shared 067 bridge forwards
+      // them. Messages observed by the local 072 session include the bot's own
+      // group replies and must never be treated as fresh human approvals.
+      if (message._viaSharedBridge === true) await sales.onApproval(message);
+      return;
+    }
     if (message.fromMe || message.from === "status@broadcast" || message.from.endsWith("@broadcast") || groupId || IGNORED_MESSAGE_TYPES.has(message.type)) return;
     const messageId = message.id?._serialized || "";
-    if (messageId && seenInbound.has(messageId)) return;
-    if (messageId) { seenInbound.add(messageId); if (seenInbound.size > 5000) seenInbound.clear(); }
+    const inboundKey = messageId || [
+      message.from || "",
+      message.author || "",
+      message.timestamp || "",
+      message.type || "",
+      message.body || "",
+    ].join("|");
+    if (seenInbound.has(inboundKey)) return;
+    seenInbound.add(inboundKey);
+    if (seenInbound.size > 5000) seenInbound.clear();
     const phone = localNineDigit(await resolveInboundPhone(message));
     if (!/^\d{9}$/.test(phone)) return console.error("Inbound skipped: invalid phone", message.from);
     lastInboundAt = isoNow();
@@ -300,7 +314,6 @@ async function handleInbound(message) {
   } catch (e) { console.error("Inbound handler error:", e.message); }
 }
 client.on("message", handleInbound);
-client.on("message_create", handleInbound);
 
 async function processFirstTouches() {
   if (!client.info) return;
