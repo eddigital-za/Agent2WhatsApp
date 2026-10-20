@@ -19,11 +19,14 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   `);
 
   const now = () => new Date().toISOString();
+  const sessionStarted = Date.now();
   const caseRef = () => `SA-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
   const ready = () => Boolean(process.env.SALES_ENABLED === "true" && approvalGroup() && reasonerUrl && token && customerClient?.info && approvalClient?.info);
   function claim(message, kind) {
     const id = message.id?._serialized;
     if (!id || String(id).startsWith("true_")) return false;
+    const timestamp = Number(message.timestamp) * 1000;
+    if (!Number.isFinite(timestamp) || timestamp < sessionStarted - 5000 || timestamp > Date.now() + 60000) return false;
     return db.prepare("INSERT OR IGNORE INTO sales_inbound_claims(message_id,claimed_at) VALUES(?,?)").run(kind + ":" + id, now()).changes === 1;
   }
   function remember(phone, direction, body, messageId) {
