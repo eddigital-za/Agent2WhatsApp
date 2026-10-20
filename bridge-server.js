@@ -18,7 +18,7 @@ function installBridge(app,client,MessageMedia) {
     }catch(e){res.status(500).json({error:e.message});}
   });
   async function refresh() {
-    const services=JSON.parse(process.env.SHARED_BRIDGE_WORKERS||"[]");
+    const services=[...new Set([...JSON.parse(process.env.SHARED_BRIDGE_WORKERS||"[]"), process.env.SALES_AGENT_WORKER_URL].filter(Boolean))];
     const next=new Map(), pending=[];
     let nextDirect=null,nextController=null,nextControllers=[];
     for(const url of services){
