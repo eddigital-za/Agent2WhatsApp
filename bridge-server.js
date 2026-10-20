@@ -56,6 +56,11 @@ function installBridge(app,client,MessageMedia) {
       res.json({success:true,id:{_serialized:sent?.id?._serialized||""}});
     }catch(e){console.error("Shared outbound failed:",e.message);res.status(500).json({error:"Send outcome requires reconciliation"});}
   });
+  client.on("ready", () => {
+    refresh()
+      .then(result => console.log("Shared bridge routes refreshed", result))
+      .catch(error => console.error("Shared bridge route refresh failed:", error.message));
+  });
   return {
     hasRoute:group=>routes.has(group)||(!String(group).endsWith("@g.us")&&Boolean(controllers.includes(group)?controllerOwner:directOwner)),
     pending:group=>pendingOwners.some(x=>x.group===group),
