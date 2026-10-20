@@ -1,6 +1,10 @@
 "use strict";
 const {auth,request} = require("./shared-transport");
+const {installOutboundSafety} = require("./outbound-safety");
 function installBridge(app,client,MessageMedia) {
+  const safety = installOutboundSafety(client);
+  app.get("/bridge/safety",auth,(_req,res)=>res.json(safety.status()));
+  app.post("/bridge/pause",auth,(_req,res)=>{safety.pause();res.json({paused:true});});
   let routes = new Map();
   let pendingOwners = [];
   let directOwner=null; let controllerOwner=null; let controllers=[];
@@ -65,6 +69,13 @@ function installBridge(app,client,MessageMedia) {
     hasRoute:group=>routes.has(group)||(!String(group).endsWith("@g.us")&&Boolean(controllers.includes(group)?controllerOwner:directOwner)),
     pending:group=>pendingOwners.some(x=>x.group===group),
     async forward(group,payload){
+      if (String(group).endsWith("@g.us")) {
+        const author = String(payload.author || "");
+        payload.authorPhone = author.endsWith("@c.us") ? author.replace("@c.us", "") : "";
+        if (author.endsWith("@lid") && client.getContactLidAndPhone) {
+          try { const mappings = await client.getContactLidAndPhone([author]); payload.authorPhone = String(mappings?.[0]?.pn || "").replace(/@c\.us$/, ""); } catch (_) {}
+        }
+      }
       const url=routes.get(group)||(!String(group).endsWith("@g.us")?(controllers.includes(group)?controllerOwner:directOwner):null);if(!url)return false;
       const id=payload.messageId;
       if(!id)throw new Error("Message ID required for routed delivery");
@@ -112,3 +123,4 @@ async function serializeMessage(message,downloadMedia,client) {
 }
 
 module.exports={installBridge,serializeMessage};
+
