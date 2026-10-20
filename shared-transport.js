@@ -69,6 +69,7 @@ function installIngress(app,client,options={}) {
     try {
       const message={
         from:p.from,author:p.author,body:p.text,fromMe:false,
+        _viaSharedBridge:true,
         id:{_serialized:p.messageId},timestamp:p.timestamp,type:p.type,
         hasMedia:Boolean(p.hasMedia),hasQuotedMsg:Boolean(p.quotedMessageId||p.quotedText),
         _data:{},
