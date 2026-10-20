@@ -40,11 +40,12 @@ test("sales ignores bot/local/untrusted events; duplicate and concurrent approva
  const normal=x=>String(x||"").replace(/\D/g,"");
  const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:normal,localPhone:normal,logEvent:()=>{}});
  const oldFetch=global.fetch;global.fetch=async()=>{reasons++;return {ok:true,json:async()=>({intent:"send",finalReply:"approved"})};};
- const message={from:"123@g.us",author:"owner@lid",_viaSharedBridge:true,_approvalAuthorPhone:"27720000000",id:{_serialized:"false_approval1"},body:"send it",fromMe:false};
+ const message={from:"123@g.us",author:"owner@lid",_viaSharedBridge:true,_approvalAuthorPhone:"27720000000",id:{_serialized:"false_approval1"},body:"send it",fromMe:false,timestamp:Math.floor(Date.now()/1000)};
  try {
   await agent.onApproval({...message,_viaSharedBridge:false});
   await agent.onApproval({...message,fromMe:true});
   await agent.onApproval({...message,_approvalAuthorPhone:"27670000000"});
+  await agent.onApproval({...message,timestamp:1});
   assert.equal(reasons,0);assert.equal(groupSent,0);
   await agent.onApproval(message);assert.equal(groupSent,0); // ambiguous: silence
   db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)").run("SA-TEST","27760000000","rate?","reply",new Date().toISOString());
