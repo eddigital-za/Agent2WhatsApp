@@ -144,7 +144,7 @@ const client = process.env.CUSTOMER_SESSION_LOCAL === "true" ? new Client({
   puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium", args: ["--no-sandbox", "--disable-setuid-sandbox"] },
 }));
 let approvalGroupId = process.env.SALES_APPROVAL_GROUP_ID || "";
-installIngress(app,client,{directInbound:process.env.CUSTOMER_SESSION_LOCAL !== "true",groups:()=>[REPORT_CHAT_ID,approvalGroupId].filter(Boolean)});
+installIngress(app,client,{directInbound:process.env.CUSTOMER_SESSION_LOCAL !== "true",groups:()=>[approvalGroupId].filter(Boolean)});
 let latestQr = null;
 let lastInboundAt = null;
 
