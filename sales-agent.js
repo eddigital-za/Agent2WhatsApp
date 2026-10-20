@@ -62,7 +62,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (!row && quotedText) {
       const m = quotedText.match(/\b(SA-[A-Z0-9-]+)\b/); if (m) row = db.prepare("SELECT * FROM sales_approvals WHERE case_ref=? AND state='pending'").get(m[1]);
     }
-    if (!row) {
+    if (!row && !quotedId && !quotedText) {
       const rows = db.prepare("SELECT * FROM sales_approvals WHERE state='pending' ORDER BY id DESC LIMIT 2").all();
       if (rows.length === 1) row = rows[0];
     }
