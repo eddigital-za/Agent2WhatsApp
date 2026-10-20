@@ -1,4 +1,5 @@
-const { SharedClient, installIngress, request: bridgeRequest } = require("./shared-transport");
+const { SharedClient, installIngress, request: bridgeRequest, auth } = require("./shared-transport");
+const { installOutboundSafety } = require("./outbound-safety");
 const express = require("express");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const { DatabaseSync } = require("node:sqlite");
@@ -144,6 +145,10 @@ const client = process.env.CUSTOMER_SESSION_LOCAL === "true" ? new Client({
   puppeteer: { headless: true, executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium", args: ["--no-sandbox", "--disable-setuid-sandbox"] },
 }));
 let approvalGroupId = process.env.SALES_APPROVAL_GROUP_ID || "";
+const salesSafety = installOutboundSafety(approvalClient || client, { file: "/app/.wwebjs_auth/sales-outbound-safety.json", perChat: 5 });
+if (approvalClient && approvalClient !== client) installOutboundSafety(client, { file: "/app/.wwebjs_auth/customer-outbound-safety.json" });
+app.get("/sales/safety", auth, (_req,res) => res.json(salesSafety.status()));
+app.post("/sales/pause", auth, (_req,res) => { process.env.SALES_ENABLED = "false"; salesSafety.pause(); res.json({ paused: true }); });
 installIngress(app,client,{directInbound:process.env.CUSTOMER_SESSION_LOCAL !== "true",groups:()=>[approvalGroupId].filter(Boolean)});
 let latestQr = null;
 let lastInboundAt = null;
@@ -257,8 +262,10 @@ function messageGroupId(message) {
 }
 async function handleInbound(message) {
   try {
+    const id = message.id || {};
+    if (!id._serialized) id._serialized = id.$1 || (id.fromMe !== undefined && id.remote && id.id ? `${id.fromMe}_${id.remote}_${id.id}` : "");
     const groupId = messageGroupId(message);
-    if (!approvalGroupId && groupId) {
+    if (process.env.SALES_ENABLED === "true" && !approvalGroupId && groupId) {
       try {
         const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
         const markerText = String(message.body || message._data?.body || message._data?.caption || "").trim();
@@ -409,6 +416,7 @@ function removeChromiumLocks(dir) {
 removeChromiumLocks("/app/.wwebjs_auth");
 client.initialize().catch(error=>console.error("Shared transport initialization failed:",error.message));
 async function discoverApprovalRoute() {
+  if (process.env.SALES_ENABLED !== "true") return;
   if (!approvalClient || approvalClient === client) return;
   try {
     if (!approvalGroupId) {
@@ -433,3 +441,4 @@ setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);
 
 const PORT = 4000;
 app.listen(PORT, () => console.log(`BTSA Lead service listening on ${PORT}; SQLite ${DB_PATH}`));
+
