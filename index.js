@@ -35,7 +35,7 @@ app.use(
 
 // Initialize the WhatsApp client with LocalAuth so the session is stored locally
 const client = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHARED_BRIDGE_URL) : new Client({
-  authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth" }),
+  authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth", clientId: process.env.WHATSAPP_CLIENT_ID || undefined }),
   puppeteer: {
     headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
