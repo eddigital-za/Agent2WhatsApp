@@ -101,7 +101,8 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const author = String(message._approvalAuthorPhone || "");
     const authorId = String(message.author || "");
     const ownerId = String(customerClient.info?.wid?._serialized || "");
-    let isOwner = Boolean(authorId && ownerId && authorId === ownerId);
+    const trustedOwnerIds = String(process.env.SALES_APPROVER_IDS || "").split(",").map(x => x.trim()).filter(Boolean);
+    let isOwner = Boolean(authorId && ((ownerId && authorId === ownerId) || trustedOwnerIds.includes(authorId)));
     if (!isOwner && /^\d{9,15}$/.test(owner) && author) isOwner = normalizePhone(author) === normalizePhone(owner);
     if (!isOwner && authorId.endsWith("@lid") && customerClient.getContactLidAndPhone) {
       try {
