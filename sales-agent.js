@@ -34,7 +34,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       .run(now(), phone, direction, String(body || ""), messageId || null);
   }
   function history(phone) {
-    return db.prepare("SELECT direction,body,created_at FROM sales_messages WHERE phone=? ORDER BY id DESC LIMIT 16").all(phone).reverse();
+    return db.prepare("SELECT direction,body,created_at FROM sales_messages WHERE phone=? AND created_at>=? ORDER BY id DESC LIMIT 16").all(phone, new Date(Date.now() - 30 * 60000).toISOString()).reverse();
   }
   async function reason(route, payload) {
     const r = await fetch(reasonerUrl.replace(/\/$/, "") + route, {
@@ -63,7 +63,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       const m = quotedText.match(/\b(SA-[A-Z0-9-]+)\b/); if (m) row = db.prepare("SELECT * FROM sales_approvals WHERE case_ref=? AND state='pending'").get(m[1]);
     }
     if (!row && !quotedId && !quotedText) {
-      const rows = db.prepare("SELECT * FROM sales_approvals WHERE state='pending' ORDER BY id DESC LIMIT 2").all();
+      const rows = db.prepare("SELECT a.* FROM sales_approvals a WHERE a.state='pending' AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=a.phone AND newer.id>a.id) ORDER BY a.id DESC LIMIT 2").all();
       if (rows.length === 1) row = rows[0];
     }
     return row;
@@ -80,12 +80,16 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       return;
     }
     remember(phone, "customer", text, message.id?._serialized);
-    const out = await reason("/sales/customer", { lead: lead || null, message: text, history: history(phone) });
+    const recentForm = process.env.SALES_TEST_MODE === "false" && Date.parse(lead.first_touch_sent_at || "") >= Date.now() - 60 * 60000;
+    const facts = recentForm ? { ...lead, estimated_price: undefined, website_estimate: lead.estimated_price || "", price_status: "unconfirmed website estimate, not a current quote" } : { id: lead.id, phone, context_status: "fresh enquiry; previous form details are unconfirmed" };
+    const out = await reason("/sales/customer", { lead: facts, message: text, history: history(phone) });
     if (!out.proposedReply) throw new Error("Reasoner returned no proposed reply");
     const ref = caseRef();
+    db.prepare("UPDATE sales_approvals SET state='superseded' WHERE phone=? AND state='pending'").run(phone);
     const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?,?)")
       .run(ref, lead?.id || null, phone, text, out.proposedReply, now());
-    const prompt = `*${ref} — ${lead?.name || `Lead …${phone.slice(-4)}`}*\n${[lead?.pickup, lead?.dropoff].filter(Boolean).join(" → ") || "Route not captured"}${[lead?.bike_make, lead?.bike_model].filter(Boolean).length ? ` | ${[lead?.bike_make, lead?.bike_model].filter(Boolean).join(" ")}` : ""}\n\n*Client:* ${text}\n\n*My suggested reply:*\n${out.proposedReply}\n\nReply naturally or send a voice note. Say things like “send it”, “tell them R4,250”, “make it warmer”, or ask me to rethink it. I will never send unless your meaning is clear.`;
+    const label = recentForm ? `${lead.name || `Lead …${phone.slice(-4)}`}\nForm context: ${[lead.pickup, lead.dropoff].filter(Boolean).join(" → ")}` : `Lead …${phone.slice(-4)}\nFresh enquiry — previous form details not confirmed`;
+    const prompt = `*${ref} — ${label}*\n\n*Client:* ${text}\n\n*My suggested reply:*\n${out.proposedReply}\n\nReply naturally or send a voice note. I will wait for your approval before sending.`;
     const groupId = await group(prompt);
     db.prepare("UPDATE sales_approvals SET group_message_id=? WHERE id=?").run(groupId, Number(result.lastInsertRowid));
     logEvent({ leadId: lead?.id || null, phone, type: "sales_approval_requested", key: `sales-request-${ref}`, details: { ref, category: out.category, confidence: out.confidence } });
@@ -95,10 +99,22 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (!ready() || message._viaSharedBridge !== true || message.from !== approvalGroup() || message.fromMe) return false;
     const owner = String(customerClient.info?.wid?.user || "");
     const author = String(message._approvalAuthorPhone || "");
-    if (!/^\d{9,15}$/.test(owner) || !author || normalizePhone(author) !== normalizePhone(owner)) return false;
+    const authorId = String(message.author || "");
+    const ownerId = String(customerClient.info?.wid?._serialized || "");
+    let isOwner = Boolean(authorId && ownerId && authorId === ownerId);
+    if (!isOwner && /^\d{9,15}$/.test(owner) && author) isOwner = normalizePhone(author) === normalizePhone(owner);
+    if (!isOwner && authorId.endsWith("@lid") && customerClient.getContactLidAndPhone) {
+      try {
+        const mappings = await customerClient.getContactLidAndPhone([authorId]);
+        const pn = String(mappings?.[0]?.pn || "").replace(/@(c\.us|s\.whatsapp\.net)$/, "");
+        isOwner = Boolean(pn && normalizePhone(pn) === normalizePhone(owner));
+      } catch (_) {}
+    }
+    if (!isOwner) { console.log("Sales approval ignored: owner identity not verified"); return false; }
     if (!claim(message, "approval")) return false;
     const row = await findPending(message);
     if (!row) {
+      console.log("Sales approval ignored: no unambiguous active case");
       return true;
     }
     let audio = null;
