@@ -215,36 +215,66 @@ app.post("/send", async (req, res) => {
 });
 
 const IGNORED_MESSAGE_TYPES = new Set(["e2e_notification","notification_template","notification_template_v2","protocol","ciphertext","revoked"]);
+function serializedPhone(value) {
+  const raw = value?._serialized || value?.user || value || "";
+  return String(raw).replace(/@(c\.us|s\.whatsapp\.net)$/, "");
+}
 async function resolveInboundPhone(message) {
-  if (process.env.SHARED_BRIDGE_URL) { const contact = await message.getContact(); if(contact?.number)return contact.number; }
   const sourceId = message.author || message.from || "";
   if (sourceId.endsWith("@lid")) {
-    try { const m = await client.getContactLidAndPhone([sourceId]); const pn = m?.[0]?.pn || ""; if (pn) return pn.replace("@c.us", ""); } catch (_) {}
+    try {
+      const mappings = await client.getContactLidAndPhone([sourceId]);
+      const mapping = Array.isArray(mappings) ? mappings[0] : mappings?.[sourceId] || mappings;
+      const pn = serializedPhone(mapping?.pn || mapping?.phone || mapping?.phoneNumber);
+      if (pn) {
+        console.log("Resolved WhatsApp LID to phone", sourceId, pn.slice(-4));
+        return pn;
+      }
+    } catch (error) {
+      console.error("LID phone resolution failed:", sourceId, error.message);
+    }
+    return "";
   }
-  try { const c = await message.getContact(); if (c?.number) return c.number; } catch (_) {}
+  try {
+    const contact = await message.getContact();
+    const phone = serializedPhone(contact?.number || contact?.id);
+    if (phone) return phone;
+  } catch (_) {}
   if (sourceId.endsWith("@c.us")) return sourceId.replace("@c.us", "");
   return "";
 }
 const seenInbound = new Set();
+function messageGroupId(message) {
+  const candidates = [
+    message.from,
+    message.to,
+    message.id?.remote,
+    message._data?.id?.remote,
+    message._data?.to?._serialized,
+    message._data?.from?._serialized,
+  ];
+  return candidates.map(value => value?._serialized || value || "").find(value => String(value).endsWith("@g.us")) || "";
+}
 async function handleInbound(message) {
   try {
-    if (!approvalGroupId && String(message.from || "").endsWith("@g.us")) {
+    const groupId = messageGroupId(message);
+    if (!approvalGroupId && groupId) {
       try {
         const wanted = process.env.SALES_APPROVAL_GROUP_NAME || "BTSA Sales Approvals";
         const markerText = String(message.body || message._data?.body || message._data?.caption || "").trim();
         const markerMatch = /^approval test(?: 2| 3| 4)?$/i.test(markerText);
-        if (/^approval test/i.test(markerText)) console.log("Approval marker received", message.from, markerText);
+        if (/^approval test/i.test(markerText)) console.log("Approval marker received", groupId, markerText);
         const chat = markerMatch ? null : await message.getChat();
         if (markerMatch || String(chat?.name || "").trim().toLowerCase() === wanted.trim().toLowerCase()) {
-          approvalGroupId = message.from;
+          approvalGroupId = groupId;
           console.log("Discovered sales approval group from message", approvalGroupId);
           await bridgeRequest(process.env.SHARED_BRIDGE_URL,"/bridge/refresh",{});
           console.log("Sales approval route refreshed");
         }
       } catch (error) { console.error("Message-based approval discovery failed:", error.message); }
     }
-    if (message.from === approvalGroupId) { await sales.onApproval(message); return; }
-    if (message.fromMe || message.from === "status@broadcast" || message.from.endsWith("@broadcast") || message.from.endsWith("@g.us") || IGNORED_MESSAGE_TYPES.has(message.type)) return;
+    if (groupId === approvalGroupId) { await sales.onApproval(message); return; }
+    if (message.fromMe || message.from === "status@broadcast" || message.from.endsWith("@broadcast") || groupId || IGNORED_MESSAGE_TYPES.has(message.type)) return;
     const messageId = message.id?._serialized || "";
     if (messageId && seenInbound.has(messageId)) return;
     if (messageId) { seenInbound.add(messageId); if (seenInbound.size > 5000) seenInbound.clear(); }
