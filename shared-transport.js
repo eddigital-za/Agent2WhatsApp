@@ -70,6 +70,7 @@ function installIngress(app,client,options={}) {
       const message={
         from:p.from,author:p.author,body:p.text,fromMe:false,
         _viaSharedBridge:true,
+        _approvalAuthorPhone:p.authorPhone || "",
         id:{_serialized:p.messageId},timestamp:p.timestamp,type:p.type,
         hasMedia:Boolean(p.hasMedia),hasQuotedMsg:Boolean(p.quotedMessageId||p.quotedText),
         _data:{},
@@ -88,3 +89,4 @@ function installIngress(app,client,options={}) {
   });
 }
 module.exports={auth,authorized,groups,request,SharedClient,installIngress};
+
