@@ -4,7 +4,7 @@ const path=require('path');
 const {DatabaseSync}=require('node:sqlite');
 
 const app=express();
-app.use(express.json({limit:'2mb'}));
+app.use(express.json({limit:'24mb'}));
 const PORT=Number(process.env.PORT||4000);
 const DB_DIR=process.env.DATA_DIR||'/app/data';
 const DB_PATH=path.join(DB_DIR,'order-intake.sqlite');
@@ -58,9 +58,7 @@ function allocateSlaRef(){
 }
 function missing(d){
  const req=[
-  ['rate','rate'],['fullName','customer name'],['make','bike make'],['model','bike model'],
-  ['collectionContact','collection contact'],['collectionPhone','collection phone'],['collectionAddress1','collection address'],
-  ['deliveryContact','delivery contact'],['deliveryPhone','delivery phone'],['deliveryAddress1','delivery address']
+  ['rate','rate'],['route','route'],['make','bike make/type']
  ];
  return req.filter(([k])=>!String(d[k]||'').trim()).map(([,label])=>label);
 }
@@ -88,7 +86,11 @@ function summary(d){
   d.slaRef?`SLA Ref: ${d.slaRef}`:null,
   `Route: ${d.route||routeFromAddresses(d)||'—'}`,
   `Rate: ${d.rate?'R'+Number(d.rate).toLocaleString('en-ZA'):'—'}`,
-  `Customer: ${d.fullName||'—'}`,
+  `Customer: ${d.fullName||d.company||'Not supplied'}`,
+  d.contractor?`Assigned: ${d.contractor}`:null,
+  d.status?`Status: ${d.status}`:null,
+  d.collectedAt?`Collected: ${d.collectedAt}`:null,
+  d.deliveryDate?`Delivery: ${d.deliveryDate}`:null,
   `Bike: ${[d.make,d.model].filter(Boolean).join(' ')||'—'}`,
   d.retailValue?`Retail value: R${Number(d.retailValue).toLocaleString('en-ZA')}`:null,
   '',
@@ -155,7 +157,32 @@ function swapOrder(o){
   route:[o.deliveryCity||o.deliveryState,o.collectionCity||o.collectionState].filter(Boolean).join(' to ')
  };
 }
-async function interpret(text,current,quoted,candidates){
+async function readAttachment(p){
+ const mime=String(p.mediaType||p.media?.mimetype||'').split(';')[0].toLowerCase();
+ if(!p.hasMedia)return {text:'',image:null};
+ let data=String(p.mediaData||p.media?.data||'');
+ if(!data&&p.mediaUrl){
+  const u=new URL(p.mediaUrl),bridge=new URL(WHATSAPP_SEND_URL);
+  if(u.origin!==bridge.origin||!u.pathname.startsWith('/media/'))throw Error('Untrusted media URL');
+  const r=await fetch(u,{signal:AbortSignal.timeout(15000)});
+  if(!r.ok)throw Error('Attachment download HTTP '+r.status);
+  const bytes=Buffer.from(await r.arrayBuffer());
+  if(bytes.length>12*1024*1024)throw Error('Attachment too large');
+  data=bytes.toString('base64');
+ }
+ if(!data)throw Error('WhatsApp attachment unavailable; please resend');
+ if(['image/jpeg','image/png','image/webp','image/gif'].includes(mime))return {text:'',image:'data:'+mime+';base64,'+data};
+ if(mime.startsWith('audio/')||mime==='application/ogg'){
+  const ext=mime.includes('ogg')?'ogg':mime.includes('mp4')?'mp4':mime.includes('mpeg')?'mp3':mime.includes('wav')?'wav':'webm';
+  const form=new FormData();form.append('model','gpt-4o-mini-transcribe');
+  form.append('file',new Blob([Buffer.from(data,'base64')],{type:mime}),'voice.'+ext);
+  const r=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST',headers:{authorization:'Bearer '+OPENAI_API_KEY},body:form});
+  if(!r.ok)throw Error('Voice transcription HTTP '+r.status+': '+(await r.text()).slice(0,160));
+  return {text:String((await r.json()).text||''),image:null};
+ }
+ throw Error('Unsupported attachment format '+mime);
+}
+async function interpret(text,current,quoted,candidates,image){
  if(!OPENAI_API_KEY)throw new Error('OPENAI_API_KEY missing');
  const schema={type:'object',additionalProperties:false,properties:{
   intent:{type:'string',enum:['new_order','update','confirm','cancel','unrelated']},
@@ -165,8 +192,8 @@ async function interpret(text,current,quoted,candidates){
    phone:{type:['string','null']},email:{type:['string','null']},customerAddress1:{type:['string','null']},customerAddress2:{type:['string','null']},customerCity:{type:['string','null']},customerState:{type:['string','null']},customerPostal:{type:['string','null']},
    make:{type:['string','null']},model:{type:['string','null']},odometer:{type:['string','null']},retailValue:{type:['number','null']},extras:{type:['string','null']},
    collectionContact:{type:['string','null']},collectionPhone:{type:['string','null']},collectionAddress1:{type:['string','null']},collectionAddress2:{type:['string','null']},collectionCity:{type:['string','null']},collectionState:{type:['string','null']},collectionPostal:{type:['string','null']},
-   deliveryContact:{type:['string','null']},deliveryPhone:{type:['string','null']},deliveryAddress1:{type:['string','null']},deliveryAddress2:{type:['string','null']},deliveryCity:{type:['string','null']},deliveryState:{type:['string','null']},deliveryPostal:{type:['string','null']}
-  },required:['rate','route','fullName','company','phone','email','customerAddress1','customerAddress2','customerCity','customerState','customerPostal','make','model','odometer','retailValue','extras','collectionContact','collectionPhone','collectionAddress1','collectionAddress2','collectionCity','collectionState','collectionPostal','deliveryContact','deliveryPhone','deliveryAddress1','deliveryAddress2','deliveryCity','deliveryState','deliveryPostal']}
+   deliveryContact:{type:['string','null']},deliveryPhone:{type:['string','null']},deliveryAddress1:{type:['string','null']},deliveryAddress2:{type:['string','null']},deliveryCity:{type:['string','null']},deliveryState:{type:['string','null']},deliveryPostal:{type:['string','null']},contractor:{type:['string','null']},status:{type:['string','null']},collectedAt:{type:['string','null']},deliveryDate:{type:['string','null']}
+  },required:['rate','route','fullName','company','phone','email','customerAddress1','customerAddress2','customerCity','customerState','customerPostal','make','model','odometer','retailValue','extras','collectionContact','collectionPhone','collectionAddress1','collectionAddress2','collectionCity','collectionState','collectionPostal','deliveryContact','deliveryPhone','deliveryAddress1','deliveryAddress2','deliveryCity','deliveryState','deliveryPostal','contractor','status','collectedAt','deliveryDate']}
  },required:['intent','historyIndex','reverseHistory','needsClarification','clarification','fields']};
  const system=`You are the BTSA manual-order controller. Understand informal WhatsApp messages and speech-to-text. Never invent facts.
 A quoted/replied-to previous order is the strongest reference. Historical candidates are numbered from 0. Select historyIndex only when the user's reference clearly identifies that order/customer; otherwise set needsClarification=true.
@@ -174,10 +201,10 @@ A quoted/replied-to previous order is the strongest reference. Historical candid
 "same customer/bike/order" means reuse historical details unless the user explicitly changes them.
 If a complete draft exists, "add to SLA sheet", "save it", "process it", "add it", "correct", "confirm" or equivalent is intent=confirm.
 Normal group chatter is unrelated. Never require the literal word confirm if the user's instruction clearly authorizes saving.
-The collection/delivery data is authoritative. Do not preserve stale route wording from an older order when endpoints changed.`;
+The collection/delivery data is authoritative. Do not preserve stale route wording from an older order when endpoints changed.\nRead images directly: extract collection and delivery addresses, contacts, telephone numbers, and notes. Never ask the user to transcribe a readable image.\nHandle short informal messages, follow-up pictures and transcribed voice notes as one order draft. Vespa is a bike make, not a customer name. Do not guess customer names. Preserve contractor, order status, collection and delivery dates. Leave unknown optional fields blank. Ask only a specific necessary clarification, not a list of optional fields.\nAn explicit instruction to add/save an order authorizes saving even if optional fields are missing.`;
  const body={model:OPENAI_MODEL,input:[
   {role:'system',content:system},
-  {role:'user',content:`Current draft:\n${JSON.stringify(current||{})}\n\nQuoted WhatsApp message:\n${quoted||'(none)'}\n\nHistorical candidates:\n${JSON.stringify(candidates)}\n\nNew message:\n${text}`}
+  {role:'user',content:[{type:'input_text',text:`Current draft:\n${JSON.stringify(current||{})}\n\nQuoted WhatsApp message:\n${quoted||'(none)'}\n\nHistorical candidates:\n${JSON.stringify(candidates)}\n\nNew message:\n${text}`},...(image?[{type:'input_image',image_url:image}]:[])]}
  ],text:{format:{type:'json_schema',name:'manual_order_intake_v2',strict:true,schema}}};
  const r=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{authorization:`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'},body:JSON.stringify(body)});
  if(!r.ok)throw new Error('OpenAI '+r.status+': '+await r.text());
@@ -207,17 +234,19 @@ app.get('/health',(req,res)=>res.json({ok:true,openai:Boolean(OPENAI_API_KEY),co
 app.post('/inbound',async(req,res)=>{
  try{
   const p=req.body||{};
-  if(p.from!==ORDERS_GROUP_ID||!p.text)return res.json({ignored:true});
+  if(p.from!==ORDERS_GROUP_ID||(!p.text&&!p.hasMedia))return res.json({ignored:true});
   const author=String(p.author||p.phone||'group-controller');
   const existing=getDraft(author);
   const quoted=String(p.quotedText||'');
-  const trigger=/\b(new|manual|add|book|booking|capture|create|repeat|reverse|return)\b[\s\S]{0,40}\border\b/i.test(p.text)
+  const trigger=Boolean(p.hasMedia)||/\b(new|manual|add|book|booking|capture|create|repeat|reverse|return)\b[\s\S]{0,40}\border\b/i.test(p.text)
     ||/\border\b[\s\S]{0,40}\b(new|manual|add|book|capture|create|repeat|reverse|return)\b/i.test(p.text)
     ||(quoted&&/\b(reverse|repeat|return|same|again|new|book|add)\b/i.test(p.text));
   if(!existing&&!trigger)return res.json({ignored:true});
 
-  const candidates=await candidatesFor(p.text,quoted);
-  const parsed=await interpret(p.text,existing?.data||null,quoted,candidates);
+  const attachment=await readAttachment(p);
+  const incoming=[p.text,attachment.text].filter(Boolean).join('\n');
+  const candidates=await candidatesFor(incoming,quoted);
+  const parsed=await interpret(incoming,existing?.data||null,quoted,candidates,attachment.image);
   if(parsed.intent==='unrelated'&&!existing)return res.json({ignored:true});
   if(parsed.intent==='cancel'){
    clearDraft(author); await send('Manual order draft cancelled.'); return res.json({cancelled:true});
@@ -235,19 +264,19 @@ app.post('/inbound',async(req,res)=>{
    delete base.entryId; delete base.slaRef; delete base.status; delete base.sourceId; delete base.quickbooksInvoiceId; delete base.receivedAt;
   }
   let data=mergeFields(base,parsed.fields);
-  data.route=routeFromAddresses(data)||data.route;
+  data.route=data.route||routeFromAddresses(data);
   const miss=missing(data);
 
   if(parsed.intent==='confirm'){
-   if(miss.length){saveDraft(author,data);await send(`I still need: ${miss.join(', ')}.`);return res.json({waiting:true,missing:miss});}
+   if(miss.length){saveDraft(author,data);await send(`Before saving, I only need: ${miss.join(', ')}.`);return res.json({waiting:true,missing:miss});}
    const out=await commit(author,data,p.messageId);return res.json({committed:true,...out});
   }
 
   saveDraft(author,data);
   if(miss.length){
-   await send(`${summary(data)}\n\nStill need: *${miss.join(', ')}*\nSend the missing details in any format.`);
+   await send(`${summary(data)}\n\nTo save, I only need: *${miss.join(', ')}*. Send text, a voice note or an image.`);
   }else{
-   await send(`${summary(data)}\n\nEverything required is captured. Tell me to *add/save/process it* or send any correction.`);
+   await send(`${summary(data)}\n\nReady to save. Reply *add it* or send a correction.`);
   }
   res.json({ok:true,missing:miss,historyCandidates:candidates.length});
  }catch(e){console.error('Inbound error',e);res.status(500).json({error:e.message});}
