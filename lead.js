@@ -322,6 +322,23 @@ async function handleInbound(message) {
 }
 client.on("message", handleInbound);
 
+async function handleOutgoing(message) {
+  try {
+    if (!message.fromMe || messageGroupId(message) || message.from === "status@broadcast") return;
+    const target = message.to || message.id?.remote || message._data?.to?._serialized || "";
+    let phone = serializedPhone(target);
+    if (String(target).endsWith("@lid")) {
+      try {
+        const mappings = await client.getContactLidAndPhone([target]);
+        phone = serializedPhone(mappings?.[0]?.pn || mappings?.[0]?.phone || mappings?.[0]?.phoneNumber);
+      } catch (error) { console.error("Outgoing LID phone resolution failed:", error.message); }
+    }
+    phone = localNineDigit(phone);
+    if (/^\d{9}$/.test(phone)) await sales.onOutgoing(message, phone);
+  } catch (error) { console.error("Outgoing sales observer error:", error.message); }
+}
+client.on("message_create", handleOutgoing);
+
 async function processFirstTouches() {
   if (!client.info) return;
   const rows = db.prepare(`SELECT * FROM leads WHERE first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND manual_review=0 AND first_touch_due_at<=? ORDER BY first_touch_due_at ASC LIMIT 20`).all(isoNow());
@@ -437,6 +454,7 @@ if (approvalClient && approvalClient !== client) approvalClient.initialize().the
 setInterval(() => { if (!sales.ready()) discoverApprovalRoute(); }, 30000);
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
+setInterval(() => { sales.processDueFollowups().catch(console.error); }, 60000);
 setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);
 
 const PORT = 4000;
