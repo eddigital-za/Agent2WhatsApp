@@ -24,6 +24,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const SOCIAL_PROOF_WEBHOOK_URL = process.env.SOCIAL_PROOF_WEBHOOK_URL || '';
 const AGENT_HANDOFF_SECRET = process.env.AGENT_HANDOFF_SECRET || '';
+const SALES_ORDER_CONFIRMATION_URL = process.env.SALES_ORDER_CONFIRMATION_URL || '';
+const SHARED_BRIDGE_TOKEN = process.env.SHARED_BRIDGE_TOKEN || '';
 const SLA_SHEET_CSV_URL = process.env.SLA_SHEET_CSV_URL || 'https://docs.google.com/spreadsheets/d/1jkgivHJBWzVYMgCoUIb65EaRddyM2NoXml7mQnBVVS4/gviz/tq?tqx=out:csv&sheet=Sheet1';
 const SLA_SYNC_MIN_REF = Number(process.env.SLA_SYNC_MIN_REF || 398);
 const SLA_SYNC_INTERVAL_MS = Number(process.env.SLA_SYNC_INTERVAL_MS || 300000);
@@ -473,12 +475,21 @@ async function handleProofPhoto(message,quotedOrder){
   return true;
 }
 async function processOutbox(){
-  if(!SOCIAL_PROOF_WEBHOOK_URL||!AGENT_HANDOFF_SECRET)return;
   const rows=db.prepare("SELECT * FROM outbox WHERE status='pending' AND next_attempt_at<=? ORDER BY id LIMIT 5").all(nowIso());
   for(const row of rows){
-    const body=row.payload; const signature=crypto.createHmac('sha256',AGENT_HANDOFF_SECRET).update(body).digest('hex');
     try{
-      const response=await fetch(SOCIAL_PROOF_WEBHOOK_URL,{method:'POST',headers:{'content-type':'application/json','x-btsa-signature':signature},body});
+      const body=row.payload;
+      let url,headers;
+      if(row.event_type==='sales_order_confirmed'){
+        if(!SALES_ORDER_CONFIRMATION_URL||!SHARED_BRIDGE_TOKEN)throw new Error('Sales order confirmation handoff is not configured');
+        url=SALES_ORDER_CONFIRMATION_URL;
+        headers={'content-type':'application/json',authorization:`Bearer ${SHARED_BRIDGE_TOKEN}`};
+      }else{
+        if(!SOCIAL_PROOF_WEBHOOK_URL||!AGENT_HANDOFF_SECRET)throw new Error('Social proof handoff is not configured');
+        url=SOCIAL_PROOF_WEBHOOK_URL;
+        headers={'content-type':'application/json','x-btsa-signature':crypto.createHmac('sha256',AGENT_HANDOFF_SECRET).update(body).digest('hex')};
+      }
+      const response=await fetch(url,{method:'POST',headers,body,signal:AbortSignal.timeout(45000)});
       if(!response.ok)throw new Error(`HTTP ${response.status}: ${await response.text()}`);
       db.prepare("UPDATE outbox SET status='delivered',delivered_at=?,attempts=attempts+1,last_error=NULL WHERE id=?").run(nowIso(),row.id);
     }catch(error){
@@ -818,7 +829,7 @@ function sheetOrders(rows){
     }else{
       missing.push(i+1); continue;
     }
-    const item={entryId,externalId,clientName,route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
+    const item={entryId,externalId,clientName,phone:String(a[7]||'').trim(),route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
     const prior=orders.get(externalId);
     if(prior && JSON.stringify(prior)!==JSON.stringify(item))throw new Error(`Conflicting duplicate SLA reference ${externalId}`);
     orders.set(externalId,item);
@@ -833,6 +844,8 @@ function sameSheetOrder(o,item){
 }
 function applySheetOrders(items){
   const key='sureforms-entry-id-repair-2026-10-03-v1';
+  const confirmationBaselineKey='sales-order-confirmation-baseline-v1';
+  const confirmationsActive=Boolean(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(confirmationBaselineKey));
   const migrate=!db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key);
   const oldRows=migrate?db.prepare("SELECT * FROM orders WHERE (external_id GLOB 'M-[0-9]*' OR (external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380))").all():[];
   if(migrate){
@@ -840,7 +853,7 @@ function applySheetOrders(items){
     if(!fs.existsSync(backup))db.exec(`VACUUM INTO '${backup.replaceAll("'","''")}'`);
   }
   const legacyRowRefs={"435":365,"437":366,"438":367,"439":368,"440":369,"441":370,"442":371,"443":372,"444":373,"445":374,"446":375,"447":376,"448":377,"449":378,"450":379,"451":380,"452":381,"453":382,"454":383,"455":384,"456":385,"457":386,"458":387,"459":388,"460":389,"461":390,"462":391,"463":397,"464":398,"465":399,"466":400,"468":401,"469":402,"470":403,"471":404,"472":405,"473":406,"474":407,"475":408,"476":409,"477":410,"478":411,"479":412,"480":413,"481":414,"482":415,"483":416,"484":417,"485":418,"486":419,"487":420,"488":421,"489":422,"490":423};
-  let migrated=0;
+  let migrated=0, confirmationsQueued=0, confirmationsSkipped=0;
   db.exec('BEGIN IMMEDIATE');
   try{
     if(migrate){
@@ -870,13 +883,23 @@ function applySheetOrders(items){
       }else{
         db.prepare('INSERT INTO orders(external_id,client_name,route,bike,contractor,status,completed_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
           .run(item.externalId,item.clientName,item.route,item.bike,item.contractor,status,completedAt,now,now);
+        const phoneDigits=String(item.phone||'').replace(/\D/g,'');
+        const validPhone=/^(?:0\d{9}|27\d{9})$/.test(phoneDigits);
+        if(confirmationsActive && /^SLA-\d+$/.test(item.externalId) && validPhone){
+          const queued=db.prepare("INSERT OR IGNORE INTO outbox(event_key,event_type,payload,next_attempt_at,created_at) VALUES(?,?,?,?,?)")
+            .run(`sales-order-confirmed-${item.externalId}`,'sales_order_confirmed',JSON.stringify({slaRef:item.externalId,phone:item.phone,name:item.clientName,source:'sla_sheet'}),now,now);
+          confirmationsQueued+=queued.changes;
+        }else if(confirmationsActive && /^SLA-\d+$/.test(item.externalId)){
+          confirmationsSkipped++;
+        }
       }
       if(reopen)db.prepare('INSERT INTO report_runs(run_key,sent_at) VALUES(?,?)').run(reopenKey,now);
     }
     if(migrate)db.prepare('INSERT INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
+    if(!confirmationsActive)db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(confirmationBaselineKey,nowIso());
     db.exec('COMMIT');
   }catch(e){db.exec('ROLLBACK');throw e;}
-  return {migrated,legacyRetained:migrate?oldRows.length-migrated:0};
+  return {migrated,legacyRetained:migrate?oldRows.length-migrated:0,confirmationsQueued,confirmationsSkipped};
 }
 async function syncSlaSheet(){
   try{
@@ -888,6 +911,8 @@ async function syncSlaSheet(){
     const open=db.prepare("SELECT external_id FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id GLOB 'M-[0-9]*' OR external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id").all().map(o=>o.external_id);
     lastSheetSync={ok:true,at:nowIso(),rows:items.length,upserts:items.length,...migration,openIds:open,error:null};
     console.log('SLA sheet sync complete',lastSheetSync);
+    if(migration.confirmationsSkipped)console.error('SLA confirmations skipped because customer phone was invalid or missing:',migration.confirmationsSkipped);
+    if(migration.confirmationsQueued)await processOutbox();
   }catch(e){
     lastSheetSync={ok:false,at:nowIso(),rows:0,upserts:0,error:e.message};
     console.error('SLA sheet sync failed:',e.message);
