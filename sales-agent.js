@@ -197,9 +197,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return processed;
   }
 
-  function orderConfirmationText(name, slaRef) {
+  function orderConfirmationText(name) {
     const greeting = name ? `Thanks ${name}, I’ve received your booking form 🙌` : "Thanks, I’ve received your booking form 🙌";
-    return `${greeting}\nBooking reference: ${slaRef}\n\nYour booking is now with our scheduling team. Payment secures your slot and locks in the quoted rate. We’ll confirm the collection and delivery arrangements with you here on WhatsApp. If we need anything else, we’ll contact you here.\n\nThanks, Duane`;
+    return `${greeting}\n\nYour invoice, including the banking details, will be generated automatically and sent to you by email. Payment is due upfront or at collection. Payment secures your slot and locks in the quoted rate.\n\nI’ll confirm the collection and delivery arrangements with you here on WhatsApp. If I need anything else, I’ll reach out here. If you have any questions, ask me anytime.\n\nThanks, Duane`;
   }
 
   function onOrderConfirmed({ slaRef, phone, name }) {
@@ -208,7 +208,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (!/^SLA-\d+$/.test(ref)) throw new Error("Valid SLA reference required");
     if (!/^\d{9}$/.test(normalized)) throw new Error("Valid South African customer phone required");
     const clientName = String(name || "").trim().slice(0, 120);
-    const message = orderConfirmationText(clientName, ref);
+    const message = orderConfirmationText(clientName);
     const stamp = now();
     const result = db.prepare("INSERT OR IGNORE INTO sales_order_confirmations(sla_ref,phone,client_name,message_text,created_at,updated_at) VALUES(?,?,?,?,?,?)")
       .run(ref, normalized, clientName, message, stamp, stamp);
