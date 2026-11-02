@@ -28,6 +28,18 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_sales_sla_followups_due ON sales_sla_followups(state, due_at);
+    CREATE TABLE IF NOT EXISTS sales_order_confirmations(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sla_ref TEXT UNIQUE NOT NULL,
+      phone TEXT NOT NULL,
+      client_name TEXT,
+      message_text TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      message_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_sales_order_confirmations_state ON sales_order_confirmations(state, created_at);
   `);
 
   const approvalColumns = db.prepare("PRAGMA table_info(sales_approvals)").all().map(row => row.name);
@@ -185,6 +197,55 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return processed;
   }
 
+  function orderConfirmationText(name, slaRef) {
+    const greeting = name ? `Thanks ${name}, I’ve received your booking form 🙌` : "Thanks, I’ve received your booking form 🙌";
+    return `${greeting}\nBooking reference: ${slaRef}\n\nYour booking is now with our scheduling team. Payment secures your slot and locks in the quoted rate. We’ll confirm the collection and delivery arrangements with you here on WhatsApp. If we need anything else, we’ll contact you here.\n\nThanks, Duane`;
+  }
+
+  function onOrderConfirmed({ slaRef, phone, name }) {
+    const ref = String(slaRef || "").trim().toUpperCase();
+    const normalized = localPhone(phone);
+    if (!/^SLA-\d+$/.test(ref)) throw new Error("Valid SLA reference required");
+    if (!/^\d{9}$/.test(normalized)) throw new Error("Valid South African customer phone required");
+    const clientName = String(name || "").trim().slice(0, 120);
+    const message = orderConfirmationText(clientName, ref);
+    const stamp = now();
+    const result = db.prepare("INSERT OR IGNORE INTO sales_order_confirmations(sla_ref,phone,client_name,message_text,created_at,updated_at) VALUES(?,?,?,?,?,?)")
+      .run(ref, normalized, clientName, message, stamp, stamp);
+    if (result.changes !== 1) {
+      return { accepted: true, deduplicated: true, confirmation: db.prepare("SELECT sla_ref,state,updated_at FROM sales_order_confirmations WHERE sla_ref=?").get(ref) };
+    }
+    const followups = db.prepare("SELECT id FROM sales_sla_followups WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").all(normalized);
+    db.prepare("UPDATE sales_sla_followups SET state='cancelled_order',updated_at=? WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").run(stamp, normalized);
+    for (const row of followups) {
+      db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=?,decision_text='SLA submitted successfully' WHERE followup_id=? AND state='pending'").run(stamp, row.id);
+    }
+    logEvent({ phone: normalized, type: "sales_order_confirmed", key: `sales-order-${ref}`, details: { slaRef: ref, cancelledFollowups: followups.length } });
+    return { accepted: true, deduplicated: false, confirmation: { sla_ref: ref, state: "pending", updated_at: stamp } };
+  }
+
+  async function processOrderConfirmations() {
+    if (!customerClient?.info) return 0;
+    const rows = db.prepare("SELECT * FROM sales_order_confirmations WHERE state='pending' ORDER BY id LIMIT 5").all();
+    let processed = 0;
+    for (const row of rows) {
+      const locked = db.prepare("UPDATE sales_order_confirmations SET state='sending',updated_at=? WHERE id=? AND state='pending'").run(now(), row.id);
+      if (locked.changes !== 1) continue;
+      try {
+        const sent = await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`, row.message_text);
+        db.prepare("UPDATE sales_order_confirmations SET state='sent',updated_at=?,message_id=? WHERE id=? AND state='sending'")
+          .run(now(), sent?.id?._serialized || null, row.id);
+        remember(row.phone, "agent", row.message_text, sent?.id?._serialized);
+        logEvent({ phone: row.phone, type: "sales_order_thank_you_sent", key: `sales-order-thanks-${row.sla_ref}`, details: { slaRef: row.sla_ref } });
+        processed++;
+      } catch (error) {
+        db.prepare("UPDATE sales_order_confirmations SET state='send_unknown',updated_at=? WHERE id=? AND state='sending'").run(now(), row.id);
+        console.error("Order confirmation send outcome unknown; automatic retry blocked:", row.sla_ref, error.message);
+      }
+    }
+    return processed;
+  }
+
   async function onApproval(message) {
     if (!ready() || message._viaSharedBridge !== true || message.from !== approvalGroup() || message.fromMe) return false;
     const owner = String(customerClient.info?.wid?.user || "");
@@ -245,7 +306,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return true;
   }
 
-  return { onCustomer, onOutgoing, onApproval, processDueFollowups, ready };
+  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processDueFollowups, processOrderConfirmations, ready };
 }
 
 module.exports = { installSalesAgent };

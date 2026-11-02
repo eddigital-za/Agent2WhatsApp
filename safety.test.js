@@ -107,3 +107,28 @@ test("SLA links schedule one approval after 24 hours and a client reply cancels 
   assert.equal(db.prepare("SELECT state FROM sales_approvals").get().state,"superseded");
  } finally {global.fetch=oldFetch;db.close();}
 });
+test("successful SLA submission cancels the reminder and sends one confirmation",async()=>{
+ const db=new DatabaseSync(":memory:");let customerSent=0;const messages=[];
+ const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async(to,text)=>{customerSent++;messages.push({to,text});return {id:{_serialized:"confirmed-1"}};}};
+ const approvalClient={info:{},sendMessage:async()=>({id:{_serialized:"group"}})};
+ const norm=x=>{let n=String(x||"").replace(/\D/g,"");if(n.startsWith("0"))n=`27${n.slice(1)}`;if(n.length===9)n=`27${n}`;return n;};
+ const local=x=>{let n=norm(x);if(n.startsWith("0"))n=`27${n.slice(1)}`;return n.startsWith("27")?n.slice(2):n;};
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:local,logEvent:()=>{}});
+ const stamp=new Date().toISOString();
+ const f=db.prepare("INSERT INTO sales_sla_followups(phone,source_message_id,sla_message,sent_at,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)")
+  .run("760000000","true_link","booking link",stamp,new Date(Date.now()+86400000).toISOString(),stamp,stamp);
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,followup_id,created_at) VALUES(?,?,?,?,?,?)")
+  .run("SA-FOLLOWUP","760000000","No reply","Reminder",Number(f.lastInsertRowid),stamp);
+ try {
+  const first=agent.onOrderConfirmed({slaRef:"SLA-501",phone:"27760000000",name:"Sipho"});
+  const duplicate=agent.onOrderConfirmed({slaRef:"sla-501",phone:"0760000000",name:"Sipho"});
+  assert.equal(first.deduplicated,false);assert.equal(duplicate.deduplicated,true);
+  assert.equal(db.prepare("SELECT state FROM sales_sla_followups").get().state,"cancelled_order");
+  assert.equal(db.prepare("SELECT state FROM sales_approvals").get().state,"superseded");
+  assert.equal(await agent.processOrderConfirmations(),1);
+  assert.equal(await agent.processOrderConfirmations(),0);
+  assert.equal(customerSent,1);assert.equal(messages[0].to,"27760000000@c.us");
+  assert.match(messages[0].text,/received your booking form/);assert.match(messages[0].text,/Payment secures your slot/);
+  assert.equal(db.prepare("SELECT state FROM sales_order_confirmations").get().state,"sent");
+ } finally {db.close();}
+});

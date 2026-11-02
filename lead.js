@@ -161,6 +161,18 @@ const sales = installSalesAgent({
   normalizePhone: normalizeZaPhone, localPhone: localNineDigit, logEvent,
 });
 
+app.post("/sales/order-confirmed", auth, async (req, res) => {
+  try {
+    const result = sales.onOrderConfirmed(req.body || {});
+    await sales.processOrderConfirmations();
+    res.status(result.deduplicated ? 200 : 202).json(result);
+  } catch (error) {
+    const status = /required|valid/i.test(error.message) ? 400 : 500;
+    console.error("Order confirmation intake failed:", error.message);
+    res.status(status).json({ error: error.message });
+  }
+});
+
 async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
   if (!text) throw new Error("Text is required");
   if (!client.info) throw new Error("WhatsApp session not ready");
@@ -455,6 +467,7 @@ setInterval(() => { if (!sales.ready()) discoverApprovalRoute(); }, 30000);
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
 setInterval(() => { sales.processDueFollowups().catch(console.error); }, 60000);
+setInterval(() => { sales.processOrderConfirmations().catch(console.error); }, 60000);
 setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);
 
 const PORT = 4000;
