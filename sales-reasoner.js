@@ -52,6 +52,18 @@ function installSalesReasoner(app, { apiKey, model }) {
     } catch (e) { console.error("Sales customer reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
 
+  app.post("/sales/followup", async (req, res) => {
+    try {
+      if (!authorized(req)) return res.status(401).json({ error: "Unauthorized" });
+      if (!apiKey) throw new Error("OPENAI_API_KEY missing");
+      const p = req.body || {};
+      const system = `${SALES_SYSTEM}\nDraft a short, natural next-day WhatsApp follow-up after Duane sent the client a BTSA booking/SLA link and the client has not replied. Do not repeat the quote, invent availability, add pressure or ask the full qualification questions again. Check whether they had a chance to complete it and offer help. Use the client's name only when supplied.`;
+      const out = await structured(apiKey, model, "btsa_sla_followup_v1", customerSchema, system,
+        `Lead facts:\n${JSON.stringify(p.lead || {})}\n\nSLA message sent:\n${String(p.slaMessage || "")}\n\nConversation since link:\n${JSON.stringify(p.history || [])}`);
+      res.json(out);
+    } catch (e) { console.error("Sales follow-up reasoner:", e.message); res.status(500).json({ error: e.message }); }
+  });
+
   app.post("/sales/approval", async (req, res) => {
     try {
       if (!authorized(req)) return res.status(401).json({ error: "Unauthorized" });
