@@ -128,7 +128,9 @@ test("successful SLA submission cancels the reminder and sends one confirmation"
   assert.equal(await agent.processOrderConfirmations(),1);
   assert.equal(await agent.processOrderConfirmations(),0);
   assert.equal(customerSent,1);assert.equal(messages[0].to,"27760000000@c.us");
-  assert.match(messages[0].text,/received your booking form/);assert.match(messages[0].text,/Payment secures your slot/);
+  assert.match(messages[0].text,/received your booking form/);assert.match(messages[0].text,/invoice, including the banking details/);
+  assert.match(messages[0].text,/Payment is due upfront or at collection/);assert.match(messages[0].text,/I’ll confirm/);
+  assert.doesNotMatch(messages[0].text,/SLA-501|Booking reference/);
   assert.equal(db.prepare("SELECT state FROM sales_order_confirmations").get().state,"sent");
  } finally {db.close();}
 });
