@@ -50,6 +50,17 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   const sessionStarted = Date.now();
   const caseRef = () => `SA-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
   const ready = () => Boolean(process.env.SALES_ENABLED === "true" && approvalGroup() && reasonerUrl && token && customerClient?.info && approvalClient?.info);
+  function isNoReplyInstruction(value) {
+    const text = String(value || "").toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, " ").trim();
+    return /\b(?:do not|don't|dont|no)\s+(?:send|reply|respond)\b/.test(text)
+      || /\b(?:leave|ignore|skip)\s+(?:it|this|that|him|her|them|the (?:message|client|customer))\b/.test(text)
+      || /\b(?:no response|no reply|say nothing)\b/.test(text);
+  }
+  function explicitlyAuthorizesSend(value) {
+    const text = String(value || "").toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, " ").trim();
+    if (!text || isNoReplyInstruction(text)) return false;
+    return /\b(?:send(?: it| that| this| the reply| the message)?|go ahead|yes,? send|reply(?: with| saying| to)?|respond(?: with| saying| to)?|tell (?:him|her|them|the client|the customer)|say (?:that|this|to him|to her|to them)|let (?:him|her|them|the client|the customer) know|confirm (?:that|with|to))\b/.test(text);
+  }
   function claim(message, kind) {
     const id = message.id?._serialized;
     if (!id || String(id).startsWith("true_")) return false;
@@ -331,11 +342,26 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (m?.data) audio = { data: m.data, mimetype: m.mimetype || "audio/ogg", filename: m.filename || "approval.ogg" };
     }
     const instruction = String(message.body || "").trim();
+    if (isNoReplyInstruction(instruction)) {
+      db.prepare("UPDATE sales_approvals SET state='cancelled',decided_at=?,decision_text=? WHERE id=? AND state='pending'")
+        .run(now(), instruction, row.id);
+      if (row.followup_id) db.prepare("UPDATE sales_sla_followups SET state='cancelled_owner',updated_at=? WHERE id=? AND state='approval_requested'").run(now(), row.followup_id);
+      await group(`Understood. I won't reply to ${row.case_ref}.`);
+      logEvent({ leadId: row.lead_id, phone: row.phone, type: "sales_reply_cancelled", key: `sales-cancelled-${row.case_ref}`, details: { ref: row.case_ref } });
+      return true;
+    }
     const out = await reason("/sales/approval", {
       caseRef: row.case_ref, customerMessage: row.customer_text, proposedReply: row.proposed_reply,
       instruction, audio, context: row.context_json ? JSON.parse(row.context_json) : {}
     });
-    if (out.intent === "send" && out.finalReply) {
+    const approvalWords = [instruction, out.transcript].filter(Boolean).join("\n");
+    if (out.intent === "cancel" || isNoReplyInstruction(approvalWords)) {
+      db.prepare("UPDATE sales_approvals SET state='cancelled',decided_at=?,decision_text=? WHERE id=? AND state='pending'")
+        .run(now(), approvalWords || "No reply", row.id);
+      if (row.followup_id) db.prepare("UPDATE sales_sla_followups SET state='cancelled_owner',updated_at=? WHERE id=? AND state='approval_requested'").run(now(), row.followup_id);
+      await group(`Understood. I won't reply to ${row.case_ref}.`);
+      logEvent({ leadId: row.lead_id, phone: row.phone, type: "sales_reply_cancelled", key: `sales-cancelled-${row.case_ref}`, details: { ref: row.case_ref } });
+    } else if (out.intent === "send" && out.finalReply && explicitlyAuthorizesSend(approvalWords)) {
       // Atomic send-once lock; uncertain sends stay locked for manual reconciliation.
       const locked = db.prepare("UPDATE sales_approvals SET state='sending',decided_at=? WHERE id=? AND state='pending'").run(now(), row.id);
       if (locked.changes !== 1) return true;
@@ -345,6 +371,8 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (row.followup_id) db.prepare("UPDATE sales_sla_followups SET state='sent',updated_at=? WHERE id=? AND state='approval_requested'").run(now(), row.followup_id);
       await group(`Sent to ${row.case_ref}:\n\n${out.finalReply}`);
       logEvent({ leadId: row.lead_id, phone: row.phone, type: "sales_reply_sent", key: `sales-sent-${row.case_ref}`, details: { ref: row.case_ref } });
+    } else if (out.intent === "send") {
+      await group(`I haven't sent anything for ${row.case_ref}. I need a clear instruction such as “send it” before any client message can leave.`);
     } else if (out.intent === "revise" && out.finalReply) {
       db.prepare("UPDATE sales_approvals SET proposed_reply=?,decision_text=? WHERE id=?").run(out.finalReply, instruction || out.transcript || "voice revision", row.id);
       await group(`Understood. Revised reply for *${row.case_ref}*:\n\n${out.finalReply}\n\nIf that is right, just say “send it”.`);
