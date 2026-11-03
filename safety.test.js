@@ -169,3 +169,53 @@ test("sales uses WhatsApp history and all matching lead rows, and suppresses ack
   assert.ok(payloads[0].history.some(x=>x.direction==="duane"&&/when you're ready/.test(x.body)));
  } finally {global.fetch=savedFetch;db.close();}
 });
+test("don't reply deterministically cancels a pending case without calling the reasoner",async()=>{
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:");let customerSent=0,reasonCalls=0;const cards=[];
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{customerSent++;}};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:"ack"}};}};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)")
+  .run("SA-CANCEL","27760000000","When are you collecting?","I'll collect this afternoon",new Date().toISOString());
+ const savedFetch=global.fetch;global.fetch=async()=>{reasonCalls++;return {ok:true,json:async()=>({intent:"send",finalReply:"I'll collect this afternoon"})};};
+ try {
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:"false_cancel"},body:"Don't reply",timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(reasonCalls,0);assert.equal(customerSent,0);
+  assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-CANCEL'").get().state,"cancelled");
+  assert.match(cards[0],/won't reply/);
+ } finally {global.fetch=savedFetch;db.close();}
+});
+test("model cannot send without an explicit owner send instruction",async()=>{
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:");let customerSent=0;const cards=[];
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{customerSent++;}};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:"ack"}};}};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)")
+  .run("SA-NOAUTH","27760000000","When are you collecting?","I'll collect this afternoon",new Date().toISOString());
+ const savedFetch=global.fetch;global.fetch=async()=>({ok:true,json:async()=>({intent:"send",finalReply:"I'll collect this afternoon",response:""})});
+ try {
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:"false_noauth"},body:"Looks good",timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(customerSent,0);
+  assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-NOAUTH'").get().state,"pending");
+  assert.match(cards[0],/haven't sent anything/);
+ } finally {global.fetch=savedFetch;db.close();}
+});
+test("a transcribed voice instruction not to reply cancels without sending",async()=>{
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:");let customerSent=0;
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{customerSent++;}};
+ const approvalClient={info:{},sendMessage:async()=>({id:{_serialized:"ack"}})};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)")
+  .run("SA-VOICE-CANCEL","27760000000","When are you collecting?","I'll collect this afternoon",new Date().toISOString());
+ const savedFetch=global.fetch;global.fetch=async()=>({ok:true,json:async()=>({intent:"cancel",finalReply:"",response:"",transcript:"Do not reply to him"})});
+ try {
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:"false_voice_cancel"},body:"",hasMedia:true,downloadMedia:async()=>({data:"AA==",mimetype:"audio/ogg"}),timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(customerSent,0);
+  assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-VOICE-CANCEL'").get().state,"cancelled");
+ } finally {global.fetch=savedFetch;db.close();}
+});
