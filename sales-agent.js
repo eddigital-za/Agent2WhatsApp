@@ -44,6 +44,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
 
   const approvalColumns = db.prepare("PRAGMA table_info(sales_approvals)").all().map(row => row.name);
   if (!approvalColumns.includes("followup_id")) db.exec("ALTER TABLE sales_approvals ADD COLUMN followup_id INTEGER");
+  if (!approvalColumns.includes("context_json")) db.exec("ALTER TABLE sales_approvals ADD COLUMN context_json TEXT");
 
   const now = () => new Date().toISOString();
   const sessionStarted = Date.now();
@@ -56,12 +57,50 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (!Number.isFinite(timestamp) || timestamp < sessionStarted - 5000 || timestamp > Date.now() + 60000) return false;
     return db.prepare("INSERT OR IGNORE INTO sales_inbound_claims(message_id,claimed_at) VALUES(?,?)").run(kind + ":" + id, now()).changes === 1;
   }
-  function remember(phone, direction, body, messageId) {
-    db.prepare("INSERT OR IGNORE INTO sales_messages(created_at,phone,direction,body,message_id) VALUES(?,?,?,?,?)")
-      .run(now(), phone, direction, String(body || ""), messageId || null);
+  function remember(phone, direction, body, messageId, createdAt = now()) {
+    return db.prepare("INSERT OR IGNORE INTO sales_messages(created_at,phone,direction,body,message_id) VALUES(?,?,?,?,?)")
+      .run(createdAt, phone, direction, String(body || ""), messageId || null).changes === 1;
   }
   function history(phone) {
-    return db.prepare("SELECT direction,body,created_at FROM sales_messages WHERE phone=? AND created_at>=? ORDER BY id DESC LIMIT 16").all(phone, new Date(Date.now() - 30 * 60000).toISOString()).reverse();
+    return db.prepare("SELECT direction,body,created_at FROM sales_messages WHERE phone=? AND created_at>=? ORDER BY created_at DESC,id DESC LIMIT 40")
+      .all(phone, new Date(Date.now() - 60 * 86400000).toISOString()).reverse();
+  }
+  async function hydrateWhatsAppHistory(message, phone) {
+    if (typeof message?.getChat !== "function") return;
+    try {
+      const chat = await message.getChat();
+      const messages = await chat?.fetchMessages?.({ limit: 40 });
+      for (const item of messages || []) {
+        const body = String(item.body || item._data?.body || item._data?.caption || "").trim();
+        const id = String(item.id?._serialized || "");
+        if (!body || !id) continue;
+        const timestamp = Number(item.timestamp) * 1000;
+        const createdAt = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp).toISOString() : now();
+        remember(phone, item.fromMe ? "duane" : "customer", body, id, createdAt);
+      }
+    } catch (error) {
+      console.warn("Sales WhatsApp history unavailable; using stored history:", error.message);
+    }
+  }
+  function leadContext(phone, fallback) {
+    let rows = [];
+    try { rows = db.prepare("SELECT * FROM leads WHERE phone=? ORDER BY submitted_at DESC,id DESC LIMIT 10").all(phone); }
+    catch (_) { rows = []; }
+    const inquiries = (rows.length ? rows : fallback ? [fallback] : []).map(row => ({
+      id: row.id,
+      submitted_at: row.submitted_at || "",
+      name: row.name || "",
+      phone,
+      pickup: row.pickup || "",
+      dropoff: row.dropoff || "",
+      bike_type: row.bike_type || "",
+      bike_make: row.bike_make || "",
+      bike_model: row.bike_model || "",
+      urgency: row.urgency || "",
+      website_estimate: row.estimated_price || "",
+      price_status: "unconfirmed website estimate; not authority for a firm quote",
+    }));
+    return { current: inquiries[0] || { id: fallback?.id || null, phone }, inquiries };
   }
   function followupHistory(phone, sentAt) {
     return db.prepare("SELECT direction,body,created_at FROM sales_messages WHERE phone=? AND created_at>=? ORDER BY id DESC LIMIT 16")
@@ -118,15 +157,24 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       return;
     }
     remember(phone, "customer", text, message.id?._serialized);
-    const recentForm = process.env.SALES_TEST_MODE === "false" && Date.parse(lead.first_touch_sent_at || "") >= Date.now() - 60 * 60000;
-    const facts = recentForm ? { ...lead, estimated_price: undefined, website_estimate: lead.estimated_price || "", price_status: "unconfirmed website estimate, not a current quote" } : { id: lead.id, phone, context_status: "fresh enquiry; previous form details are unconfirmed" };
-    const out = await reason("/sales/customer", { lead: facts, message: text, history: history(phone) });
-    if (!out.proposedReply) throw new Error("Reasoner returned no proposed reply");
+    await hydrateWhatsAppHistory(message, phone);
+    const context = process.env.SALES_TEST_MODE === "false"
+      ? leadContext(phone, lead)
+      : { current: { id: lead.id, phone, context_status: "isolated test enquiry; saved form details intentionally excluded" }, inquiries: [] };
+    const conversation = history(phone);
+    const out = await reason("/sales/customer", { lead: context.current, leadInquiries: context.inquiries, message: text, history: conversation });
+    if (out.action === "no_reply" || !out.proposedReply) {
+      logEvent({ leadId: lead?.id || null, phone, type: "sales_no_reply", key: `sales-no-reply-${message.id?._serialized || now()}`, details: { category: out.category, notes: out.notes } });
+      return true;
+    }
     const ref = caseRef();
     db.prepare("UPDATE sales_approvals SET state='superseded' WHERE phone=? AND state='pending'").run(phone);
-    const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?,?)")
-      .run(ref, lead?.id || null, phone, text, out.proposedReply, now());
-    const label = recentForm ? `${lead.name || `Lead …${phone.slice(-4)}`}\nForm context: ${[lead.pickup, lead.dropoff].filter(Boolean).join(" → ")}` : `Lead …${phone.slice(-4)}\nFresh enquiry — previous form details not confirmed`;
+    const contextJson = JSON.stringify({ lead: context.current, leadInquiries: context.inquiries, history: conversation });
+    const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,context_json,created_at) VALUES(?,?,?,?,?,?,?)")
+      .run(ref, lead?.id || null, phone, text, out.proposedReply, contextJson, now());
+    const bike = [context.current.bike_make, context.current.bike_model].filter(Boolean).join(" ");
+    const route = [context.current.pickup, context.current.dropoff].filter(Boolean).join(" → ");
+    const label = `${context.current.name || `Lead …${phone.slice(-4)}`}${bike ? ` | ${bike}` : ""}${route ? `\n${route}` : ""}`;
     const prompt = `*${ref} — ${label}*\n\n*Client:* ${text}\n\n*My suggested reply:*\n${out.proposedReply}\n\nReply naturally or send a voice note. I will wait for your approval before sending.`;
     const groupId = await group(prompt);
     db.prepare("UPDATE sales_approvals SET group_message_id=? WHERE id=?").run(groupId, Number(result.lastInsertRowid));
@@ -136,14 +184,15 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   async function onOutgoing(message, phone) {
     if (!message?.fromMe || !/^\d{9,15}$/.test(String(phone || ""))) return false;
     const body = String(message.body || message._data?.body || message._data?.caption || "").trim();
-    if (!/https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booking-form)\/?[^\s]*/i.test(body)) return false;
     const messageId = String(message.id?._serialized || "");
-    if (!messageId) return false;
+    if (!body || !messageId) return false;
     const timestamp = Number(message.timestamp) * 1000;
     const sentAt = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp).toISOString() : now();
+    const normalized = localPhone(phone);
+    const recorded = remember(normalized, "duane", body, messageId, sentAt);
+    if (!/https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booking-form)\/?[^\s]*/i.test(body)) return recorded;
     const followupHours = Math.max(1, Number(process.env.SALES_SLA_FOLLOWUP_HOURS || 24));
     const dueAt = new Date(Date.parse(sentAt) + followupHours * 3600000).toISOString();
-    const normalized = localPhone(phone);
     if (db.prepare("SELECT 1 FROM sales_sla_followups WHERE source_message_id=?").get(messageId)) return false;
     const older = db.prepare("SELECT id FROM sales_sla_followups WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").all(normalized);
     db.prepare("UPDATE sales_sla_followups SET state='superseded',updated_at=? WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").run(now(), normalized);
@@ -151,7 +200,6 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const result = db.prepare("INSERT INTO sales_sla_followups(phone,source_message_id,sla_message,sent_at,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)")
       .run(normalized, messageId, body, sentAt, dueAt, now(), now());
     if (result.changes !== 1) return false;
-    remember(normalized, "duane", body, messageId);
     logEvent({ phone: normalized, type: "sla_followup_scheduled", key: `sla-scheduled-${messageId}`, details: { dueAt } });
     console.log("SLA follow-up scheduled", { phone: normalized.slice(-4), dueAt });
     return true;
@@ -285,7 +333,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const instruction = String(message.body || "").trim();
     const out = await reason("/sales/approval", {
       caseRef: row.case_ref, customerMessage: row.customer_text, proposedReply: row.proposed_reply,
-      instruction, audio
+      instruction, audio, context: row.context_json ? JSON.parse(row.context_json) : {}
     });
     if (out.intent === "send" && out.finalReply) {
       // Atomic send-once lock; uncertain sends stay locked for manual reconciliation.
