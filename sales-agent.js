@@ -62,8 +62,8 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       .run(createdAt, phone, direction, String(body || ""), messageId || null).changes === 1;
   }
   function history(phone) {
-    return db.prepare("SELECT direction,body,created_at FROM sales_messages WHERE phone=? AND created_at>=? ORDER BY created_at DESC,id DESC LIMIT 40")
-      .all(phone, new Date(Date.now() - 60 * 86400000).toISOString()).reverse();
+    return db.prepare("SELECT direction,body,created_at FROM sales_messages WHERE phone=? ORDER BY created_at DESC,id DESC LIMIT 40")
+      .all(phone).reverse();
   }
   async function hydrateWhatsAppHistory(message, phone) {
     if (typeof message?.getChat !== "function") return;
