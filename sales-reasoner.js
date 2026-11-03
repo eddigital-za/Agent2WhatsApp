@@ -11,6 +11,13 @@ function authorized(req) {
   return expected.length >= 32 && req.get("authorization") === `Bearer ${expected}`;
 }
 
+function isNoReplyInstruction(value) {
+  const text = String(value || "").toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, " ").trim();
+  return /\b(?:do not|don't|dont|not to|never|no)\s+(?:send|reply|respond)\b/.test(text)
+    || /\b(?:leave|ignore|skip)\s+(?:it|this|that|him|her|them|the (?:message|client|customer))\b/.test(text)
+    || /\b(?:no response|no reply|say nothing)\b/.test(text);
+}
+
 async function transcribe(audio, key) {
   if (!audio?.data) return "";
   const form = new FormData();
@@ -45,7 +52,7 @@ function installSalesReasoner(app, { apiKey, model }) {
     confidence: { type: "number" }, notes: { type: "string" }
   }, required: ["action", "proposedReply", "category", "confidence", "notes"] };
   const approvalSchema = { type: "object", additionalProperties: false, properties: {
-    intent: { type: "string", enum: ["send", "revise", "discuss", "clarify"] }, finalReply: { type: "string" }, response: { type: "string" }
+    intent: { type: "string", enum: ["send", "cancel", "revise", "discuss", "clarify"] }, finalReply: { type: "string" }, response: { type: "string" }
   }, required: ["intent", "finalReply", "response"] };
 
   app.post("/sales/customer", async (req, res) => {
@@ -79,7 +86,8 @@ function installSalesReasoner(app, { apiKey, model }) {
       const transcript = await transcribe(p.audio, apiKey);
       const instruction = [p.instruction, transcript].filter(Boolean).join("\n").trim();
       if (!instruction) return res.json({ intent: "clarify", finalReply: "", response: "I couldn't hear or read an instruction. Please try again." });
-      const system = `${SALES_SYSTEM}\nYou now interpret Duane's internal approval instruction. Be conversational and tolerate shorthand, speech-to-text errors, fragments and normal language. Only choose intent=send when Duane clearly authorises sending now (for example send it, go ahead, yes send, tell them X). If he asks for a change without clearly authorising dispatch, choose revise and return the revised client reply. If he is discussing strategy, choose discuss. If ambiguous, choose clarify. Never treat casual agreement or unrelated group chat as approval. finalReply must contain only what the client should receive.`;
+      if (isNoReplyInstruction(instruction)) return res.json({ intent: "cancel", finalReply: "", response: "Understood. I won't reply.", transcript });
+      const system = `${SALES_SYSTEM}\nYou now interpret Duane's internal approval instruction. Be conversational and tolerate shorthand, speech-to-text errors, fragments and normal language. Choose intent=cancel whenever Duane says not to reply, send or respond. Only choose intent=send when Duane clearly authorises sending now (for example send it, go ahead, yes send, tell them X). If he asks for a change without clearly authorising dispatch, choose revise and return the revised client reply. If he is discussing strategy, choose discuss. If ambiguous, choose clarify. Never treat casual agreement or unrelated group chat as approval. finalReply must contain only what the client should receive.`;
       const out = await structured(apiKey, model, "btsa_sales_approval_v1", approvalSchema, system,
         `Case: ${p.caseRef || ""}\nCase context:\n${JSON.stringify(p.context || {})}\n\nClient said: ${p.customerMessage || ""}\nCurrent proposed reply: ${p.proposedReply || ""}\nDuane's instruction: ${instruction}`);
       res.json({ ...out, transcript });
