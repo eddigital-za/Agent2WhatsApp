@@ -134,3 +134,38 @@ test("successful SLA submission cancels the reminder and sends one confirmation"
   assert.equal(db.prepare("SELECT state FROM sales_order_confirmations").get().state,"sent");
  } finally {db.close();}
 });
+test("sales uses WhatsApp history and all matching lead rows, and suppresses acknowledgements",async()=>{
+ process.env.SALES_ENABLED="true";process.env.SALES_TEST_MODE="false";
+ const db=new DatabaseSync(":memory:");
+ db.exec(`CREATE TABLE leads(
+  id INTEGER PRIMARY KEY, submitted_at TEXT, first_touch_sent_at TEXT, name TEXT, phone TEXT,
+  pickup TEXT, dropoff TEXT, bike_type TEXT, bike_make TEXT, bike_model TEXT,
+  urgency TEXT, estimated_price TEXT
+ )`);
+ db.prepare("INSERT INTO leads VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(1,"2026-11-02T04:00:00.000Z",null,"Isalvan","760000000","Sabie","Centurion","Standard","BMW","F 800 GS","7-10 Days","5250");
+ db.prepare("INSERT INTO leads VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(2,"2026-11-03T04:00:00.000Z",null,"Isalvan","760000000","Sabie","Centurion","Standard","BMW","F 800 GS","7-10 Days","5600");
+ const cards=[],payloads=[];
+ const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async()=>({id:{_serialized:"sent"}})};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:`card-${cards.length}`}};}};
+ const norm=x=>{let n=String(x||"").replace(/\D/g,"");if(n.startsWith("0"))n=`27${n.slice(1)}`;if(n.length===9)n=`27${n}`;return n;};
+ const local=x=>{const n=norm(x);return n.startsWith("27")?n.slice(2):n;};
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:local,logEvent:()=>{}});
+ const savedFetch=global.fetch;
+ global.fetch=async(_url,opts)=>{const p=JSON.parse(opts.body);payloads.push(p);return {ok:true,json:async()=>({action:"no_reply",proposedReply:"",category:"other",confidence:1,notes:"Acknowledgement after a polite close"})};};
+ const stamp=Math.floor(Date.now()/1000);
+ const manual={fromMe:true,body:"No problem, when you're ready let me know and I'll work out the best route and rate for you then 💪",id:{_serialized:"true_manual_close"},timestamp:stamp};
+ const thumb={fromMe:false,body:"👍",id:{_serialized:"false_thumb"},timestamp:stamp,getChat:async()=>({fetchMessages:async()=>[
+  {...manual,timestamp:stamp-10},
+  {fromMe:false,body:"👍",id:{_serialized:"false_thumb"},timestamp:stamp}
+ ]})};
+ try {
+  assert.equal(await agent.onOutgoing(manual,"760000000"),true);
+  const latest=db.prepare("SELECT * FROM leads WHERE id=2").get();
+  await agent.onCustomer(thumb,latest,"760000000");
+  assert.equal(cards.length,0);
+  assert.equal(payloads.length,1);
+  assert.equal(payloads[0].leadInquiries.length,2);
+  assert.equal(payloads[0].leadInquiries[0].bike_model,"F 800 GS");
+  assert.ok(payloads[0].history.some(x=>x.direction==="duane"&&/when you're ready/.test(x.body)));
+ } finally {global.fetch=savedFetch;db.close();}
+});
