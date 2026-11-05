@@ -773,6 +773,61 @@ app.post('/order',auth,async(req,res)=>{
   }catch(e){console.error('Order intake error:',e);res.status(500).json({error:e.message});}
 });
 
+
+const DISPATCH_SHEET_ID='1jkgivHJBWzVYMgCoUIb65EaRddyM2NoXml7mQnBVVS4';
+const DISPATCH_TAB='Sheet1';
+const DISPATCH_STATUSES=new Set(['New Order','Pending','Collected','In Transit','Paused','Delivered','Cancelled','Duplicate']);
+function dispatchToken(){
+  const raw=process.env.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON;
+  if(!raw)throw Object.assign(new Error('Google Sheets service account not configured'),{status:503});
+  let account;
+  try{account=JSON.parse(raw);}catch(_){throw Object.assign(new Error('Invalid service account configuration'),{status:503});}
+  if(!account.client_email||!account.private_key)throw Object.assign(new Error('Incomplete service account configuration'),{status:503});
+  const enc=v=>Buffer.from(JSON.stringify(v)).toString('base64url');
+  const now=Math.floor(Date.now()/1000);
+  const header=enc({alg:'RS256',typ:'JWT'});
+  const payload=enc({iss:account.client_email,scope:'https://www.googleapis.com/auth/spreadsheets',aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+3600});
+  const unsigned=header+'.'+payload;
+  const sig=crypto.sign('RSA-SHA256',Buffer.from(unsigned),account.private_key).toString('base64url');
+  return fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',assertion:unsigned+'.'+sig})}).then(async r=>{const body=await r.json();if(!r.ok||!body.access_token)throw Object.assign(new Error('Google Sheets authorization failed'),{status:503});return body.access_token;});
+}
+async function dispatchSheets(token,range,options={}){
+  const url='https://sheets.googleapis.com/v4/spreadsheets/'+DISPATCH_SHEET_ID+'/values/'+encodeURIComponent(DISPATCH_TAB+'!'+range)+(options.method?'?valueInputOption=RAW':'');
+  const r=await fetch(url,{...options,headers:{authorization:'Bearer '+token,'content-type':'application/json'}});
+  if(!r.ok)throw Object.assign(new Error('Google Sheets request failed ('+r.status+')'),{status:502});
+  return r.json();
+}
+app.post('/dispatch/update',auth,async(req,res)=>{
+  try{
+    const externalId=String(req.body?.externalId||'').trim();
+    const status=req.body?.status;
+    const contractors=req.body?.contractors;
+    if(!/^(SLA-[1-9]\d*|M-\d{4,})$/.test(externalId))return res.status(400).json({error:'Invalid order reference'});
+    if(status===undefined&&contractors===undefined)return res.status(400).json({error:'No changes supplied'});
+    if(status!==undefined&&!DISPATCH_STATUSES.has(status))return res.status(400).json({error:'Invalid status'});
+    if(contractors!==undefined&&(!Array.isArray(contractors)||contractors.length>20||contractors.some(x=>typeof x!=='string'||!x.trim()||x.length>100||x.includes(','))))return res.status(400).json({error:'Invalid contractor list'});
+    const contractorText=contractors===undefined?undefined:[...new Set(contractors.map(x=>x.trim()))].join(', ');
+    const token=await dispatchToken();
+    const data=await dispatchSheets(token,'A2:AN2000');
+    const matches=[];
+    for(let i=0;i<(data.values||[]).length;i++){
+      const row=data.values[i];
+      const id=/^SLA-(\d+)$/.exec(externalId);
+      if(id?String(row[0]||'').trim()===id[1]:String(row[39]||'').trim().toUpperCase()===externalId)matches.push({number:i+2,row});
+    }
+    if(matches.length!==1)return res.status(409).json({error:matches.length?'Duplicate order references in sheet':'Order reference not found in sheet'});
+    const {number,row}=matches[0];
+    const expected=req.body?.expected||{};
+    if(typeof expected.status!=='string'||typeof expected.contractor!=='string')return res.status(400).json({error:'Expected sheet values required for conflict protection'});
+    if(String(row[1]||'')!==expected.status||String(row[2]||'')!==expected.contractor)return res.status(409).json({error:'Sheet changed since loaded. Refresh before editing.'});
+    const values=[[status===undefined?String(row[1]||''):status,contractorText===undefined?String(row[2]||''):contractorText]];
+    await dispatchSheets(token,'B'+number+':C'+number,{method:'PUT',body:JSON.stringify({range:DISPATCH_TAB+'!B'+number+':C'+number,majorDimension:'ROWS',values})});
+    const check=await dispatchSheets(token,'B'+number+':C'+number);
+    if(JSON.stringify((check.values||[])[0]||[])!==JSON.stringify(values[0]))return res.status(502).json({error:'Sheet write could not be verified'});
+    res.json({success:true,externalId,status:values[0][0],contractor:values[0][1],row:number});
+  }catch(e){console.error('Dispatch update failed:',e.message);res.status(e.status||500).json({error:e.message});}
+});
+
 app.get('/sync-status',(req,res)=>res.json(lastSheetSync));
 app.get('/dashboard',(req,res)=>{
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id GLOB 'M-[0-9]*' OR external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id DESC").all();
