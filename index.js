@@ -169,7 +169,7 @@ async function downloadMediaFromEventData(message) {
 
 async function getInboundMedia(message) {
   try {
-    const media = await getInboundMedia(message);
+    const media = await message.downloadMedia();
     if (media?.data) return media;
     throw new Error("downloadMedia returned no data");
   } catch (primaryError) {
@@ -284,7 +284,7 @@ client.on("message", async (message) => {
           );
         }
 
-        const media = await message.downloadMedia();
+        const media = await getInboundMedia(message);
 
         if (media) {
           // Determine a sensible file extension from the MIME type
