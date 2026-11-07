@@ -27,6 +27,9 @@ const valid={externalId:'SLA-999999',status:'In Transit',contractors:['BTSA','Mo
  verifyBad=true;assert.equal((await update(valid)).status,409);verifyBad=false;
  rows=[row()];context.fetch=async(url,options)=>{if(options.method==='PUT'){writes++;verifyBad=true;}return {ok:true,json:async()=>({values:verifyBad?[['wrong']]:rows})}};
  assert.equal((await update(valid)).status,502);
+ context.process.env.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON=JSON.stringify({client_email:'test@example.iam.gserviceaccount.com',project_id:'test-project',private_key:'never-print-this'});
+ context.fetch=async()=>({ok:false,status:403,json:async()=>({error:{message:'Sheets API is disabled',details:[{reason:'SERVICE_DISABLED'}]}})});
+ const denied=await update(valid);assert.equal(denied.status,502);assert.match(denied.result.error,/SERVICE_DISABLED/);assert.match(denied.result.error,/test-project/);assert.ok(!denied.result.error.includes('never-print-this'));
  const html=fs.readFileSync('dispatch.html','utf8');new vm.Script(html.match(/<script>([\s\S]*)<\/script>/)[1]);
  console.log('PASS: verified saves, multiple contractors, clearing assignments, stale conflicts, duplicate/manual references, validation, failed read-back, dashboard syntax. No real services used.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -794,8 +794,15 @@ function dispatchToken(){
 async function dispatchSheets(token,range,options={}){
   const url='https://sheets.googleapis.com/v4/spreadsheets/'+DISPATCH_SHEET_ID+'/values/'+encodeURIComponent(DISPATCH_TAB+'!'+range)+(options.method?'?valueInputOption=RAW':'');
   const r=await fetch(url,{...options,headers:{authorization:'Bearer '+token,'content-type':'application/json'}});
-  if(!r.ok)throw Object.assign(new Error('Google Sheets request failed ('+r.status+')'),{status:502});
-  return r.json();
+  const body=await r.json();
+  if(!r.ok){
+    const reason=body.error?.details?.find(d=>d.reason)?.reason||body.error?.status||'';
+    let account={};try{account=JSON.parse(process.env.GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON||'{}');}catch(_){}
+    const detail=String(body.error?.message||'No Google error detail returned').slice(0,1500);
+    throw Object.assign(new Error('Google Sheets '+r.status+(reason?' ['+reason+']':'')+': '+detail+
+      (r.status===403?' Service account: '+String(account.client_email||'unknown')+'; Cloud project: '+String(account.project_id||'unknown')+'.':'')),{status:502});
+  }
+  return body;
 }
 function dispatchReference(row){
   const manual=String(row[39]||'').trim().toUpperCase();
