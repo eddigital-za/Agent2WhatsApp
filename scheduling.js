@@ -829,7 +829,7 @@ function sheetOrders(rows){
     }else{
       missing.push(i+1); continue;
     }
-    const item={entryId,externalId,clientName,phone:String(a[7]||'').trim(),route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
+    const item={entryId,externalId,clientName,phone:String(a[7]||'').trim(),route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),odometer:String(a[17]||'').trim(),value:String(a[18]||'').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
     const prior=orders.get(externalId);
     if(prior && JSON.stringify(prior)!==JSON.stringify(item))throw new Error(`Conflicting duplicate SLA reference ${externalId}`);
     orders.set(externalId,item);
@@ -887,7 +887,7 @@ function applySheetOrders(items){
         const validPhone=/^(?:0\d{9}|27\d{9})$/.test(phoneDigits);
         if(confirmationsActive && /^SLA-\d+$/.test(item.externalId) && validPhone){
           const queued=db.prepare("INSERT OR IGNORE INTO outbox(event_key,event_type,payload,next_attempt_at,created_at) VALUES(?,?,?,?,?)")
-            .run(`sales-order-confirmed-${item.externalId}`,'sales_order_confirmed',JSON.stringify({slaRef:item.externalId,phone:item.phone,name:item.clientName,source:'sla_sheet'}),now,now);
+            .run(`sales-order-confirmed-${item.externalId}`,'sales_order_confirmed',JSON.stringify({slaRef:item.externalId,phone:item.phone,name:item.clientName,bike:item.bike,route:item.route,odometer:item.odometer,value:item.value,source:'sla_sheet'}),now,now);
           confirmationsQueued+=queued.changes;
         }else if(confirmationsActive && /^SLA-\d+$/.test(item.externalId)){
           confirmationsSkipped++;
