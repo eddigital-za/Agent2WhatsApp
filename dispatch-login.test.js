@@ -1,0 +1,12 @@
+const assert=require('node:assert/strict'),fs=require('fs'),vm=require('vm');
+const script=fs.readFileSync('dispatch.html','utf8').match(/<script>([\s\S]*)<\/script>/)[1];
+const storage=new Map(),elements=new Map();let status=200;
+const element=id=>{if(!elements.has(id))elements.set(id,{value:'',hidden:false,textContent:'',replaceChildren(){},addEventListener(){},classList:{},setAttribute(){}});return elements.get(id)};
+const context=vm.createContext({console,localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},document:{getElementById:element},fetch:async()=>({ok:status===200,status,json:async()=>status===200?{orders:[],statuses:[],contractors:[]}:{error:'Unauthorized'}})});
+vm.runInContext(script,context);vm.runInContext('render=()=>{}',context);
+(async()=>{vm.runInContext("key='test-only-key'",context);await vm.runInContext('load()',context);assert.equal(storage.get('btsa.dispatch.access'),'test-only-key');
+vm.runInContext("key='';try{key=localStorage.getItem(loginStorage)||'';}catch{}",context);assert.equal(vm.runInContext('key',context),'test-only-key');
+element('lock').onclick();assert.equal(storage.size,0);assert.equal(vm.runInContext('key',context),'');
+status=401;vm.runInContext("key='invalid';rememberLogin(key)",context);await vm.runInContext('load()',context);assert.equal(storage.size,0);assert.equal(element('login').hidden,false);
+context.localStorage={getItem(){throw Error()},setItem(){throw Error()},removeItem(){throw Error()}};status=200;vm.runInContext("key='test-only-key'",context);await vm.runInContext('load()',context);assert.equal(element('board').hidden,false);assert.match(element('notice').textContent,/cannot remember/);
+console.log('PASS remembered login, restore, logout, invalid-key removal and blocked storage fallback; fake credentials only');})().catch(e=>{console.error(e);process.exitCode=1});
