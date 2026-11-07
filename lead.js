@@ -147,8 +147,14 @@ const client = process.env.CUSTOMER_SESSION_LOCAL === "true" ? new Client({
 let approvalGroupId = process.env.SALES_APPROVAL_GROUP_ID || "";
 const salesSafety = installOutboundSafety(approvalClient || client, { file: "/app/.wwebjs_auth/sales-outbound-safety.json", perChat: 5 });
 if (approvalClient && approvalClient !== client) installOutboundSafety(client, { file: "/app/.wwebjs_auth/customer-outbound-safety.json" });
+if (process.env.SALES_CONVERSATION_ENABLED === "true") salesSafety.resume(process.env.SALES_CONTEXT_RELEASE || "website-leads");
 app.get("/sales/safety", auth, (_req,res) => res.json(salesSafety.status()));
-app.post("/sales/pause", auth, (_req,res) => { process.env.SALES_ENABLED = "false"; salesSafety.pause(); res.json({ paused: true }); });
+app.post("/sales/pause", auth, (_req,res) => { process.env.SALES_CONVERSATION_ENABLED = "false"; res.json({ paused: true, scope: "website-lead-conversations" }); });
+app.post("/sales/resume", auth, (_req,res) => {
+  process.env.SALES_CONVERSATION_ENABLED = "true";
+  salesSafety.resume(process.env.SALES_CONTEXT_RELEASE || "website-leads");
+  res.json({ paused: false, scope: "website-lead-conversations", cohortStart: process.env.SALES_LEAD_COHORT_START || null });
+});
 installIngress(app,client,{directInbound:process.env.CUSTOMER_SESSION_LOCAL !== "true",groups:()=>[approvalGroupId].filter(Boolean)});
 let latestQr = null;
 let lastInboundAt = null;
@@ -190,7 +196,7 @@ async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
 app.get("/health", (req, res) => {
   let dbOk = false;
   try { db.prepare("SELECT 1").get(); dbOk = true; } catch (_) {}
-  res.json({ ok: true, customerWhatsappReady: Boolean(client.info), approvalWhatsappReady: Boolean((approvalClient || client).info), databaseReady: dbOk, salesReady: sales.ready(), mode: "approval_required", lastInboundAt });
+  res.json({ ok: true, customerWhatsappReady: Boolean(client.info), approvalWhatsappReady: Boolean((approvalClient || client).info), databaseReady: dbOk, salesReady: sales.ready(), conversationReady: sales.conversationReady(), salesScope: "website_leads_from_cohort", cohortStart: process.env.SALES_LEAD_COHORT_START || null, mode: "approval_required", lastInboundAt });
 });
 app.get("/qr", (req, res) => {
   if (!latestQr) return res.send("<html><body style='font-family:Arial;text-align:center;padding:40px'><h2>Waiting for WhatsApp QR...</h2><p>If already linked, the session may simply be starting.</p></body></html>");
@@ -467,6 +473,7 @@ setInterval(() => { if (!sales.ready()) discoverApprovalRoute(); }, 30000);
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
 setInterval(() => { sales.processDueFollowups().catch(console.error); }, 60000);
+setInterval(() => { sales.processLeadSequence().catch(console.error); }, 300000);
 setInterval(() => { sales.processOrderConfirmations().catch(console.error); }, 60000);
 setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);
 
