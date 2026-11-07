@@ -78,6 +78,22 @@ function installSalesReasoner(app, { apiKey, model }) {
     } catch (e) { console.error("Sales follow-up reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
 
+  app.post("/sales/sequence", async (req, res) => {
+    try {
+      if (!authorized(req)) return res.status(401).json({ error: "Unauthorized" });
+      if (!apiKey) throw new Error("OPENAI_API_KEY missing");
+      const p = req.body || {};
+      const stage = p.stage === "day7" ? "day7" : "day3";
+      const stageInstruction = stage === "day3"
+        ? "Draft a soft Day 3 check-in after the website first touch and 24-hour follow-up received no reply. Ask whether they are still looking to move the known motorcycle and, when useful, what dates they are working with. Do not repeat every known detail, quote, pressure, or claim availability."
+        : "Draft the final Day 7 close after the website first touch, 24-hour follow-up and approved Day 3 check-in received no reply. Politely close the follow-up loop, leave the door open for them to contact Duane when ready, and do not ask another qualification question or create urgency.";
+      const system = `${SALES_SYSTEM}\n${stageInstruction}\nSet action=reply. This is a draft for Sales Approvals and must not be treated as permission to send.`;
+      const out = await structured(apiKey, model, `btsa_${stage}_lead_sequence_v1`, customerSchema, system,
+        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching website inquiries:\n${JSON.stringify(p.leadInquiries || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nFirst touch sent: ${p.firstTouchSentAt || ""}\n24-hour follow-up sent: ${p.followupSentAt || ""}`);
+      res.json(out);
+    } catch (e) { console.error("Sales sequence reasoner:", e.message); res.status(500).json({ error: e.message }); }
+  });
+
   app.post("/sales/approval", async (req, res) => {
     try {
       if (!authorized(req)) return res.status(401).json({ error: "Unauthorized" });
