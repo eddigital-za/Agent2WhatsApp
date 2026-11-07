@@ -58,6 +58,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   if (!approvalColumns.includes("followup_id")) db.exec("ALTER TABLE sales_approvals ADD COLUMN followup_id INTEGER");
   if (!approvalColumns.includes("context_json")) db.exec("ALTER TABLE sales_approvals ADD COLUMN context_json TEXT");
   if (!approvalColumns.includes("sequence_id")) db.exec("ALTER TABLE sales_approvals ADD COLUMN sequence_id INTEGER");
+  const confirmationColumns = db.prepare("PRAGMA table_info(sales_order_confirmations)").all().map(row => row.name);
+  if (!confirmationColumns.includes("booking_key")) db.exec("ALTER TABLE sales_order_confirmations ADD COLUMN booking_key TEXT");
+  if (!confirmationColumns.includes("duplicate_of_sla_ref")) db.exec("ALTER TABLE sales_order_confirmations ADD COLUMN duplicate_of_sla_ref TEXT");
 
   const now = () => new Date().toISOString();
   const sessionStarted = Date.now();
@@ -383,7 +386,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return `${greeting}\n\nYour invoice, including the banking details, will be generated automatically and sent to you by email. Payment is due upfront or at collection. Payment secures your slot and locks in the quoted rate.\n\nI’ll confirm the collection and delivery arrangements with you here on WhatsApp. If I need anything else, I’ll reach out here. If you have any questions, ask me anytime.\n\nThanks, Duane`;
   }
 
-  function onOrderConfirmed({ slaRef, phone, name }) {
+  function onOrderConfirmed({ slaRef, phone, name, bike, route, odometer, value }) {
     const ref = String(slaRef || "").trim().toUpperCase();
     const normalized = localPhone(phone);
     if (!/^SLA-\d+$/.test(ref)) throw new Error("Valid SLA reference required");
@@ -391,8 +394,17 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const clientName = String(name || "").trim().slice(0, 120);
     const message = orderConfirmationText(clientName);
     const stamp = now();
-    const result = db.prepare("INSERT OR IGNORE INTO sales_order_confirmations(sla_ref,phone,client_name,message_text,created_at,updated_at) VALUES(?,?,?,?,?,?)")
-      .run(ref, normalized, clientName, message, stamp, stamp);
+    const identityPart = value => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const numericIdentityPart = value => String(value || "").replace(/\D/g, "");
+    const identity = [identityPart(bike), identityPart(route), numericIdentityPart(odometer), numericIdentityPart(value)];
+    const bookingKey = identity.some(Boolean) ? identity.join("|") : "";
+    const cutoff = new Date(Date.now() - 86400000).toISOString();
+    const recent = bookingKey
+      ? db.prepare("SELECT sla_ref FROM sales_order_confirmations WHERE phone=? AND booking_key=? AND created_at>=? AND state IN ('pending','sending','sent','send_unknown','suppressed_duplicate') ORDER BY id LIMIT 1").get(normalized, bookingKey, cutoff)
+      : db.prepare("SELECT sla_ref FROM sales_order_confirmations WHERE phone=? AND created_at>=? AND state IN ('pending','sending','sent','send_unknown','suppressed_duplicate') ORDER BY id LIMIT 1").get(normalized, cutoff);
+    const state = recent ? "suppressed_duplicate" : "pending";
+    const result = db.prepare("INSERT OR IGNORE INTO sales_order_confirmations(sla_ref,phone,client_name,message_text,state,booking_key,duplicate_of_sla_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+      .run(ref, normalized, clientName, message, state, bookingKey || null, recent?.sla_ref || null, stamp, stamp);
     if (result.changes !== 1) {
       return { accepted: true, deduplicated: true, confirmation: db.prepare("SELECT sla_ref,state,updated_at FROM sales_order_confirmations WHERE sla_ref=?").get(ref) };
     }
@@ -404,6 +416,10 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const sequenceRows = db.prepare("SELECT id FROM sales_lead_sequence WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").all(normalized);
     db.prepare("UPDATE sales_lead_sequence SET state='cancelled_order',updated_at=? WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").run(stamp, normalized);
     for (const row of sequenceRows) db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=?,decision_text='SLA submitted successfully' WHERE sequence_id=? AND state='pending'").run(stamp, row.id);
+    if (recent) {
+      logEvent({ phone: normalized, type: "sales_order_confirmation_duplicate_suppressed", key: `sales-order-thanks-suppressed-${ref}`, details: { slaRef: ref, duplicateOf: recent.sla_ref, bookingKey: bookingKey || null } });
+      return { accepted: true, deduplicated: true, confirmation: { sla_ref: ref, state, duplicate_of_sla_ref: recent.sla_ref, updated_at: stamp } };
+    }
     logEvent({ phone: normalized, type: "sales_order_confirmed", key: `sales-order-${ref}`, details: { slaRef: ref, cancelledFollowups: followups.length } });
     return { accepted: true, deduplicated: false, confirmation: { sla_ref: ref, state: "pending", updated_at: stamp } };
   }
