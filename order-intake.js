@@ -3,6 +3,8 @@ const fs=require('fs');
 const path=require('path');
 const {DatabaseSync}=require('node:sqlite');
 const {installSalesReasoner}=require('./sales-reasoner');
+const dispatchDomain=require('./dispatch-domain');
+const {createIntakeBridge}=require('./dispatch-intake');
 
 const app=express();
 app.use(express.json({limit:'2mb'}));
@@ -49,7 +51,8 @@ function saveDraft(author,data,state='collecting'){
  ON CONFLICT(author) DO UPDATE SET data=excluded.data,state=excluded.state,updated_at=excluded.updated_at`)
  .run(author,JSON.stringify(data),state,now());
 }
-function clearDraft(author){db.prepare('DELETE FROM drafts WHERE author=?').run(author);}
+const dispatchBridge=createIntakeBridge({app,db,getDraft,saveDraft,send});
+function clearDraft(author){db.prepare('DELETE FROM drafts WHERE author=?').run(author);db.prepare("UPDATE dispatch_links SET state='closed' WHERE author=? AND state='draft'").run(author);}
 function allocateSlaRef(){
  db.exec('BEGIN IMMEDIATE');
  try{
@@ -112,7 +115,7 @@ function responseText(p){
 function rowToOrder(r){
  const v=i=>r[i]??'';
  return {
-  entryId:v(0),status:v(1),rate:money(v(3)),route:v(4),fullName:v(5),company:v(6),phone:cleanPhone(v(7)),email:v(8),
+  entryId:v(0),status:v(1),rate:null,route:v(4),fullName:v(5),company:v(6),phone:cleanPhone(v(7)),email:v(8),
   customerAddress1:v(9),customerAddress2:v(10),customerCity:v(11),customerState:v(12),customerPostal:v(13),
   make:v(15),model:v(16),odometer:v(17),retailValue:money(v(18)),extras:v(19),
   collectionContact:v(20),collectionPhone:cleanPhone(v(21)),collectionAddress1:v(22),collectionAddress2:v(23),collectionCity:v(24),collectionState:v(25),collectionPostal:v(26),
@@ -158,7 +161,7 @@ function swapOrder(o){
   route:[o.deliveryCity||o.deliveryState,o.collectionCity||o.collectionState].filter(Boolean).join(' to ')
  };
 }
-async function interpret(text,current,quoted,candidates){
+async function interpret(text,current,quoted,candidates,media){
  if(!OPENAI_API_KEY)throw new Error('OPENAI_API_KEY missing');
  const schema={type:'object',additionalProperties:false,properties:{
   intent:{type:'string',enum:['new_order','update','confirm','cancel','unrelated']},
@@ -182,6 +185,7 @@ The collection/delivery data is authoritative. Do not preserve stale route wordi
   {role:'system',content:system},
   {role:'user',content:`Current draft:\n${JSON.stringify(current||{})}\n\nQuoted WhatsApp message:\n${quoted||'(none)'}\n\nHistorical candidates:\n${JSON.stringify(candidates)}\n\nNew message:\n${text}`}
  ],text:{format:{type:'json_schema',name:'manual_order_intake_v2',strict:true,schema}}};
+ if(media?.data&&/^image\/(jpeg|png|webp)$/.test(media.mimetype||'')){if(media.data.length>12*1024*1024)throw Error('Image is too large to process safely');const original=body.input[1].content;body.input[1].content=[{type:'input_text',text:original+'\nRead the attached image for order contacts and addresses. Do not invent unreadable fields.'},{type:'input_image',image_url:'data:'+media.mimetype+';base64,'+media.data}];}
  const r=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{authorization:`Bearer ${OPENAI_API_KEY}`,'content-type':'application/json'},body:JSON.stringify(body)});
  if(!r.ok)throw new Error('OpenAI '+r.status+': '+await r.text());
  return JSON.parse(responseText(await r.json()));
@@ -196,23 +200,36 @@ function mergeFields(base,fields){
 }
 async function commit(author,d,messageId){
  if(messageId&&db.prepare('SELECT 1 FROM commits WHERE message_id=?').get(messageId))return {deduplicated:true};
- const slaRef=allocateSlaRef();
+ if(d.commitAttempted)throw new Error('Previous save outcome needs reconciliation. The order is retained in the dashboard; do not resubmit the booking.');
+ const bridged=await dispatchBridge.record(author,d,messageId);
+ const slaRef=bridged?.externalId||d.slaRef||allocateSlaRef();
+ saveDraft(author,{...d,slaRef,commitAttempted:true},'committing');
  const final={...d,slaRef,route:routeFromAddresses(d)||d.route};
  const payload={...final,source:'manual-whatsapp',sourceMessageId:messageId||'',receivedAt:now()};
- const r=await fetch(COMMIT_WEBHOOK_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
- if(!r.ok)throw new Error('Commit webhook '+r.status+': '+await r.text());
+ let r;try{r=bridged?.syncState==='synced'?{ok:true}:await fetch(COMMIT_WEBHOOK_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+ if(!r.ok)throw new Error('Existing manual-order workflow returned '+r.status);
+ if(bridged)await dispatchBridge.result(slaRef);
+ }catch(error){if(bridged)await dispatchBridge.result(slaRef,error.message).catch(()=>{});throw error;}
  if(messageId)db.prepare('INSERT OR IGNORE INTO commits(message_id,entry_id,committed_at) VALUES(?,?,?)').run(messageId,slaRef,now());
  clearDraft(author);
  await send(`✅ *Manual order saved — ${slaRef}*\n${final.route} | ${final.make} ${final.model} | R${Number(final.rate).toLocaleString('en-ZA')}`);
  return {slaRef};
 }
-app.get('/health',(req,res)=>res.json({ok:true,openai:Boolean(OPENAI_API_KEY),commit:Boolean(COMMIT_WEBHOOK_URL),history:Boolean(HISTORY_WEBHOOK_URL),group:Boolean(ORDERS_GROUP_ID)}));
+app.get('/health',(req,res)=>res.json({ok:true,openai:Boolean(OPENAI_API_KEY),commit:Boolean(COMMIT_WEBHOOK_URL),history:Boolean(HISTORY_WEBHOOK_URL),group:Boolean(ORDERS_GROUP_ID),dispatchConfigured:Boolean(process.env.DISPATCH_URL&&process.env.DISPATCH_API_KEY),dispatchConnected:dispatchBridge.isConnected()}));
 app.post('/inbound',async(req,res)=>{
  try{
   const p=req.body||{};
-  if(p.from!==ORDERS_GROUP_ID||!p.text)return res.json({ignored:true});
+  if(p.from!==ORDERS_GROUP_ID||(!p.text&&!p.mediaData&&!p.hasMedia))return res.json({ignored:true});
+  p.text=String(p.text||'');
   const author=String(p.author||p.phone||'group-controller');
   const existing=getDraft(author);
+  if(p.mediaData&&!existing&&!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text)){if(await dispatchBridge.forward(p))return res.json({recorded:true});}
+  if(/\b(invoice|imvoice|invoiced|quickbooks|payment|paid|statement|receipt)\b/i.test(p.text)&&!(/\b(delivered|complete|completed|collected|in transit)\b/i.test(p.text)&&/\b(?:SLA?[ -]?\d+|M-?\d+)\b/i.test(p.text))&&!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text))return res.json({ignored:true,reason:'finance_intent'});
+  if(!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text)&&/\b(delivered|complete|completed|collected|in[ -]?transit|handover|depot|assigned|collection scheduled|delivery scheduled)\b/i.test(p.text)&&(/\b(?:SL(?:A)?[ -]?\d+|M-?\d+)\b/i.test(p.text)||p.hasMedia||p.mediaData)){
+   if(await dispatchBridge.forward(p))return res.json({recorded:true});
+  }
+
+  if(p.messageId&&db.prepare('SELECT 1 FROM commits WHERE message_id=?').get(p.messageId))return res.json({deduplicated:true});
   const quoted=String(p.quotedText||'');
   const trigger=/\b(new|manual|add|book|booking|capture|create|repeat|reverse|return)\b[\s\S]{0,40}\border\b/i.test(p.text)
     ||/\border\b[\s\S]{0,40}\b(new|manual|add|book|capture|create|repeat|reverse|return)\b/i.test(p.text)
@@ -220,8 +237,8 @@ app.post('/inbound',async(req,res)=>{
   if(!existing&&!trigger)return res.json({ignored:true});
 
   const candidates=await candidatesFor(p.text,quoted);
-  const parsed=await interpret(p.text,existing?.data||null,quoted,candidates);
-  if(parsed.intent==='unrelated'&&!existing)return res.json({ignored:true});
+  const parsed=await interpret(p.text,existing?.data||null,quoted,candidates,p.mediaData?{data:p.mediaData,mimetype:p.mediaType}:null);
+  if(parsed.intent==='unrelated')return res.json({ignored:true});
   if(parsed.intent==='cancel'){
    clearDraft(author); await send('Manual order draft cancelled.'); return res.json({cancelled:true});
   }
@@ -237,16 +254,24 @@ app.post('/inbound',async(req,res)=>{
    base=parsed.reverseHistory?swapOrder(hist):hist;
    delete base.entryId; delete base.slaRef; delete base.status; delete base.sourceId; delete base.quickbooksInvoiceId; delete base.receivedAt;
   }
+  if(parsed.intent==='new_order'&&existing){db.prepare("UPDATE dispatch_links SET state='superseded' WHERE author=? AND state='draft'").run(author);base={};}
   let data=mergeFields(base,parsed.fields);
+  const logistics=dispatchDomain.interpret(p.text,['BTSA','Cheetah Express','DJ Bike Transport','Ross - Speedway Express','UBT','Bike Transport','Armand','Bike in Motion','George','Assets in Motion','Moto Movers'],new Date((p.timestamp||Date.now()/1000)*1000));
+  Object.assign(data,logistics);
+
   data.route=routeFromAddresses(data)||data.route;
   const miss=missing(data);
 
+  if(parsed.intent==='confirm'&&!/\b(save|add|process|record|capture|book|confirm)\b/i.test(p.text)){
+   saveDraft(author,data);await dispatchBridge.recordDraft(author,data,p.messageId);await send('Draft retained. I have not saved a new booking from this message.');return res.json({waiting:true});
+  }
   if(parsed.intent==='confirm'){
-   if(miss.length){saveDraft(author,data);await send(`I still need: ${miss.join(', ')}.`);return res.json({waiting:true,missing:miss});}
+   if(miss.length){saveDraft(author,data);await dispatchBridge.recordDraft(author,data,p.messageId);await send(`I still need: ${miss.join(', ')}.`);return res.json({waiting:true,missing:miss});}
    const out=await commit(author,data,p.messageId);return res.json({committed:true,...out});
   }
 
   saveDraft(author,data);
+  await dispatchBridge.recordDraft(author,data,p.messageId);
   if(miss.length){
    await send(`${summary(data)}\n\nStill need: *${miss.join(', ')}*\nSend the missing details in any format.`);
   }else{
@@ -255,4 +280,5 @@ app.post('/inbound',async(req,res)=>{
   res.json({ok:true,missing:miss,historyCandidates:candidates.length});
  }catch(e){console.error('Inbound error',e);res.status(500).json({error:e.message});}
 });
-app.listen(PORT,()=>console.log(`BTSA Order Intake listening on ${PORT}; db=${DB_PATH}`));
+app.listen(PORT,()=>{console.log(`BTSA Order Intake listening on ${PORT}; db=${DB_PATH}`);dispatchBridge.probe().catch(console.error);});
+
