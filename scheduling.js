@@ -797,6 +797,12 @@ async function dispatchSheets(token,range,options={}){
   if(!r.ok)throw Object.assign(new Error('Google Sheets request failed ('+r.status+')'),{status:502});
   return r.json();
 }
+function dispatchReference(row){
+  const manual=String(row[39]||'').trim().toUpperCase();
+  if(/^M-\d{4,}$/.test(manual))return manual;
+  const id=String(row[0]||'').trim();
+  return /^[1-9]\d*$/.test(id)?'SLA-'+id:'';
+}
 app.post('/dispatch/update',auth,async(req,res)=>{
   try{
     const externalId=String(req.body?.externalId||'').trim();
@@ -808,12 +814,11 @@ app.post('/dispatch/update',auth,async(req,res)=>{
     if(contractors!==undefined&&(!Array.isArray(contractors)||contractors.length>20||contractors.some(x=>typeof x!=='string'||!x.trim()||x.length>100||x.includes(','))))return res.status(400).json({error:'Invalid contractor list'});
     const contractorText=contractors===undefined?undefined:[...new Set(contractors.map(x=>x.trim()))].join(', ');
     const token=await dispatchToken();
-    const data=await dispatchSheets(token,'A2:AN2000');
+    const data=await dispatchSheets(token,'A2:AN');
     const matches=[];
     for(let i=0;i<(data.values||[]).length;i++){
       const row=data.values[i];
-      const id=/^SLA-(\d+)$/.exec(externalId);
-      if(id?String(row[0]||'').trim()===id[1]:String(row[39]||'').trim().toUpperCase()===externalId)matches.push({number:i+2,row});
+      if(dispatchReference(row)===externalId)matches.push({number:i+2,row});
     }
     if(matches.length!==1)return res.status(409).json({error:matches.length?'Duplicate order references in sheet':'Order reference not found in sheet'});
     const {number,row}=matches[0];
@@ -823,17 +828,21 @@ app.post('/dispatch/update',auth,async(req,res)=>{
     const values=[[status===undefined?String(row[1]||''):status,contractorText===undefined?String(row[2]||''):contractorText]];
     await dispatchSheets(token,'B'+number+':C'+number,{method:'PUT',body:JSON.stringify({range:DISPATCH_TAB+'!B'+number+':C'+number,majorDimension:'ROWS',values})});
     const check=await dispatchSheets(token,'B'+number+':C'+number);
-    if(JSON.stringify((check.values||[])[0]||[])!==JSON.stringify(values[0]))return res.status(502).json({error:'Sheet write could not be verified'});
+    if(JSON.stringify([String(check.values?.[0]?.[0]||''),String(check.values?.[0]?.[1]||'')])!==JSON.stringify(values[0]))return res.status(502).json({error:'Sheet write could not be verified'});
     res.json({success:true,externalId,status:values[0][0],contractor:values[0][1],row:number});
   }catch(e){console.error('Dispatch update failed:',e.message);res.status(e.status||500).json({error:e.message});}
 });
 
 app.get('/sync-status',(req,res)=>res.json(lastSheetSync));
-app.get('/dashboard',(req,res)=>{
-  const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id GLOB 'M-[0-9]*' OR external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id DESC").all();
-  const safe=open.map(o=>({external_id:o.external_id,bike:o.bike,client_name:o.client_name,route:o.route,contractor:o.contractor,transport_method:o.transport_method,status:o.status,completed_at:o.completed_at}));
-  const page="<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>BTSA Dispatch</title><style>body{font:16px system-ui;background:#f4f5f7;color:#152434;margin:0}main{max-width:680px;margin:auto;padding:16px}header{position:sticky;top:0;background:#152434;color:white;padding:14px}h1{margin:0;font-size:21px}small{color:#687585}.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:14px 0}.stat,.job{background:white;border:1px solid #d9e0e6;border-radius:12px;padding:14px}.stat strong{display:block;font-size:27px}input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #b9c3ce;border-radius:9px;font:inherit}.job{margin:10px 0}.job summary{cursor:pointer;font-weight:650}.job p{margin:8px 0}.tag{display:inline-block;background:#e8edf3;border-radius:16px;padding:5px 9px;margin:3px;font-size:13px}.meta{color:#687585;font-size:13px}</style><header><h1>BTSA Dispatch</h1><small id=\"sync\">Read-only live orders</small></header><main><div class=\"stats\"><div class=\"stat\"><strong id=\"count\">0</strong>Open jobs</div><div class=\"stat\"><strong id=\"unassigned\">0</strong>Unassigned</div></div><input id=\"search\" aria-label=\"Search jobs\" placeholder=\"Search customer, motorcycle or route\"><div id=\"jobs\"></div></main><script>const orders=__ORDERS__;const root=document.getElementById(\"jobs\");const search=document.getElementById(\"search\");const active=orders.filter(o=>!o.completed_at&&![\"completed\",\"cancelled\"].includes(o.status));document.getElementById(\"count\").textContent=active.length;document.getElementById(\"unassigned\").textContent=active.filter(o=>!o.contractor&&!o.transport_method).length;function el(t,c){const x=document.createElement(t);if(c)x.className=c;return x}function render(){root.replaceChildren();const q=search.value.toLowerCase();for(const o of active.filter(x=>[x.external_id,x.bike,x.client_name,x.route,x.contractor].join(\" \").toLowerCase().includes(q))){const card=el(\"details\",\"job\"),sum=el(\"summary\");sum.textContent=(o.bike||\"Motorcycle\")+\" · \"+o.external_id;card.append(sum);const info=el(\"p\");info.textContent=(o.client_name||\"\")+(o.route?\" · \"+o.route:\"\");card.append(info);const status=el(\"p\",\"meta\");status.textContent=\"Status: \"+String(o.status||\"unscheduled\").replaceAll(\"_\",\" \");card.append(status);const label=el(\"p\",\"meta\");label.textContent=\"Contractors:\";card.append(label);const raw=String(o.contractor||o.transport_method||\"\");for(const name of (raw?raw.split(/,\\s*/).filter(Boolean):[\"Unassigned\"])){const tag=el(\"span\",\"tag\");tag.textContent=name;card.append(tag)}root.append(card)}}search.addEventListener(\"input\",render);render();</script></html>".replace('__ORDERS__',JSON.stringify(safe).replace(/</g,'\\u003c'));
-  res.type('html').send(page);
+app.get('/dashboard',(req,res)=>res.sendFile(path.join(__dirname,'dispatch.html')));
+app.get('/dispatch/orders',auth,async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try{
+    const data=await dispatchSheets(await dispatchToken(),'A2:AN');
+    const orders=(data.values||[]).map(row=>({externalId:dispatchReference(row),status:String(row[1]||''),contractor:String(row[2]||''),route:String(row[4]||''),clientName:String(row[5]||''),bike:[row[15],row[16]].filter(Boolean).join(' ')}))
+      .filter(o=>o.externalId&&o.clientName&&o.route);
+    res.json({orders,statuses:[...DISPATCH_STATUSES],contractors:SHEET_CONTRACTORS});
+  }catch(e){res.status(e.status||500).json({error:e.message});}
 });
 app.post('/send',auth,async(req,res)=>{try{res.json(await sendGroup(req.body.text,req.body.idempotencyKey||`manual-${Date.now()}`));}catch(e){res.status(500).json({error:e.message});}});
 
@@ -875,7 +884,7 @@ function sheetOrders(rows){
     }else{
       missing.push(i+1); continue;
     }
-    const item={entryId,externalId,clientName,phone:String(a[7]||'').trim(),route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
+    const item={entryId,externalId,clientName,phone:String(a[7]||'').trim(),route,bike:[a[15],a[16]].filter(Boolean).join(' ').trim(),odometer:String(a[17]||'').trim(),value:String(a[18]||'').trim(),contractor:String(a[2]||'').trim(),sheetStatus:String(a[1]||'').trim().toLowerCase()};
     const prior=orders.get(externalId);
     if(prior && JSON.stringify(prior)!==JSON.stringify(item))throw new Error(`Conflicting duplicate SLA reference ${externalId}`);
     orders.set(externalId,item);
@@ -933,7 +942,7 @@ function applySheetOrders(items){
         const validPhone=/^(?:0\d{9}|27\d{9})$/.test(phoneDigits);
         if(confirmationsActive && /^SLA-\d+$/.test(item.externalId) && validPhone){
           const queued=db.prepare("INSERT OR IGNORE INTO outbox(event_key,event_type,payload,next_attempt_at,created_at) VALUES(?,?,?,?,?)")
-            .run(`sales-order-confirmed-${item.externalId}`,'sales_order_confirmed',JSON.stringify({slaRef:item.externalId,phone:item.phone,name:item.clientName,source:'sla_sheet'}),now,now);
+            .run(`sales-order-confirmed-${item.externalId}`,'sales_order_confirmed',JSON.stringify({slaRef:item.externalId,phone:item.phone,name:item.clientName,bike:item.bike,route:item.route,odometer:item.odometer,value:item.value,source:'sla_sheet'}),now,now);
           confirmationsQueued+=queued.changes;
         }else if(confirmationsActive && /^SLA-\d+$/.test(item.externalId)){
           confirmationsSkipped++;

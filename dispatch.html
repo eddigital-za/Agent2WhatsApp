@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BTSA Dispatch</title>
+<style>
+*{box-sizing:border-box}body{font:16px system-ui;margin:0;background:#f4f5f7;color:#152434}header{background:#152434;color:white;padding:18px}h1{font-size:23px;margin:0}main{max-width:760px;margin:auto;padding:16px}input,select,button{font:inherit;padding:12px;border:1px solid #aab7c4;border-radius:8px;min-height:44px}input[type=password],input[type=search],select{width:100%}button{cursor:pointer;background:#152434;color:white}button:disabled{opacity:.5;cursor:wait}label{display:block;margin:12px 0}fieldset{border:1px solid #d9e0e6;border-radius:8px;margin:14px 0}.choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}.choices label{display:flex;align-items:center;gap:8px;margin:0}.choices input{min-width:22px;min-height:22px}.job,#login{background:white;border:1px solid #d9e0e6;border-radius:12px;padding:16px;margin:12px 0}summary{font-weight:650;cursor:pointer;min-height:44px}p{overflow-wrap:anywhere}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.notice{min-height:24px}small{display:block;margin:8px 0;color:#536477}
+</style>
+<header><h1>BTSA Dispatch</h1></header><main>
+<form id="login"><label>Dispatch access key<input id="key" type="password" autocomplete="off" required></label><button>Open dashboard</button><small>Use the service’s existing INTAKE_API_KEY. The key stays in this page’s memory.</small></form>
+<p id="notice" role="status" class="notice"></p>
+<section id="board" hidden><div class="toolbar"><button id="refresh">Refresh sheet</button><button id="lock">Lock</button></div><p id="counts"></p><label>Search jobs<input id="search" type="search" placeholder="SLA, customer, motorcycle or route"></label><label><input id="closed" type="checkbox"> Include delivered, cancelled and duplicate jobs</label><div id="jobs"></div></section>
+</main><script>
+let key='',data={orders:[],statuses:[],contractors:[]};
+const $=id=>document.getElementById(id);
+const node=(tag,text)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n};
+async function api(url,body){const r=await fetch(url,{method:body?'POST':'GET',headers:{'x-api-key':key,'content-type':'application/json'},cache:'no-store',...(body?{body:JSON.stringify(body)}:{})});const result=await r.json();if(!r.ok)throw new Error(result.error||'Request failed');return result;}
+async function load(){ $('notice').textContent='Loading sheet…';try{data=await api('/dispatch/orders');$('board').hidden=false;$('login').hidden=true;render();$('notice').textContent='Sheet loaded '+new Date().toLocaleTimeString();}catch(e){$('notice').textContent=e.message;}}
+$('login').onsubmit=e=>{e.preventDefault();key=$('key').value;$('key').value='';load();};
+$('refresh').onclick=load;
+$('lock').onclick=()=>{key='';data={orders:[],statuses:[],contractors:[]};$('jobs').replaceChildren();$('board').hidden=true;$('login').hidden=false;$('notice').textContent='Locked';};
+function render(){
+ const open=data.orders.filter(o=>!['Delivered','Cancelled','Duplicate'].includes(o.status));$('counts').textContent=open.length+' open jobs · '+open.filter(o=>!o.contractor.trim()).length+' unassigned';
+ $('jobs').replaceChildren();const q=$('search').value.toLowerCase();
+ for(const o of data.orders.filter(o=>($('closed').checked||open.includes(o))&&Object.values(o).join(' ').toLowerCase().includes(q))){
+  const card=node('details');card.className='job';card.append(node('summary',o.externalId+' · '+(o.bike||'Motorcycle')),node('p',o.clientName+' · '+o.route));
+  const form=node('form'),status=node('select'),label=node('label','Status');status.setAttribute('aria-label',o.externalId+' status');
+  for(const value of [...new Set([o.status,...data.statuses])]){const option=node('option',value||'No status');option.value=value;status.append(option);}status.value=o.status;label.append(status);form.append(label);
+  const field=node('fieldset'),choices=node('div');choices.className='choices';field.append(node('legend','Assigned contractors — select all that apply'));
+  const selected=o.contractor.split(/,\s*/).filter(Boolean),boxes=[];
+  for(const name of [...new Set([...data.contractors,...selected])]){const l=node('label'),c=node('input');c.type='checkbox';c.value=name;c.checked=selected.includes(name);boxes.push(c);l.append(c,document.createTextNode(name));choices.append(l);}field.append(choices);form.append(field);
+  const save=node('button','Save changes'),message=node('p');message.setAttribute('role','status');form.append(save,message);
+  form.onsubmit=async e=>{e.preventDefault();save.disabled=true;message.textContent='Saving and verifying…';try{
+   const body={externalId:o.externalId,expected:{status:o.status,contractor:o.contractor}};
+   const names=boxes.filter(c=>c.checked).map(c=>c.value);
+   if(status.value!==o.status)body.status=status.value;
+   if(names.join(', ')!==selected.join(', '))body.contractors=names;
+   if(body.status===undefined&&body.contractors===undefined){message.textContent='No changes to save.';return;}
+   const result=await api('/dispatch/update',body);o.status=result.status;o.contractor=result.contractor;selected.splice(0,selected.length,...names);message.textContent='Saved and verified in Google Sheets.';
+  }catch(error){message.textContent=error.message;}finally{save.disabled=false;}};
+  card.append(form);$('jobs').append(card);
+ }
+}
+$('search').oninput=render;$('closed').onchange=render;
+</script></html>
