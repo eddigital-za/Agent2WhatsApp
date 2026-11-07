@@ -137,6 +137,31 @@ test("successful SLA submission cancels the reminder and sends one confirmation"
   assert.equal(db.prepare("SELECT state FROM sales_order_confirmations").get().state,"sent");
  } finally {db.close();}
 });
+test("corrected SLA submissions suppress repeated confirmations but a different bike still sends",async()=>{
+ const db=new DatabaseSync(":memory:");const messages=[];
+ const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async(to,text)=>{messages.push({to,text});return {id:{_serialized:`confirmed-${messages.length}`}};}};
+ const approvalClient={info:{},sendMessage:async()=>({id:{_serialized:"group"}})};
+ const norm=x=>{let n=String(x||"").replace(/\D/g,"");if(n.startsWith("0"))n=`27${n.slice(1)}`;if(n.length===9)n=`27${n}`;return n;};
+ const local=x=>{const n=norm(x);return n.startsWith("27")?n.slice(2):n;};
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:local,logEvent:()=>{}});
+ try {
+  const first=agent.onOrderConfirmed({slaRef:"SLA-525",phone:"+27606226069",name:"Seleta Johny Modiba",bike:"Honda CBR",route:"DBN to JHB",odometer:"69,000",value:"70,000"});
+  const correction=agent.onOrderConfirmed({slaRef:"SLA-526",phone:"0606226069",name:"Johny Modiba",bike:"Honda Cbr",route:"DBN to JHB",odometer:"69000",value:"R70 000"});
+  const secondBike=agent.onOrderConfirmed({slaRef:"SLA-527",phone:"0606226069",name:"Johny Modiba",bike:"Yamaha MT-07",route:"DBN to JHB",odometer:"12,000",value:"85,000"});
+  assert.equal(first.deduplicated,false);
+  assert.equal(correction.deduplicated,true);
+  assert.equal(correction.confirmation.state,"suppressed_duplicate");
+  assert.equal(correction.confirmation.duplicate_of_sla_ref,"SLA-525");
+  assert.equal(secondBike.deduplicated,false);
+  assert.equal(await agent.processOrderConfirmations(),2);
+  assert.equal(messages.length,2);
+  assert.deepEqual(db.prepare("SELECT sla_ref,state,duplicate_of_sla_ref FROM sales_order_confirmations ORDER BY id").all().map(row=>({...row})),[
+   {sla_ref:"SLA-525",state:"sent",duplicate_of_sla_ref:null},
+   {sla_ref:"SLA-526",state:"suppressed_duplicate",duplicate_of_sla_ref:"SLA-525"},
+   {sla_ref:"SLA-527",state:"sent",duplicate_of_sla_ref:null},
+  ]);
+ } finally {db.close();}
+});
 test("sales uses WhatsApp history and all matching lead rows, and suppresses acknowledgements",async()=>{
  process.env.SALES_ENABLED="true";process.env.SALES_CONVERSATION_ENABLED="true";process.env.SALES_TEST_MODE="false";process.env.SALES_LEAD_COHORT_START="2026-11-01T00:00:00.000Z";
  const db=new DatabaseSync(":memory:");
