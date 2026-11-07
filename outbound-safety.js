@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 
 function installOutboundSafety(client, { file = "/app/.wwebjs_auth/outbound-safety.json", clock = Date.now, perChat = 10, globalLimit = 100 } = {}) {
   const original = client.sendMessage.bind(client);
-  let state = { paused: false, blocked: {}, sends: [] };
+  let state = { paused: false, blocked: {}, sends: [], release: null };
   try { state = JSON.parse(fs.readFileSync(file, "utf8")); }
   catch (e) { if (e.code !== "ENOENT") throw e; }
   function save() {
@@ -30,6 +30,16 @@ function installOutboundSafety(client, { file = "/app/.wwebjs_auth/outbound-safe
   return {
     status: () => ({ paused: state.paused || process.env.BRIDGE_EMERGENCY_PAUSED === "true", blockedChats: Object.keys(state.blocked), reservations: state.sends.length }),
     pause: () => { state.paused = true; save(); },
+    resume: release => {
+      const nextRelease = String(release || "").trim();
+      if (nextRelease && state.release === nextRelease) return false;
+      state.paused = false;
+      state.blocked = {};
+      state.sends = [];
+      state.release = nextRelease || state.release || null;
+      save();
+      return true;
+    },
   };
 }
 module.exports = { installOutboundSafety };
