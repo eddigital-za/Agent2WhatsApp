@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json({ limit: '30mb' }));
 
 const TZ = 'Africa/Johannesburg';
-const AUTH_DIR = '/app/.wwebjs_auth';
+const AUTH_DIR = process.env.BTSA_DATA_DIR || '/app/.wwebjs_auth';
 const DB_PATH = path.join(AUTH_DIR, 'btsa-scheduling.sqlite');
 const GROUP_ID = process.env.SCHEDULING_GROUP_ID || process.env.ORDERS_GROUP_ID || '';
 const API_KEY = process.env.INTAKE_API_KEY || '';
@@ -151,7 +151,8 @@ function atLocal(dateString, hour = 8, minute = 0) { return new Date(`${dateStri
 function addDays(date, days) { return new Date(date.getTime() + days * 86400000); }
 function fmt(dateValue) {
   if (!dateValue) return 'Not scheduled';
-  return new Intl.DateTimeFormat('en-ZA', { timeZone: TZ, weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(dateValue));
+  const options={timeZone:TZ,weekday:'short',day:'2-digit',month:'short'};if(String(dateValue).length>10)Object.assign(options,{hour:'2-digit',minute:'2-digit',hour12:false});
+  return new Intl.DateTimeFormat('en-ZA',options).format(new Date(dateValue));
 }
 function event(orderId, type, key, details = null) {
   db.prepare('INSERT OR IGNORE INTO events(created_at,order_id,event_type,event_key,details) VALUES(?,?,?,?,?)')
@@ -431,6 +432,7 @@ async function confirmProof(proofId,orderId){
   if(!proof||!order)throw new Error('Proof or order not found');
   if(proof.status==='confirmed')return;
   const when=proof.created_at||nowIso();
+  if(operations.get(order.external_id)){const field=proof.stage==='delivery'?'actualDelivery':'actualCollection';const changes={status:proof.stage==='delivery'?'Delivered':'Collected',[field]:{date:dispatchDomain.localDay(when),time:'',precision:'day',confidence:'confirmed'}};operations.update(order.external_id,changes,undefined,'whatsapp-proof','proof-'+proof.id);await operations.serial(()=>operations.flushOne(order.external_id));}
   if(proof.stage==='delivery')db.prepare("UPDATE orders SET delivery_at=?,delivery_confidence='confirmed',status='completed',completed_at=?,updated_at=? WHERE id=?").run(when,when,when,order.id);
   else db.prepare("UPDATE orders SET collection_at=?,collection_confidence='confirmed',status='in_transit',updated_at=? WHERE id=?").run(when,when,order.id);
   db.prepare("UPDATE proofs SET order_id=?,status='confirmed',confirmed_at=? WHERE id=?").run(order.id,when,proof.id);
@@ -441,6 +443,7 @@ async function confirmProof(proofId,orderId){
   await sendGroup(`✅ *${proof.stage==='delivery'?'Delivered':'Collected'} | ${updated.external_id}*\n${updated.bike||'Motorcycle'}\n${fmt(when)}`,`proof-confirmed-${proof.id}`,updated.id);
 }
 async function handleProofPhoto(message,quotedOrder){
+  const knownProof=db.prepare('SELECT id FROM proofs WHERE whatsapp_message_id=?').get(message.id?._serialized||'');if(knownProof)return true;
   const stage=proofStage(message.body||'');
   const media=await getInboundMedia(message);
   if(!media?.data)throw new Error('WhatsApp returned no image data');
@@ -501,6 +504,7 @@ async function processOutbox(){
 async function interpretSchedulingMessage(text, quotedText = '', forcedExternalId = '') {
   if (!OPENAI_API_KEY) return null;
   const orders = db.prepare("SELECT external_id,client_name,route,bike,contractor,transport_method,collection_at,delivery_at,status,completed_at FROM orders ORDER BY completed_at IS NOT NULL,created_at DESC LIMIT 60").all();
+  if(forcedExternalId&&!orders.some(o=>o.external_id===forcedExternalId)){const forced=db.prepare('SELECT * FROM orders WHERE external_id=?').get(forcedExternalId);if(forced)orders.push(forced);}
   const contractors = db.prepare('SELECT name FROM contractors WHERE active=1 ORDER BY name COLLATE NOCASE').all().map(row=>row.name);
   const now = new Date();
   const prompt = [
@@ -557,43 +561,40 @@ function validIso(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
-async function applyInterpretedUpdate(plan, messageKey, sourceText='') {
-  const order = db.prepare('SELECT * FROM orders WHERE external_id=? COLLATE NOCASE').get(String(plan.external_id || '').trim());
-  if (!order || plan.action === 'clarify') {
-    const question = plan.clarification || `Which order does this update refer to: ${plan.summary || 'the message received'}?`;
-    await sendGroup(question,`ai-clarify-${messageKey}-${order?.id || 'unknown'}`,order?.id || null);
-    return {clarified:true};
-  }
-  const fields=[]; const values=[];
-  const segment=sourceSegmentForOrder(sourceText,plan.external_id);
-  const collectionClause=stageClause(segment,'collection'); const deliveryClause=stageClause(segment,'delivery');
-  const parsedCollection=parseDate(collectionClause); const parsedDelivery=parseDate(deliveryClause);
-  const collectionAt=parsedCollection?.toISOString()||validIso(plan.collection_at); const deliveryAt=parsedDelivery?.toISOString()||validIso(plan.delivery_at);
-  if(parsedCollection&&/\bweek of\b/i.test(collectionClause))plan.collection_confidence='expected';
-  else if(parsedCollection)plan.collection_confidence=confidence(collectionClause);
-  if(parsedDelivery)plan.delivery_confidence=confidence(deliveryClause);
-  if(collectionAt){fields.push('collection_at=?','collection_confidence=?');values.push(collectionAt,plan.collection_confidence);}
-  if(deliveryAt){fields.push('delivery_at=?','delivery_confidence=?');values.push(deliveryAt,plan.delivery_confidence);}
-  if(plan.contractor){
-    const contractor=normalizedContractor(plan.contractor);
-    if(contractor){fields.push('contractor=?','transport_method=?');values.push(contractor,/^btsa$/i.test(contractor)?'BTSA':'subcontractor');}
-  } else if(plan.transport_method!=='unchanged') { fields.push('transport_method=?'); values.push(plan.transport_method); }
-  const effectiveStatus=(collectionAt||deliveryAt)&&['unchanged','unscheduled'].includes(plan.status)?'scheduled':plan.status;
-  if(effectiveStatus!=='unchanged'){
-    fields.push('status=?'); values.push(effectiveStatus);
-    if(['completed','cancelled'].includes(effectiveStatus)){fields.push('completed_at=?');values.push(nowIso());}
-    else {fields.push('completed_at=NULL');}
-  } else if(collectionAt||deliveryAt){fields.push('status=?');values.push('scheduled');}
-  if(!fields.length){
-    await sendGroup(plan.clarification || `I understood ${orderLabel(order)}, but no scheduling change was clear. What should I update?`,`ai-empty-${messageKey}-${order.id}`,order.id);
-    return {clarified:true};
-  }
-  fields.push('updated_at=?'); values.push(nowIso(),order.id);
-  db.prepare(`UPDATE orders SET ${fields.join(',')} WHERE id=?`).run(...values);
-  const updated=db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
-  recalc(updated); await syncCalendar(updated);
-  await sendGroup(compactOrderUpdate(updated,plan.summary||'Updated'),`ai-update-${messageKey}-${updated.id}`,updated.id);
-  return {updated:true,orderId:updated.id};
+async function applyInterpretedUpdate(plan,messageKey,sourceText=''){
+ const ref=dispatchDomain.canonical(plan.external_id),part=dispatchDomain.segments(sourceText).find(p=>p.ref===ref);
+ if(!ref||!operations.get(ref)||!part){operations.inbox('interpret-'+messageKey,'scheduling-whatsapp',sourceText,ref,'Order identity needs review; no update applied.');await sendGroup('I could not safely match this update. It is waiting in dashboard Needs attention.','interpret-held-'+messageKey);return {clarified:true};}
+ const patch=dispatchDomain.interpret(part.text,SHEET_CONTRACTORS);
+ if(!Object.keys(patch).length||plan.action==='clarify'){operations.inbox('interpret-'+messageKey,'scheduling-whatsapp',part.text,ref,plan.clarification||'Update needs review');await sendGroup(ref+': update held for review in the dashboard.','interpret-held-'+messageKey);return {clarified:true};}
+ operations.update(ref,patch,undefined,'scheduling-whatsapp','interpreted-'+messageKey);await operations.serial(()=>operations.flushOne(ref));return {updated:true};
+}
+async function handleOperationalText(message,mid){
+ const text=String(message.body||'');if(isOtherDepartmentMessage(text)&&!(/\b(delivered|complete|completed|collected|in transit)\b/i.test(text)&&dispatchDomain.refs(text).length))return false;
+ if(/^\s*(?:new|manual|new manual)\s+order\b/i.test(text)){
+  const parsed=parseNewOrderMessage(text,mid)||{};const patch=dispatchDomain.interpret(text,SHEET_CONTRACTORS,new Date((message.timestamp||Date.now()/1000)*1000));
+  const bike=parsed.bike||text.match(/(?:bike|make and model)\s*:\s*([^\n]+)/i)?.[1]||'';
+  const order=await operations.createAndSync({...patch,bike,route:parsed.route||text.match(/order\s*[-:]\s*(.+?)(?:\s+-\s+R|$)/i)?.[1]||'',clientName:parsed.clientName||'',nextAction:'Complete manual order details',note:text},'wa:'+mid);
+  await sendGroup('✅ Order recorded — '+order.externalId+'\n'+(order.bike||order.route)+'\n'+(order.syncState==='synced'?'Sheet save verified.':'Sheet sync needs attention; order is visible in dashboard.')+' Complete missing details in the dashboard.','manual-recorded-'+mid);return true;
+ }
+ let parts=dispatchDomain.segments(text);const quoted=await quotedContext(message);const linked=linkedRowForQuotedIds('question_links','order_id',quoted.ids);const linkedOrder=linked?db.prepare('SELECT external_id FROM orders WHERE id=?').get(linked.order_id):null;
+ if(!parts[0].ref){const short=text.match(/^\s*(\d+)\s+(delivered|complete|completed|collected|in transit|cancelled)\b/i);const ref=short?'SLA-'+Number(short[1]):linkedOrder?.external_id;if(ref)parts=[{ref,text}];}
+ if(!parts.some(p=>p.ref))return false;
+ for(const part of parts){const current=operations.get(part.ref);if(!current){operations.inbox('unknown-'+mid+'-'+part.ref,'scheduling-whatsapp',part.text,part.ref,'Reference not found; sync or match the order before applying.');await sendGroup(part.ref+': reference not found. Saved in dashboard Needs attention.','unknown-'+mid+'-'+part.ref);continue;}
+  try{let patch=dispatchDomain.interpret(part.text,SHEET_CONTRACTORS,new Date((message.timestamp||Date.now()/1000)*1000));
+   if(!Object.keys(patch).length&&OPENAI_API_KEY){
+    const result=await interpretSchedulingMessage(part.text,quoted.text,part.ref);const plans=(result?.updates||[]).filter(p=>dispatchDomain.canonical(p.external_id)===part.ref&&p.action==='update');
+    if(plans.length===1){const plan=plans[0];const statuses={in_transit:'In Transit',completed:'Delivered',cancelled:'Cancelled',scheduled:'Pending'};
+     if(statuses[plan.status]&&!/depot|handover|handed over|taken delivery/i.test(part.text))patch.status=statuses[plan.status];
+     const matched=dispatchDomain.contractorNames(plan.contractor||'',SHEET_CONTRACTORS);if(matched.length)patch.contractor=matched.join(', ');
+     // Model-proposed dates are held unless a source clause independently supplies the date and precision.
+     if(plan.collection_at||plan.delivery_at){patch.note='Date wording needs review: '+part.text;patch.nextAction='Confirm ETA wording in dashboard';}
+    }
+   }
+   if(!Object.keys(patch).length){operations.inbox(mid+'-'+part.ref,'scheduling-whatsapp',part.text,part.ref,'Could not identify a safe update.');await sendGroup(part.ref+': update needs review in the dashboard.','held-'+mid+'-'+part.ref);continue;}
+   operations.update(part.ref,patch,current.version,'scheduling-whatsapp','wa-'+mid+'-'+part.ref);const saved=await operations.serial(()=>operations.flushOne(part.ref));await sendGroup('✅ '+part.ref+' | '+saved.bike+'\nStatus: '+saved.status+'\n'+(saved.syncState==='synced'?'Sheet save verified.':'Order recorded; sheet sync needs attention.')+(patch.needsLegReview?'\nHandover details retained; review transport legs in dashboard.':''),'ops-confirm-'+mid+'-'+part.ref);
+  }catch(error){operations.inbox('held-'+mid+'-'+part.ref,'scheduling-whatsapp',part.text,part.ref,error.message);await sendGroup(part.ref+': '+error.message+' Saved for dashboard review.','ops-failed-'+mid+'-'+part.ref);}
+ }
+ return true;
 }
 async function syncCalendar(o) {
   if (!CALENDAR_WEBHOOK_URL) return;
@@ -657,14 +658,17 @@ async function inbound(message) {
     if (!claim.changes) { console.log('Duplicate WhatsApp inbound ignored'); return; }
     if (routed) {
       try {
-        await sharedBridge.forward(message.from, await serializeMessage(message, getInboundMedia, client));
+        const payload=await serializeMessage(message,getInboundMedia,client);if(!String(message.from).endsWith('@g.us'))communications.noteReply(payload.phone,payload.text,'reply-'+mid);
+        await sharedBridge.forward(message.from,payload);
       } catch (error) {
         // Another agent's intake failure must never generate a Scheduling reply.
         console.error('Shared inbound forwarding failed:', error?.message || String(error));
+        operations.inbox('bridge-'+mid,'orders-whatsapp',message.body||'[media]',null,'Order agent forwarding failed: '+error.message);
       }
       return;
     }
     lastInboundAt = nowIso();
+    if(!message.hasMedia&&await handleOperationalText(message,mid))return;
     const ingested = message.body ? await ingestGroupOrder(message.body, mid) : null;
     if (ingested) {
       event(ingested.order.id, 'inbound_processed', mid, { text: message.body, newOrder: true, deduplicated: ingested.deduplicated });
@@ -680,10 +684,6 @@ async function inbound(message) {
     const quotedOrder=questionLink?db.prepare('SELECT * FROM orders WHERE id=?').get(questionLink.order_id):null;
     if(message.hasMedia){await handleProofPhoto(message,quotedOrder);return;}
     let proofLink=linkedRowForQuotedIds('proof_links','proof_id',quote.ids);
-    if(!proofLink&&proofStage(message.body||'')){
-      const cutoff=new Date(Date.now()-30*60*1000).toISOString();
-      proofLink=db.prepare("SELECT id AS proof_id FROM proofs WHERE status='awaiting_stage' AND created_at>=? ORDER BY id DESC LIMIT 1").get(cutoff);
-    }
     if(proofLink){
       const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(proofLink.proof_id);
       if(proof?.status==='awaiting_stage'){
@@ -702,6 +702,7 @@ async function inbound(message) {
       return;
     }
     if(!quotedText && /^\s*(delivered|complete|completed|collected|done|cancelled|canceled|in transit)\s*[.!]?\s*$/i.test(message.body)){
+      operations.inbox('ambiguous-'+mid,'scheduling-whatsapp',message.body,null,'Which SLA does this update belong to?');
       await sendGroup('Which SLA number is this update for?',`clarify-generic-${mid}`);
       event(null,'inbound_clarification',mid,{text:message.body,reason:'missing_order'});
       return;
@@ -734,20 +735,21 @@ async function inbound(message) {
       return;
     }
     let order = findOrderFromText(message.body) || quotedOrder;
-    if (!order) return;
+    if (!order){operations.inbox('unmatched-'+mid,'scheduling-whatsapp',message.body,null,'Order could not be matched.');return;}
     const applied = await applyUpdate(order, message.body);
     if (!applied) await sendGroup(`I found ${orderLabel(order)}, but I could not safely identify a collection/delivery date or completion instruction. Please include collection or delivery and the date.`, `clarify-${mid}`, order.id);
     event(order.id,'inbound_processed',mid,{text:message.body});
   } catch (e) {
     const detail=e?.message||String(e);
     console.error('Inbound scheduling error:',detail,e?.stack||'');
+    operations.inbox('failed-'+(message.id?._serialized||crypto.randomUUID()),'scheduling-whatsapp',message.body||'[media]',null,detail);
     if(message.from === GROUP_ID && !message.fromMe && !message.id?.fromMe && message.hasMedia){
-      try{await sendGroup('I received the photo but could not process it. Please resend it once.',`proof-error-${message.id?._serialized||Date.now()}`);}catch(replyError){console.error('Failed to send proof error reply:',replyError?.message||String(replyError));}
+      try{await sendGroup('The photo needs review. I have flagged it in the dashboard; please do not resend it repeatedly.',`proof-error-${message.id?._serialized||Date.now()}`);}catch(replyError){console.error('Failed to send proof error reply:',replyError?.message||String(replyError));}
     }
   }
 }
 
-app.get('/health',(req,res)=>{ let databaseReady=false; try{db.prepare('SELECT 1').get();databaseReady=true;}catch(_){} res.json({ok:true,whatsappReady:Boolean(client.info),databaseReady,shadowMode:SHADOW_MODE,lastInboundAt}); });
+app.get('/health',(req,res)=>{ let databaseReady=false; try{db.prepare('SELECT 1').get();databaseReady=true;}catch(_){} res.json({ok:true,whatsappReady:Boolean(client.info),databaseReady,shadowMode:SHADOW_MODE,lastInboundAt,dispatchRelease:'operations-v2',customerAutoSend:communications.config().autoSend===true}); });
 app.get('/qr',(req,res)=>{ if(!latestQr)return res.send('<h2>Waiting for WhatsApp QR or already connected</h2>'); res.send(`<!doctype html><title>BTSA Scheduling QR</title><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><h2>Link BTSA Scheduling Agent</h2><div id="q"></div><script>new QRCode(document.getElementById('q'),{text:${JSON.stringify(latestQr)},width:320,height:320});</script>`); });
 app.get('/orders',auth,(req,res)=>res.json(db.prepare('SELECT * FROM orders ORDER BY completed_at IS NOT NULL, COALESCE(collection_at,delivery_at,created_at)').all()));
 app.get('/contractors',auth,(req,res)=>res.json(db.prepare('SELECT name,active,created_at,updated_at FROM contractors ORDER BY name COLLATE NOCASE').all()));
@@ -810,9 +812,64 @@ function dispatchReference(row){
   const id=String(row[0]||'').trim();
   return /^[1-9]\d*$/.test(id)?'SLA-'+id:'';
 }
+function backupDispatchDatabase(){
+ const directory=path.join(AUTH_DIR,'dispatch-backups');fs.mkdirSync(directory,{recursive:true});const filename='dispatch-'+localDate()+'.sqlite',target=path.join(directory,filename);
+ if(!fs.existsSync(target)){db.exec("VACUUM INTO '"+target.replaceAll("'","''")+"'");try{fs.chmodSync(target,0o600);}catch(_){}console.log('Dispatch database backup saved for '+localDate());}
+ // Only rotate this agent's own dated snapshots inside its backup directory.
+ const files=fs.readdirSync(directory).filter(n=>/^dispatch-\d{4}-\d{2}-\d{2}\.sqlite$/.test(n)).sort().reverse();for(const name of files.slice(7)){const resolved=path.resolve(directory,name);if(path.dirname(resolved)===path.resolve(directory))fs.unlinkSync(resolved);}
+}
+backupDispatchDatabase();setInterval(()=>{try{backupDispatchDatabase();}catch(e){console.error('Dispatch backup failed:',e.message);}},3600000);
+const dispatchDomain=require('./dispatch-domain');
+const operations=require('./dispatch-operations').createOperations({db,contractors:SHEET_CONTRACTORS,beforeReconcile:rows=>applySheetOrders(sheetOrders([[],...rows])),sheet:{
+ read:async()=> (await dispatchSheets(await dispatchToken(),'A2:AN')).values||[],
+ update:async(row,values)=>dispatchSheets(await dispatchToken(),'B'+row+':C'+row,{method:'PUT',body:JSON.stringify({values:[values]})}),
+ updateCells:async(row,cells)=>{
+  const column=n=>{let name='';for(let i=Number(n)+1;i>0;i=Math.floor((i-1)/26))name=String.fromCharCode(65+(i-1)%26)+name;return name;};
+  const data=Object.entries(cells).filter(([c])=>Number(c)>2).map(([c,value])=>({range:DISPATCH_TAB+'!'+column(c)+row,values:[[value]]}));
+  if(!data.length)return;const response=await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+DISPATCH_SHEET_ID+'/values:batchUpdate',{method:'POST',headers:{authorization:'Bearer '+await dispatchToken(),'content-type':'application/json'},body:JSON.stringify({valueInputOption:'RAW',data}),signal:AbortSignal.timeout(30000)});if(!response.ok)throw new Error('Order detail sync failed ('+response.status+').');
+ },
+ append:async values=>{
+  const token=await dispatchToken();const range=encodeURIComponent(DISPATCH_TAB+'!A:AN');
+  const response=await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+DISPATCH_SHEET_ID+'/values/'+range+':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({values:[values]}),signal:AbortSignal.timeout(30000)});
+  if(!response.ok)throw new Error('Manual order sheet append failed ('+response.status+'). Order remains recorded.');
+ }
+}});
+operations.install(app,auth);
+const communications=require('./dispatch-communications').installCommunications({app,auth,db,operations,sendCustomer:async({phone,text,proofs,onPart})=>{
+ if(!WHATSAPP_OUTBOUND_ENABLED||SHADOW_MODE)throw new Error('Customer sending is disabled in this environment.');if(!client.info)throw new Error('WhatsApp is not ready.');const parts=[];let index=0;
+ const send=async content=>{const result=await client.sendMessage(phone+'@c.us',content);const id=result?.id?._serialized;if(!id)throw new Error('WhatsApp send outcome is uncertain');onPart(index++,id);parts.push(id);};
+ await send(text);for(const proof of proofs){if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');await send(new MessageMedia(proof.mime_type,fs.readFileSync(proof.file_path).toString('base64'),proof.filename));}return parts;
+}});
+setInterval(()=>communications.tick().catch(error=>console.error('Customer updates held:',error.message)),30000);
+
+async function intakeDashboard(route,body){
+ const base=process.env.ORDER_INTAKE_URL||'http://btsa-order-intake.railway.internal:8080';
+ const response=await fetch(base+route,{method:body?'POST':'GET',headers:{'content-type':'application/json','x-api-key':API_KEY},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(15000)});
+ if(!response.ok)throw new Error('Order-agent draft connection unavailable ('+response.status+').');return response.json();
+}
+app.get('/dispatch/drafts',auth,async(req,res)=>{try{res.set('Cache-Control','no-store');res.json(await intakeDashboard('/dispatch/drafts'));}catch(e){res.status(502).json({error:e.message});}});
+app.post('/dispatch/drafts/record',auth,async(req,res)=>{try{res.json(await intakeDashboard('/dispatch/drafts/record',{author:req.body.author,version:req.body.version}));}catch(e){res.status(502).json({error:e.message});}});
+app.post('/dispatch/connection-check',auth,(req,res)=>res.json({ready:true,manualOrders:true}));
+app.get('/dispatch/proof/:id',auth,(req,res)=>{const proof=db.prepare('SELECT file_path,mime_type FROM proofs WHERE id=?').get(Number(req.params.id));if(!proof||!fs.existsSync(proof.file_path))return res.status(404).json({error:'Photo unavailable'});res.set('Cache-Control','no-store');res.type(proof.mime_type).sendFile(path.resolve(proof.file_path));});
+app.post('/dispatch/proof/:id/match',auth,async(req,res)=>{try{const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(Number(req.params.id));const ref=dispatchDomain.canonical(req.body.ref),order=db.prepare('SELECT * FROM orders WHERE external_id=?').get(ref);if(!proof||!order||!['collection','delivery'].includes(req.body.stage))return res.status(400).json({error:'Choose an order and collection/delivery stage.'});if(proof.status==='confirmed')return res.status(409).json({error:'Photo already confirmed; review its existing match.'});db.prepare('UPDATE proofs SET stage=?,order_id=? WHERE id=?').run(req.body.stage,order.id,proof.id);await confirmProof(proof.id,order.id);res.json({success:true});}catch(e){res.status(502).json({error:e.message});}});
+app.post('/dispatch/ingest',auth,async(req,res)=>{const p=req.body||{};if(!p.messageId||typeof p.text!=='string')return res.status(400).json({error:'Message ID and text required'});const message={body:p.text,from:GROUP_ID,id:{_serialized:p.messageId},timestamp:p.timestamp,hasMedia:!!p.mediaData,hasQuotedMsg:!!p.quotedText,_data:{quotedStanzaID:p.quotedMessageId||''},getQuotedMessage:async()=>({body:p.quotedText||'',id:{_serialized:p.quotedMessageId||''}}),downloadMedia:async()=>({data:p.mediaData,mimetype:p.mediaType||'image/jpeg',filename:p.mediaFilename})};try{if(message.hasMedia){const ref=dispatchDomain.refs(p.text)[0]||dispatchDomain.refs(p.quotedText)[0];const order=ref?db.prepare('SELECT * FROM orders WHERE external_id=?').get(ref):null;await handleProofPhoto(message,order);}else if(!await handleOperationalText(message,p.messageId))operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,'Update needs review');res.json({recorded:true});}catch(e){operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,e.message);res.status(502).json({error:'Update recorded for review: '+e.message});}});
+
+setInterval(()=>operations.flush().catch(error=>console.error('Dispatch sync pending:',error.message)),60000);
 app.post('/dispatch/update',auth,async(req,res)=>{
   try{
     const externalId=String(req.body?.externalId||'').trim();
+    if(operations.get(externalId)){
+      return await operations.serial(async()=>{
+        const current=operations.get(externalId),expected=req.body.expected||{};
+        if(current.status!==expected.status||current.contractor!==expected.contractor)return res.status(409).json({error:'Order changed. Refresh before editing.'});
+        const patch={};if(req.body.status!==undefined)patch.status=req.body.status;
+        if(req.body.contractors!==undefined){if(!Array.isArray(req.body.contractors)||req.body.contractors.some(v=>typeof v!=='string'||v.includes(',')))return res.status(400).json({error:'Invalid contractor list'});patch.contractor=req.body.contractors.join(', ');}
+        operations.update(externalId,patch,current.version);const saved=await operations.flushOne(externalId);
+        if(saved.syncState!=='synced')return res.status(502).json({error:'Order recorded; sheet sync pending: '+saved.syncError});
+        return res.json({success:true,externalId,status:saved.status,contractor:saved.contractor});
+      });
+    }
+
     const status=req.body?.status;
     const contractors=req.body?.contractors;
     if(!/^(SLA-[1-9]\d*|M-\d{4,})$/.test(externalId))return res.status(400).json({error:'Invalid order reference'});
@@ -929,6 +986,7 @@ function applySheetOrders(items){
       }
     }
     for(const item of items){
+      const operational=operations.get(item.externalId);if(operational&&db.prepare('SELECT 1 FROM orders WHERE external_id=?').get(item.externalId)){operations.project(operational);continue;}
       const existing=db.prepare('SELECT * FROM orders WHERE external_id=?').get(item.externalId);
       const closed=/^(delivered|completed|cancelled|canceled)$/.test(item.sheetStatus);
       let status=/^cancel/.test(item.sheetStatus)?'cancelled':closed?'completed':
@@ -970,6 +1028,7 @@ async function syncSlaSheet(){
     const rows=parseCsv(await r.text());
     if(rows.length<2)throw new Error('SLA sheet returned no data rows');
     const items=sheetOrders(rows), migration=applySheetOrders(items);
+    operations.reconcile(rows.slice(1));
     const open=db.prepare("SELECT external_id FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id GLOB 'M-[0-9]*' OR external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id").all().map(o=>o.external_id);
     lastSheetSync={ok:true,at:nowIso(),rows:items.length,upserts:items.length,...migration,openIds:open,error:null};
     console.log('SLA sheet sync complete',lastSheetSync);
