@@ -14,11 +14,11 @@ function installCommunications({app,auth,db,operations,sendCustomer,sendApproval
  if(config().autoSend!==true){
   db.exec('BEGIN IMMEDIATE');
   try{
-   const old=db.prepare("SELECT id FROM dispatch_messages WHERE ref='SLA-526' AND kind='Collected' AND state='awaiting_approval' AND text=?").all('Your motorcycle has been collected successfully.');
+   const old=db.prepare("SELECT id FROM dispatch_messages WHERE ref='SLA-526' AND kind='Collected' AND state='awaiting_approval' AND text IN (?,?)").all('Your motorcycle has been collected successfully.','Hi! We’ve picked up your Honda CBR. Here are the photos we took at collection so you have a record of its condition. We’ll keep you posted on the trip to Johannesburg. Thanks, BTSA');
    if(old.length===1){
     const id=old[0].id;
     db.prepare("UPDATE dispatch_messages SET state='held',reason='Replaced with a new preview. Approve the replacement instead.' WHERE id=?").run(id);
-    db.prepare('INSERT INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id+'-warm-copy','SLA-526','Collected','awaiting_approval','Hi! We’ve picked up your Honda CBR. Here are the photos we took at collection so you have a record of its condition. We’ll keep you posted on the trip to Johannesburg. Thanks, BTSA',approvalStart,'Revised copy. Confirm before sending with all matched photos.');
+    db.prepare('INSERT INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id+'-first-name','SLA-526','Collected','awaiting_approval','Hi Johny! We’ve picked up your Honda CBR. Here are the photos we took at collection so you have a record of its condition. We’ll keep you posted on the trip to Johannesburg. Thanks, BTSA',approvalStart,'Revised copy. Confirm before sending with all matched photos.');
    }
    db.exec('COMMIT');
   }catch(e){db.exec('ROLLBACK');throw e;}
