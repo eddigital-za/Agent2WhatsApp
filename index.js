@@ -47,7 +47,9 @@ const sharedBridge = installBridge(app, client, MessageMedia);
 
 
 let latestQr = null;
-let gatewayReady = false;
+let gatewayReady=false;
+let startupRecoveryUsed=false;
+let startupTimer;
 
 app.get("/health", (req, res) => {
   res.json({ok:true,whatsappReady:gatewayReady,ordersAlbumRelease:true});
@@ -97,9 +99,10 @@ client.on("qr", (qr) => {
 });
 
 // Log when the WhatsApp client is ready
-client.on("disconnected", () => {gatewayReady=false;});
+client.on("disconnected",()=>{gatewayReady=false;});
 client.on("ready", () => {
   gatewayReady=true;
+  clearTimeout(startupTimer);
   console.log("WhatsApp Session is Ready and Connected!");
 });
 
@@ -107,6 +110,16 @@ client.on("ready", () => {
 client.on("authenticated", () => {
   latestQr = null;
   console.log("WhatsApp Session authenticated successfully!");
+  if(!startupRecoveryUsed&&!startupTimer&&client.pupPage){
+    startupTimer=setTimeout(async()=>{
+      if(gatewayReady||startupRecoveryUsed||!client.pupPage||client.pupPage.isClosed())return;
+      startupRecoveryUsed=true;
+      console.warn("WhatsApp authenticated without receive readiness; reloading the same saved session once");
+      try{await client.pupPage.reload({waitUntil:"domcontentloaded",timeout:30000});}
+      catch(e){console.error("WhatsApp startup recovery failed:",e.name);}
+    },35000);
+    startupTimer.unref();
+  }
 });
 
 function repairSerializedMessageId(message) {
@@ -186,7 +199,23 @@ async function getInboundMedia(message) {
       return media;
     } catch (fallbackError) {
       if (!process.env.ORDER_INTAKE_GROUP_ID || message.from !== process.env.ORDER_INTAKE_GROUP_ID || message.type !== "image") throw fallbackError;
-      const media = await require("./orders-photo-download").downloadPhoto(message._data);
+      const downloader=require("./orders-photo-download");
+      let media;
+      try{media=await downloader.downloadPhoto(message._data);}catch(initial){
+        const refreshed=await client.pupPage.evaluate((id)=>{
+          const collection=window.require("WAWebCollections").Msg;
+          const model=collection.getModelsArray().find(x=>x.id?.id===id);
+          if(!model)return null;
+          const raw=model.attributes||{};
+          const read=k=>model[k]??model["__x_"+k]??raw[k];
+          let mediaKey=read("mediaKey");
+          if(mediaKey instanceof ArrayBuffer)mediaKey=Array.from(new Uint8Array(mediaKey));
+          else if(ArrayBuffer.isView(mediaKey))mediaKey=Array.from(mediaKey);
+          return {mediaKey,directPath:read("directPath"),clientUrl:read("clientUrl"),deprecatedMms3Url:read("deprecatedMms3Url"),mimetype:read("mimetype"),filename:read("filename")};
+        },message.id.id);
+        if(!refreshed)throw initial;
+        media=await downloader.downloadPhoto(refreshed);
+      }
       console.log("Orders photo recovered through authenticated media fallback");
       return media;
     }
@@ -201,6 +230,32 @@ async function forwardOrders(payload){
   console.log("Message forwarded to Order Intake successfully");
 }
 const orderAlbums=createAlbumCollector({send:forwardOrders,legacy:forwardOrders});
+
+// One explicitly selected album can be recovered after a download failure.
+let recoveryAttempted=false;
+client.on("ready",async()=>{
+ const ids=String(process.env.ORDERS_RECOVERY_PHOTO_IDS||"").split(",").filter(Boolean);
+ if(recoveryAttempted||ids.length<2||ids.length>12||!process.env.ORDER_INTAKE_WEBHOOK_URL||!process.env.ORDER_INTAKE_GROUP_ID)return;
+ recoveryAttempted=true;
+ try{
+  const group=process.env.ORDER_INTAKE_GROUP_ID;
+  if(!ids.every(id=>id.startsWith("false_"+group+"_")))throw Error("Recovery IDs do not belong to Orders");
+  const chat=await client.getChatById(group);
+  const history=await chat.fetchMessages({limit:80});
+  const parts=ids.map(id=>history.find(m=>m.id?.id===id.split("_")[2]));
+  if(parts.some(m=>!m||m.from!==group||m.type!=="image"))throw Error("Selected album photos are not all present in WhatsApp history");
+  const parents=new Set(parts.map(m=>albumContext(m).parentId));
+  if(parents.size!==1||parents.has(""))throw Error("Recovery photos do not share one album");
+  const anchor=parts.find(m=>/^collected[.!]?$/i.test(m.body||"")&&m.hasQuotedMsg);
+  if(!anchor)throw Error("The selected album has no quoted collection update");
+  const quoted=await anchor.getQuotedMessage();
+  if(!quoted?.body)throw Error("Original booking quote not available");
+  const photos=await Promise.all(parts.map(getInboundMedia));
+  if(photos.reduce((n,p)=>n+p.data.length,0)>18000000)throw Error("Recovered album exceeds intake size");
+  await forwardOrders({from:group,author:anchor.author,messageId:"recovery-"+[...parents][0],text:anchor.body,hasMedia:true,quotedText:quoted.body,quotedMessageId:quoted.id?._serialized,albumPhotos:photos.map(p=>({type:p.mimetype,data:p.data}))});
+  console.log("Orders recovery forwarded:",photos.length,"photos");
+ }catch(e){console.error("Orders album recovery held:",e.message);}
+});
 
 // Forward incoming WhatsApp messages to Make.com
 client.on("message", async (message) => {
