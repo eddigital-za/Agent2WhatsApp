@@ -177,16 +177,10 @@ async function getInboundMedia(message) {
       "Standard downloadMedia failed; using event-data fallback:",
       primaryError?.message || String(primaryError)
     );
-    try {
-      const media = await downloadMediaFromEventData(message);
-      if (!media?.data) throw new Error("event-data fallback returned no data");
-      return media;
-    } catch (fallbackError) {
-      if (!process.env.ORDER_INTAKE_GROUP_ID || message.from !== process.env.ORDER_INTAKE_GROUP_ID || message.type !== "image") throw fallbackError;
-      const media = await require("./orders-photo-download").downloadPhoto(message._data);
-      console.log("Orders photo recovered through authenticated media fallback");
-      return media;
-    }
+    const media = await downloadMediaFromEventData(message);
+    if (!media?.data) throw new Error("event-data fallback returned no data");
+    console.log("Event-data media fallback succeeded");
+    return media;
   }
 }
 
@@ -249,8 +243,8 @@ client.on("message", async (message) => {
       media: null,
 
       // Reply/quoted-message context for conversational order lookup.
-      quotedText: message._data?.quotedMsg?.body || message._data?.quotedMsg?.caption || null,
-      quotedMessageId: message._data?.quotedStanzaID || null,
+      quotedText: null,
+      quotedMessageId: null,
       quotedAuthor: null,
       quotedFrom: null,
     };
@@ -260,8 +254,8 @@ client.on("message", async (message) => {
     if (message.hasQuotedMsg) {
       try {
         const quoted = await message.getQuotedMessage();
-        payload.quotedText = quoted?.body || payload.quotedText;
-        payload.quotedMessageId = quoted?.id?._serialized || payload.quotedMessageId;
+        payload.quotedText = quoted?.body || "";
+        payload.quotedMessageId = quoted?.id?._serialized || "";
         payload.quotedAuthor = quoted?.author || "";
         payload.quotedFrom = quoted?.from || "";
       } catch (quotedError) {
