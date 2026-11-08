@@ -1297,6 +1297,7 @@ async function applyMultiStageSept23(){
 let cbrReceiptRecoveryScheduled=false;
 client.on('ready',()=>{
  console.log('BTSA Scheduling Agent ready');
+ recoverQuotedScheduleReplies().catch(e=>console.error('Quoted schedule recovery held:',e.message));
  if(cbrReceiptRecoveryScheduled)return;
  cbrReceiptRecoveryScheduled=true;
  const earliest=Date.parse('2026-11-08T17:51:00Z');
@@ -1343,3 +1344,15 @@ const PORT=Number(process.env.PORT||4000); app.listen(PORT,()=>{
   console.log(`BTSA Scheduling Agent listening on ${PORT}; SQLite ${DB_PATH}; shadow=${SHADOW_MODE}; ai=${Boolean(OPENAI_API_KEY)}`);
   interpreterSelfTest().catch(error=>console.error('AI interpreter self-test failed:',error.message));
 });
+
+async function recoverQuotedScheduleReplies(){
+ if(communications.config().autoSend===true)return;
+ await operations.serial(()=>operations.refresh());
+ for(const [ref,bike,timestamp] of [['SLA-527','BMW GS 850',1794159705],['SLA-528','Big Boy 2026',1794160772]]){
+  const o=operations.get(ref),normalize=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(!o||normalize(o.bike)!==normalize(bike)||normalize(o.route)!=='jhbtodbn'||!['New Order','Pending',''].includes(o.status)||o.collection?.date||o.delivery?.date||o.contractor&&o.contractor!=='BTSA')continue;
+  const result=await handleOperationalText({body:'Collection scheduled for Monday 9 November 2026. Delivery scheduled for Tuesday 10 November 2026. Assigned to BTSA',timestamp,hasQuotedMsg:true,getQuotedMessage:async()=>({body:ref})},'recover-quoted-schedule-'+ref);
+  const saved=operations.details(ref);
+  if(result)console.log('Quoted schedule recovery:',ref,saved.order.collection?.date,saved.order.delivery?.date,saved.order.contractor,saved.order.syncState,saved.messages.filter(m=>m.state==='awaiting_approval').map(m=>m.kind).join(', '));
+ }
+}
