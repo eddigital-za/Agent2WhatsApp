@@ -1,5 +1,5 @@
 const { installBridge, serializeMessage } = require("./bridge-server");
-const { SharedClient, installIngress } = require("./shared-transport");
+const { SharedClient, installIngress, request:bridgeRequest } = require("./shared-transport");
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -866,7 +866,7 @@ function canApproveInGroup(message){return GROUP_ID.endsWith('@g.us')&&message.f
 const communications=require('./dispatch-communications').installCommunications({app,auth,db,operations,sendApproval:GROUP_ID.endsWith('@g.us')&&APPROVAL_AUTHORS.size?sendGroup:null,sendCustomer:async({phone,text,proofs,verifiedTextId,onPart})=>{
  if(!WHATSAPP_OUTBOUND_ENABLED||SHADOW_MODE)throw new Error('Customer sending is disabled in this environment.');if(!client.info)throw new Error('WhatsApp is not ready.');const parts=[];let index=0;
  for(const proof of proofs)if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');
- const send=async content=>{const result=await client.sendMessage(phone+'@c.us',content);const id=result?.id?._serialized;if(!id)throw new Error('WhatsApp send outcome is uncertain');onPart(index++,id);parts.push(id);};
+ const send=async content=>{const result=await client.sendMessage(phone+'@c.us',content,{waitUntilMsgSent:true});const id=result?.id?._serialized;if(!id)throw new Error('WhatsApp send outcome is uncertain');onPart(index++,id);parts.push(id);};
  if(verifiedTextId){onPart(index++,verifiedTextId);parts.push(verifiedTextId);}else await send(text);for(const proof of proofs){if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');await send(new MessageMedia(proof.mime_type,fs.readFileSync(proof.file_path).toString('base64'),proof.filename));}return parts;
 }});
 // Correct only the verified status change caused by the misread CBR approval.
@@ -1297,6 +1297,7 @@ async function applyMultiStageSept23(){
 client.on('ready',()=>{
  console.log('BTSA Scheduling Agent ready');
  recoverQuotedScheduleReplies().catch(e=>console.error('Quoted schedule recovery held:',e.message));
+ verifySchedulingBridgeRoute().catch(e=>console.error('Scheduling bridge route unavailable:',e.message));
 });
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
@@ -1332,5 +1333,40 @@ async function recoverQuotedScheduleReplies(){
   const result=await handleOperationalText({body:'Collection scheduled for Monday 9 November 2026. Delivery scheduled for Tuesday 10 November 2026. Assigned to BTSA',timestamp,hasQuotedMsg:true,getQuotedMessage:async()=>({body:ref})},'recover-quoted-schedule-'+ref);
   const saved=operations.details(ref);
   if(result)console.log('Quoted schedule recovery:',ref,saved.order.collection?.date,saved.order.delivery?.date,saved.order.contractor,saved.order.syncState,saved.messages.filter(m=>m.state==='awaiting_approval').map(m=>m.kind).join(', '));
+ }
+}
+
+async function verifySchedulingBridgeRoute(){
+ const base=process.env.SHARED_BRIDGE_URL;
+ if(!base||!GROUP_ID)return;
+ let problem;
+ for(let attempt=0;attempt<4;attempt++){
+  if(attempt)await new Promise(resolve=>setTimeout(resolve,5000));
+  try{
+   let status=await bridgeRequest(base,'/bridge/status');
+   if(!status.routes?.some(r=>r.group===GROUP_ID)){
+    await bridgeRequest(base,'/bridge/refresh',{});
+    status=await bridgeRequest(base,'/bridge/status');
+   }
+   if(!status.routes?.some(r=>r.group===GROUP_ID))throw Error('Scheduling group is not registered in the shared bridge');
+   console.log('Scheduling inbound bridge route verified');
+   await recoverUnforwardedScheduleApprovals();
+   return;
+  }catch(e){problem=e;}
+ }
+ throw problem||Error('Scheduling group route could not be verified');
+}
+
+async function recoverUnforwardedScheduleApprovals(){
+ for(const ref of ['SLA-527','SLA-528']){
+  const o=operations.get(ref),details=o&&operations.details(ref);
+  if(!details||o.syncState!=='synced'||o.collection?.date!=='2026-11-09'||o.collection?.confidence!=='confirmed'||o.actualCollection||!['New Order','Pending'].includes(o.status))continue;
+  const drafts=details.messages.filter(m=>m.kind==='Collection scheduled'&&m.state==='awaiting_approval'&&m.created_at>='2026-11-08T18:12:00Z'&&m.created_at<='2026-11-08T18:15:40Z'&&m.text.includes('We’ve scheduled pickup of your bike for '));
+  const prior=db.prepare("SELECT 1 FROM dispatch_messages m LEFT JOIN dispatch_send_parts p ON p.message_id=m.id WHERE m.ref=? AND m.kind='Collection scheduled' AND (m.state IN ('sent','sending','uncertain') OR p.message_id IS NOT NULL)").get(ref);
+  if(drafts.length!==1||prior)continue;
+  try{
+   const result=await communications.send(drafts[0].id,{operatorApproved:true});
+   if(result.sent)console.log('Recovered quoted schedule approval sent:',ref);
+  }catch(e){console.error('Recovered quoted schedule approval held:',ref,e.message);}
  }
 }

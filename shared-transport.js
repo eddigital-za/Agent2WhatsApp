@@ -40,7 +40,7 @@ class SharedClient extends EventEmitter {
     else console.error("Shared bridge WhatsApp session is not ready");
   }
   async sendMessage(chatId,message,options={}){
-    const body=typeof message==="string"?{chatId,text:message}:{chatId,media:message,options};
+    const body=typeof message==="string"?{chatId,text:message,options}:{chatId,media:message,options};
     return request(this.base,"/bridge/send",body);
   }
   async getChats(){return (await request(this.base,"/bridge/groups")).map(g=>({isGroup:true,id:{_serialized:g.id},name:g.name}));}

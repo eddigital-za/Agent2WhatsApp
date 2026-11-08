@@ -7,6 +7,13 @@ function installCommunications({app,auth,db,operations,sendCustomer,sendApproval
  CREATE TABLE IF NOT EXISTS dispatch_send_parts(message_id TEXT NOT NULL,part INTEGER NOT NULL,whatsapp_id TEXT NOT NULL,sent_at TEXT NOT NULL,PRIMARY KEY(message_id,part));`);
  db.prepare("UPDATE dispatch_messages SET state='uncertain',reason='Send was interrupted. Reconcile before retrying.' WHERE state='sending'").run();
  const config=()=>JSON.parse(db.prepare('SELECT data FROM dispatch_settings WHERE id=1').get().data);
+ // Save the operator's supplied Google review copy once, without changing send settings.
+ const reviewCopyKey='google-review-copy-2026-11-08';
+ if(!db.prepare('SELECT 1 FROM dispatch_events WHERE event_key=?').get(reviewCopyKey)){
+  const c=config();c.reviewText="Please may I ask you to rate our service on Google?\n\nReviews are a great way for others to see what we’re all about and how our customers are treated. Link below, thanks in advance 🙏🏼";c.reviewLink="https://maps.app.goo.gl/2xknXykYwKnngx5r5?g_st=ipc";
+  db.prepare('UPDATE dispatch_settings SET data=? WHERE id=1').run(JSON.stringify(c));
+  operations.emit(null,'setup','review_copy_saved',{},reviewCopyKey);
+ }
  let sending=false;
  const approvalStart=now();
  // Replace the requested draft only if its original text is still awaiting approval.
