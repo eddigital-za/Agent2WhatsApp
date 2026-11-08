@@ -32,8 +32,9 @@ function installCommunications({app,auth,db,operations,sendCustomer,sendApproval
   }catch(e){db.prepare("UPDATE dispatch_messages SET state='uncertain',reason=? WHERE id=?").run('Send outcome needs reconciliation: '+e.message,id);operations.issue(o.externalId,'Customer message outcome needs reconciliation. Do not resend automatically.','message-'+id);throw e;}finally{sending=false;}
  }
  function noteReply(number,body,eventKey){const normalized=phone(number);if(!normalized)return;const deliveries=db.prepare("SELECT * FROM dispatch_deliveries WHERE phone=? AND review_state IN ('waiting','ready','queued') ORDER BY sent_at DESC").all(normalized);for(const d of deliveries){const at=now();const negative=/\b(damag\w*|scratch\w*|broken|problem|issue|complain\w*|missing|stop|unsubscribe|do not contact|not received|not delivered|unhappy|wrong|late)\b/i.test(body);const positive=/^(?:(?:thank(?:s| you)|thanks so much|thank you so much|great|perfect|awesome|all good|received|got it|much appreciated|lekker|shot|cheers|ok|okay|yes)[\s!.,🙏👍🏼✅😊🙂❤❤️]*)+$/i.test(String(body||'').trim());const state=negative?'complaint':positive&&deliveries.length===1?'ready':'reply_review';db.prepare('UPDATE dispatch_deliveries SET reply_at=?,review_state=? WHERE id=?').run(at,state,d.id);operations.emit(d.ref,'customer-whatsapp','customer_replied',{text:String(body||'').slice(0,4000),reviewState:state},eventKey+'-'+d.id);if(state!=='ready'){db.prepare("UPDATE dispatch_messages SET state='held',reason='Customer reply needs review' WHERE id=? AND state='awaiting_approval'").run('review-'+d.id);operations.issue(d.ref,negative?'Customer delivery concern: review request held.':'Customer reply needs review before asking for a review.','reply-'+d.id);const o=operations.get(d.ref);if(o)operations.save({...o,complaintOpen:negative||o.complaintOpen},o.syncState);}}}
+ function approvalAction(body){const action=String(body||'').trim().toLowerCase().replace(/[.!]+$/,'');return action==='approved'?'approve':action==='held'?'hold':action;}
  async function approveReply(ids,body){
-  const action=String(body||'').trim().toLowerCase();
+  const action=approvalAction(body);
   if(!['approve','hold'].includes(action))return null;
   for(const id of ids){
    const matches=db.prepare("SELECT message_id FROM dispatch_approval_quotes WHERE quote=? OR substr(quote,-length(?))=?").all(id,'_'+id,'_'+id);
@@ -65,6 +66,6 @@ for(const d of db.prepare("SELECT * FROM dispatch_deliveries WHERE review_state 
  route('post','/dispatch/messages/:id/send',req=>send(req.params.id));
  route('post','/dispatch/messages/:id/hold',req=>{db.prepare("UPDATE dispatch_messages SET state='held',reason='Held by dispatcher' WHERE id=? AND state='awaiting_approval'").run(req.params.id);return {held:true};});
  route('post','/dispatch/customer-concern/:ref',req=>{const o=operations.get(req.params.ref);if(!o)throw Object.assign(Error('Order not found'),{status:404});if(Number(req.body.version)!==o.version)throw Object.assign(Error('Order changed. Refresh first.'),{status:409});operations.save({...o,complaintOpen:req.body.open!==false},o.syncState);operations.emit(o.externalId,'dashboard','customer_concern_updated',{open:req.body.open!==false});return {success:true};});
- return {send,tick,approveReply,noteReply,config,hours,blocked};
+ return {send,tick,approvalAction,approveReply,noteReply,config,hours,blocked};
 }
 module.exports={installCommunications,phone};

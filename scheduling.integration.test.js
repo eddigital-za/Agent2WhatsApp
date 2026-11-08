@@ -33,6 +33,8 @@ async function call(method,path,body={},params={}){let result,status=200;const r
  await call('POST','/dispatch/ingest',album);
  const collection=await call('GET','/dispatch/order/:ref',{}, {ref:'SLA-526'});assert.equal(collection.result.proofs.length,5);assert.equal(collection.result.messages.filter(m=>m.kind==='Collected').length,1);
 
+ await vm.runInContext("inbound({from:GROUP_ID,author:'operator@lid',id:{_serialized:'approval-only'},body:'Approved',hasQuotedMsg:true,getQuotedMessage:async()=>({body:'SLA-526 Collected',id:{_serialized:'unknown-preview'}})})",context);
+ assert.equal(honda[1],'Collected');
  const duplicate=[...honda];duplicate[0]='527';duplicate[1]='Pending';duplicate[37]='2123456789abcdef';sheetRows.push(duplicate);
  await call('GET','/dispatch/workspace');
  response=await call('POST','/dispatch/ingest',{...proof,messageId:'ambiguous-quote'});assert.equal(response.status,200);assert.equal(duplicate[1],'Pending');

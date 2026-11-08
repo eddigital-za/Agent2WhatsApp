@@ -686,9 +686,12 @@ async function inbound(message) {
       return;
     }
     lastInboundAt = nowIso();
-    if(canApproveInGroup(message)&&/^(approve|hold)$/i.test(String(message.body||'').trim())){
-      const reply=await communications.approveReply((await quotedContext(message)).ids,message.body);
-      if(reply){await sendGroup(reply,'dispatch-approval-reply-'+mid);return;}
+    if(message.from===GROUP_ID&&!message.hasMedia&&['approve','hold'].includes(communications.approvalAction(message.body))){
+      if(canApproveInGroup(message)){
+        const reply=await communications.approveReply((await quotedContext(message)).ids,message.body);
+        await sendGroup(reply||'I couldn’t match that reply to a draft. Please reply directly to the latest customer preview.','dispatch-approval-reply-'+mid);
+      }
+      return;
     }
     if(!message.hasMedia&&await handleOperationalText(message,mid))return;
     const ingested = message.body ? await ingestGroupOrder(message.body, mid) : null;
@@ -864,6 +867,18 @@ const communications=require('./dispatch-communications').installCommunications(
  const send=async content=>{const result=await client.sendMessage(phone+'@c.us',content);const id=result?.id?._serialized;if(!id)throw new Error('WhatsApp send outcome is uncertain');onPart(index++,id);parts.push(id);};
  await send(text);for(const proof of proofs){if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');await send(new MessageMedia(proof.mime_type,fs.readFileSync(proof.file_path).toString('base64'),proof.filename));}return parts;
 }});
+// Correct only the verified status change caused by the misread CBR approval.
+operations.serial(async()=>{
+ const ref='SLA-526',key='wa-false_120363429221367816@g.us_3A33A2AA804F27299FA0_219859560452258@lid-'+ref;
+ const event=db.prepare("SELECT details,event_key FROM dispatch_events WHERE ref=? AND kind='order_updated' ORDER BY id DESC LIMIT 1").get(ref);
+ if(event?.event_key!==key)return;
+ const original=JSON.parse(event.details),order=operations.get(ref);
+ if(original.before?.status!=='Collected'||original.changes?.status!=='In Transit'||order?.status!=='In Transit')return;
+ operations.update(ref,{status:'Collected'},order.version,'approval-repair','repair-'+key);
+ db.prepare("UPDATE dispatch_messages SET state='held',reason='Status was changed by an approval reply in error' WHERE ref=? AND kind='In Transit' AND state='awaiting_approval' AND created_at>=?").run(ref,db.prepare('SELECT at FROM dispatch_events WHERE event_key=?').get(key).at);
+ const saved=await operations.flushOne(ref);
+ console.log('CBR approval status correction:',saved.syncState);
+}).catch(e=>console.error('CBR approval correction held:',e.message));
 setInterval(()=>communications.tick().catch(error=>console.error('Customer updates held:',error.message)),30000);
 
 async function intakeDashboard(route,body){
