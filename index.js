@@ -1,3 +1,4 @@
+try {require("./patch-whatsapp-media-send");} catch(e) {console.error("WhatsApp media compatibility patch unavailable:",e.message);}
 const { SharedClient, installIngress } = require("./shared-transport");
 const { installBridge } = require("./bridge-server");
 const express = require("express");
