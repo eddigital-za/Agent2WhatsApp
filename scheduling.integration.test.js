@@ -27,7 +27,12 @@ async function call(method,path,body={},params={}){let result,status=200;const r
  const honda=Array(40).fill('');honda[0]='526';honda[1]='Pending';honda[4]='DBN to JHB';honda[5]='Example customer';honda[15]='Honda';honda[16]='CBR';honda[37]='1123456789abcdef';sheetRows.push(honda);
  await call('GET','/dispatch/workspace');
  const proof={text:'Collected',quotedText:booking,quotedMessageId:'original-booking',mediaData:'dGVzdA==',mediaType:'image/jpeg'};
- response=await call('POST','/dispatch/ingest',{...proof,messageId:'collection-quote'});assert.equal(response.status,200);assert.equal(honda[1],'Collected');
+ const album={...proof,mediaData:undefined,messageId:'collection-album',albumPhotos:Array.from({length:5},(_,i)=>({type:'image/jpeg',data:Buffer.from([255,216,255,i]).toString('base64')}))};
+ response=await call('POST','/dispatch/ingest',{...album,albumPhotos:undefined,albumError:'Album incomplete'});assert.equal(response.status,200);assert.equal(honda[1],'Pending');
+ response=await call('POST','/dispatch/ingest',album);assert.equal(response.status,200);assert.equal(honda[1],'Collected');
+ await call('POST','/dispatch/ingest',album);
+ const collection=await call('GET','/dispatch/order/:ref',{}, {ref:'SLA-526'});assert.equal(collection.result.proofs.length,5);assert.equal(collection.result.messages.filter(m=>m.kind==='Collected').length,1);
+
  const duplicate=[...honda];duplicate[0]='527';duplicate[1]='Pending';duplicate[37]='2123456789abcdef';sheetRows.push(duplicate);
  await call('GET','/dispatch/workspace');
  response=await call('POST','/dispatch/ingest',{...proof,messageId:'ambiguous-quote'});assert.equal(response.status,200);assert.equal(duplicate[1],'Pending');

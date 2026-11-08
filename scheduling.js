@@ -871,13 +871,11 @@ app.get('/dispatch/drafts',auth,async(req,res)=>{try{res.set('Cache-Control','no
 app.post('/dispatch/drafts/record',auth,async(req,res)=>{try{res.json(await intakeDashboard('/dispatch/drafts/record',{author:req.body.author,version:req.body.version}));}catch(e){res.status(502).json({error:e.message});}});
 app.post('/dispatch/connection-check',auth,(req,res)=>res.json({ready:true,manualOrders:true}));
 app.get('/dispatch/proof/:id',auth,(req,res)=>{const proof=db.prepare('SELECT file_path,mime_type FROM proofs WHERE id=?').get(Number(req.params.id));if(!proof||!fs.existsSync(proof.file_path))return res.status(404).json({error:'Photo unavailable'});res.set('Cache-Control','no-store');res.type(proof.mime_type).sendFile(path.resolve(proof.file_path));});
-app.post('/dispatch/order/:ref/photos',auth,async(req,res)=>{
- try{
-  const ref=dispatchDomain.canonical(req.params.ref),order=db.prepare('SELECT * FROM orders WHERE external_id=?').get(ref);
-  const {stage,photos}=req.body||{};
-  if(!order||!['collection','delivery'].includes(stage)||!Array.isArray(photos)||!photos.length||photos.length>12)return res.status(400).json({error:'Choose collection or delivery and 1 to 12 photos.'});
+async function attachProofBatch(ref,stage,photos,source){
+  const order=db.prepare('SELECT * FROM orders WHERE external_id=?').get(ref);
+  if(!order||!['collection','delivery'].includes(stage)||!Array.isArray(photos)||!photos.length||photos.length>12)throw Object.assign(Error('Choose collection or delivery and 1 to 12 photos.'),{status:400});
   const current=operations.get(ref);
-  if(!current||['Cancelled','Duplicate'].includes(current.status)||(stage==='collection'&&current.status==='Delivered'))return res.status(409).json({error:'This order cannot be updated with that photo stage.'});
+  if(!current||['Cancelled','Duplicate'].includes(current.status)||(stage==='collection'&&current.status==='Delivered'))throw Object.assign(Error('This order cannot be updated with that photo stage.'),{status:409});
   const items=photos.map(photo=>{
    const type=photo?.type, data=photo?.data;
    if(!['image/jpeg','image/png','image/webp','image/heic'].includes(type)||typeof data!=='string'||data.length>8000000||!/^([A-Za-z0-9+/]+)={0,2}$/.test(data))throw Object.assign(Error('Use JPEG, PNG, WebP or HEIC photos under 6 MB each.'),{status:400});
@@ -896,18 +894,31 @@ app.post('/dispatch/order/:ref/photos',auth,async(req,res)=>{
    const status=stage==='delivery'?'Delivered':'Collected';
    // Attach evidence without changing an already recorded milestone date.
    if(current.status!==status&&!(stage==='collection'&&current.status==='In Transit')){
-    operations.update(ref,{status},undefined,'dashboard-photo','upload-proof-'+first);
+    operations.update(ref,{status},undefined,source,'upload-proof-'+first);
     await operations.serial(()=>operations.flushOne(ref));
    }
    for(const item of items)db.prepare("UPDATE proofs SET status='confirmed',confirmed_at=? WHERE whatsapp_message_id=? AND status='ready'").run(nowIso(),item.id);
    if(communications.config().autoSend!==true)db.prepare("UPDATE dispatch_messages SET created_at=? WHERE ref=? AND kind=? AND state='awaiting_approval' AND id NOT IN (SELECT message_id FROM dispatch_approval_quotes)").run(nowIso(),ref,status);
-   operations.emit(ref,'dashboard-photo','proofs_attached',{stage,count:items.length});
+   operations.emit(ref,source,'proofs_attached',{stage,count:items.length});
   }
-  res.json(operations.details(ref));
- }catch(e){res.status(e.status||502).json({error:e.message});}
-});
+  return operations.details(ref);
+}
+app.post('/dispatch/order/:ref/photos',auth,async(req,res)=>{try{res.json(await attachProofBatch(dispatchDomain.canonical(req.params.ref),req.body?.stage,req.body?.photos,'dashboard-photo'));}catch(e){res.status(e.status||502).json({error:e.message});}});
 app.post('/dispatch/proof/:id/match',auth,async(req,res)=>{try{const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(Number(req.params.id));const ref=dispatchDomain.canonical(req.body.ref),order=db.prepare('SELECT * FROM orders WHERE external_id=?').get(ref);if(!proof||!order||!['collection','delivery'].includes(req.body.stage))return res.status(400).json({error:'Choose an order and collection/delivery stage.'});if(proof.status==='confirmed')return res.status(409).json({error:'Photo already confirmed; review its existing match.'});db.prepare('UPDATE proofs SET stage=?,order_id=? WHERE id=?').run(req.body.stage,order.id,proof.id);await confirmProof(proof.id,order.id);res.json({success:true});}catch(e){res.status(502).json({error:e.message});}});
-app.post('/dispatch/ingest',auth,async(req,res)=>{const p=req.body||{};if(!p.messageId||typeof p.text!=='string')return res.status(400).json({error:'Message ID and text required'});const message={body:p.text,from:GROUP_ID,id:{_serialized:p.messageId},timestamp:p.timestamp,hasMedia:!!p.mediaData,hasQuotedMsg:!!p.quotedText,_data:{quotedStanzaID:p.quotedMessageId||''},getQuotedMessage:async()=>({body:p.quotedText||'',id:{_serialized:p.quotedMessageId||''}}),downloadMedia:async()=>({data:p.mediaData,mimetype:p.mediaType||'image/jpeg',filename:p.mediaFilename})};try{if(message.hasMedia){await handleProofPhoto(message,orderFromQuote(await quotedContext(message)));}else if(!await handleOperationalText(message,p.messageId))operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,'Update needs review');res.json({recorded:true});}catch(e){operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,e.message);res.status(502).json({error:'Update recorded for review: '+e.message});}});
+app.post('/dispatch/ingest',auth,async(req,res)=>{const p=req.body||{};if(!p.messageId||typeof p.text!=='string')return res.status(400).json({error:'Message ID and text required'});const message={body:p.text,from:GROUP_ID,id:{_serialized:p.messageId},timestamp:p.timestamp,hasMedia:!!p.mediaData,hasQuotedMsg:!!p.quotedText,_data:{quotedStanzaID:p.quotedMessageId||''},getQuotedMessage:async()=>({body:p.quotedText||'',id:{_serialized:p.quotedMessageId||''}}),downloadMedia:async()=>({data:p.mediaData,mimetype:p.mediaType||'image/jpeg',filename:p.mediaFilename})};try{
+ if(p.albumError||Array.isArray(p.albumPhotos)){
+  const stage=proofStage(p.text),quote=await quotedContext(message),order=orderFromQuote(quote);
+  if(p.albumError||!stage||!order){
+   const reason=p.albumError||'Could not safely match all album photos to one booking and stage.';
+   operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,order?.external_id||null,reason);
+   await sendGroup('Photo update held: '+reason,'photo-album-held-'+p.messageId);
+   return res.json({recorded:false,held:true});
+  }
+  const saved=await attachProofBatch(order.external_id,stage,p.albumPhotos,'orders-whatsapp-photo');
+  await sendGroup('✅ '+order.external_id+' | '+saved.order.bike+'\n'+saved.order.status+' · '+p.albumPhotos.length+' photos matched. '+(saved.order.syncState==='synced'?'Sheet save verified.':'Sheet sync needs attention.'),'photo-album-recorded-'+p.messageId);
+  return res.json({recorded:true});
+ }
+ if(message.hasMedia){await handleProofPhoto(message,orderFromQuote(await quotedContext(message)));}else if(!await handleOperationalText(message,p.messageId))operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,'Update needs review');res.json({recorded:true});}catch(e){operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,e.message);res.status(502).json({error:'Update recorded for review: '+e.message});}});
 
 setInterval(()=>operations.flush().catch(error=>console.error('Dispatch sync pending:',error.message)),60000);
 app.post('/dispatch/update',auth,async(req,res)=>{
