@@ -1300,7 +1300,7 @@ client.on('ready',()=>{
  if(cbrReceiptRecoveryScheduled)return;
  cbrReceiptRecoveryScheduled=true;
  const earliest=Date.parse('2026-11-08T17:51:00Z');
- const timer=setTimeout(recoverApprovedCbrPhotos,Math.max(0,earliest-Date.now()));timer?.unref?.();
+ const timer=setTimeout(()=>recoverApprovedCbrPhotos().catch(e=>console.error('CBR approved collection update recovery failed:',e.message)),Math.max(0,earliest-Date.now()));timer?.unref?.();
 });
 async function recoverApprovedCbrPhotos(){
  // Reconcile the explicitly approved collection without ever resending uncertain text.
@@ -1309,7 +1309,7 @@ async function recoverApprovedCbrPhotos(){
  const copy='Hi Johny! We’ve picked up your Honda CBR. Here are the photos we took at collection so you have a record of its condition. We’ll keep you posted on the trip to Johannesburg. Thanks, BTSA';
  const drafts=details.messages.filter(m=>m.kind==='Collected'&&m.state==='uncertain'&&m.text===copy);
  const photos=details.proofs.filter(p=>p.stage==='collection'&&p.status==='confirmed');
- const prior=db.prepare("SELECT 1 FROM dispatch_messages m LEFT JOIN dispatch_send_parts p ON p.message_id=m.id WHERE m.ref=? AND m.kind='Collected' AND (m.state IN ('sent','sending') undefined").get(ref);
+ const prior=db.prepare("SELECT 1 FROM dispatch_messages m LEFT JOIN dispatch_send_parts p ON p.message_id=m.id WHERE m.ref=? AND m.kind='Collected' AND (m.state IN ('sent','sending') OR p.part>0)").get(ref);
  if(drafts.length!==1||photos.length!==5||prior||!photos.every(p=>fs.existsSync(db.prepare('SELECT file_path FROM proofs WHERE id=?').get(p.id)?.file_path||'')))return;
  try{
   if(!process.env.SHARED_BRIDGE_URL)return;
