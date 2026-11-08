@@ -60,6 +60,17 @@ function installBridge(app,client,MessageMedia) {
       res.json({success:true,id:{_serialized:sent?.id?._serialized||sent?.id?.$1||sent?.id?.id||""}});
     }catch(e){console.error("Shared outbound failed:",e.message);res.status(500).json({error:"Send outcome requires reconciliation"});}
   });
+  app.post("/bridge/outbound-receipt",auth,async(req,res)=>{
+    try{
+      const {chatId,text,since}=req.body||{};
+      if(!client.info||!/^\d{9,15}@c\.us$/.test(chatId||"")||typeof text!=="string"||text.length>4000||!Number.isFinite(since))return res.status(400).json({error:"Invalid receipt lookup"});
+      const ids=await client.pupPage.evaluate(async ({chatId,text,since})=>{
+        const chat=await window.WWebJS.getChat(chatId,{getAsModel:false});
+        return (chat?.msgs?.getModelsArray()||[]).filter(m=>m.id?.fromMe===true&&m.type==="chat"&&m.body===text&&m.t>=since).map(m=>m.id._serialized||m.id.$1||m.id.id).filter(Boolean);
+      },{chatId,text,since});
+      res.json({id:ids.length===1?ids[0]:null});
+    }catch(e){res.status(502).json({error:"WhatsApp receipt lookup unavailable"});}
+  });
   client.on("ready", () => {
     refresh()
       .then(result => console.log("Shared bridge routes refreshed", result))
