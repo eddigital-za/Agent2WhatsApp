@@ -321,7 +321,7 @@ async function quotedContext(message) {
   if(message.hasQuotedMsg){
     try{
       const quoted=await message.getQuotedMessage();
-      text=quoted?.body||'';
+      text=quoted?.body||text;
       const serialized=quoted?.id?._serialized||quoted?.id?.id||'';
       if(serialized)ids.unshift(String(serialized));
     }catch(error){
@@ -329,6 +329,20 @@ async function quotedContext(message) {
     }
   }
   return {text,ids:[...new Set(ids)]};
+}
+function orderFromQuote(quote) {
+  const linked=linkedRowForQuotedIds('question_links','order_id',quote.ids);
+  if(linked)return db.prepare('SELECT * FROM orders WHERE id=?').get(linked.order_id);
+  const refs=dispatchDomain.refs(quote.text);
+  if(refs.length===1)return db.prepare('SELECT * FROM orders WHERE external_id=?').get(refs[0]);
+  if(refs.length)return null;
+  const booking=parseNewOrderMessage(String(quote.text||'').replace(/\*/g,''));
+  if(!booking?.bike||!booking.route)return null;
+  const norm=value=>String(value||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const matches=operations.all().filter(o=>norm(o.bike)===norm(booking.bike)&&norm(o.route)===norm(booking.route));
+  // Include closed orders in the ambiguity check; an old booking can look identical.
+  if(matches.length!==1||dispatchDomain.closed(matches[0].status))return null;
+  return db.prepare('SELECT * FROM orders WHERE external_id=?').get(matches[0].externalId);
 }
 function sourceSegmentForOrder(text,externalId){
   return splitOrderUpdates(text).find(segment=>orderKey(segment).includes(orderKey(externalId)))||String(text||'');
@@ -472,7 +486,7 @@ async function handleProofPhoto(message,quotedOrder){
     const out=await sendGroup(`I think this is *${orderLabel(order)}*. Confirm ${stage}? Reply YES, or reply with the correct SLA number.`, `proof-match-${proof.id}`,order.id);
     if(out.messageId)db.prepare('INSERT OR REPLACE INTO proof_links(message_id,proof_id,created_at) VALUES(?,?,?)').run(out.messageId,proof.id,nowIso());
   }else{
-    const out=await sendGroup(`I could not safely match this ${stage} photo. Reply to this message with the SLA number.`, `proof-unmatched-${proof.id}`);
+    const out=await sendGroup(`I could not safely match this ${stage} photo. Match it in Dispatch under Unprocessed messages.`, `proof-unmatched-${proof.id}`);
     if(out.messageId)db.prepare('INSERT OR REPLACE INTO proof_links(message_id,proof_id,created_at) VALUES(?,?,?)').run(out.messageId,proof.id,nowIso());
   }
   return true;
@@ -576,7 +590,7 @@ async function handleOperationalText(message,mid){
   const order=await operations.createAndSync({...patch,bike,route:parsed.route||text.match(/order\s*[-:]\s*(.+?)(?:\s+-\s+R|$)/i)?.[1]||'',clientName:parsed.clientName||'',nextAction:'Complete manual order details',note:text},'wa:'+mid);
   await sendGroup('✅ Order recorded — '+order.externalId+'\n'+(order.bike||order.route)+'\n'+(order.syncState==='synced'?'Sheet save verified.':'Sheet sync needs attention; order is visible in dashboard.')+' Complete missing details in the dashboard.','manual-recorded-'+mid);return true;
  }
- let parts=dispatchDomain.segments(text);const quoted=await quotedContext(message);const linked=linkedRowForQuotedIds('question_links','order_id',quoted.ids);const linkedOrder=linked?db.prepare('SELECT external_id FROM orders WHERE id=?').get(linked.order_id):null;
+ let parts=dispatchDomain.segments(text);const quoted=await quotedContext(message);const linkedOrder=!parts[0].ref?orderFromQuote(quoted):null;
  if(!parts[0].ref){const short=text.match(/^\s*(\d+)\s+(delivered|complete|completed|collected|in transit|cancelled)\b/i);const ref=short?'SLA-'+Number(short[1]):linkedOrder?.external_id;if(ref)parts=[{ref,text}];}
  if(!parts.some(p=>p.ref))return false;
  for(const part of parts){const current=operations.get(part.ref);if(current&&(/\?/.test(part.text)||/^\s*(?:SL(?:A)?[ -]?\d+|M-?\d+)?\s*[-:]?\s*(?:what|when|which|who|did|can you|could you|please send|please show)\b/i.test(part.text))){await sendGroup(part.ref+' | '+current.bike+'\nStatus: '+current.status+'\nCollection ETA: '+(current.collection?.date||'Unknown')+'\nDelivery ETA: '+(current.delivery?.date||'Unknown'),'query-'+mid+'-'+part.ref);continue;}if(!current){operations.inbox('unknown-'+mid+'-'+part.ref,'scheduling-whatsapp',part.text,part.ref,'Reference not found; sync or match the order before applying.');await sendGroup(part.ref+': reference not found. Saved in dashboard Needs attention.','unknown-'+mid+'-'+part.ref);continue;}
@@ -682,7 +696,7 @@ async function inbound(message) {
     const quotedText=quote.text;
     const questionLink=linkedRowForQuotedIds('question_links','order_id',quote.ids);
     const quotedOrder=questionLink?db.prepare('SELECT * FROM orders WHERE id=?').get(questionLink.order_id):null;
-    if(message.hasMedia){await handleProofPhoto(message,quotedOrder);return;}
+    if(message.hasMedia){await handleProofPhoto(message,orderFromQuote(quote));return;}
     let proofLink=linkedRowForQuotedIds('proof_links','proof_id',quote.ids);
     if(proofLink){
       const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(proofLink.proof_id);
@@ -852,7 +866,7 @@ app.post('/dispatch/drafts/record',auth,async(req,res)=>{try{res.json(await inta
 app.post('/dispatch/connection-check',auth,(req,res)=>res.json({ready:true,manualOrders:true}));
 app.get('/dispatch/proof/:id',auth,(req,res)=>{const proof=db.prepare('SELECT file_path,mime_type FROM proofs WHERE id=?').get(Number(req.params.id));if(!proof||!fs.existsSync(proof.file_path))return res.status(404).json({error:'Photo unavailable'});res.set('Cache-Control','no-store');res.type(proof.mime_type).sendFile(path.resolve(proof.file_path));});
 app.post('/dispatch/proof/:id/match',auth,async(req,res)=>{try{const proof=db.prepare('SELECT * FROM proofs WHERE id=?').get(Number(req.params.id));const ref=dispatchDomain.canonical(req.body.ref),order=db.prepare('SELECT * FROM orders WHERE external_id=?').get(ref);if(!proof||!order||!['collection','delivery'].includes(req.body.stage))return res.status(400).json({error:'Choose an order and collection/delivery stage.'});if(proof.status==='confirmed')return res.status(409).json({error:'Photo already confirmed; review its existing match.'});db.prepare('UPDATE proofs SET stage=?,order_id=? WHERE id=?').run(req.body.stage,order.id,proof.id);await confirmProof(proof.id,order.id);res.json({success:true});}catch(e){res.status(502).json({error:e.message});}});
-app.post('/dispatch/ingest',auth,async(req,res)=>{const p=req.body||{};if(!p.messageId||typeof p.text!=='string')return res.status(400).json({error:'Message ID and text required'});const message={body:p.text,from:GROUP_ID,id:{_serialized:p.messageId},timestamp:p.timestamp,hasMedia:!!p.mediaData,hasQuotedMsg:!!p.quotedText,_data:{quotedStanzaID:p.quotedMessageId||''},getQuotedMessage:async()=>({body:p.quotedText||'',id:{_serialized:p.quotedMessageId||''}}),downloadMedia:async()=>({data:p.mediaData,mimetype:p.mediaType||'image/jpeg',filename:p.mediaFilename})};try{if(message.hasMedia){const ref=dispatchDomain.refs(p.text)[0]||dispatchDomain.refs(p.quotedText)[0];const order=ref?db.prepare('SELECT * FROM orders WHERE external_id=?').get(ref):null;await handleProofPhoto(message,order);}else if(!await handleOperationalText(message,p.messageId))operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,'Update needs review');res.json({recorded:true});}catch(e){operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,e.message);res.status(502).json({error:'Update recorded for review: '+e.message});}});
+app.post('/dispatch/ingest',auth,async(req,res)=>{const p=req.body||{};if(!p.messageId||typeof p.text!=='string')return res.status(400).json({error:'Message ID and text required'});const message={body:p.text,from:GROUP_ID,id:{_serialized:p.messageId},timestamp:p.timestamp,hasMedia:!!p.mediaData,hasQuotedMsg:!!p.quotedText,_data:{quotedStanzaID:p.quotedMessageId||''},getQuotedMessage:async()=>({body:p.quotedText||'',id:{_serialized:p.quotedMessageId||''}}),downloadMedia:async()=>({data:p.mediaData,mimetype:p.mediaType||'image/jpeg',filename:p.mediaFilename})};try{if(message.hasMedia){await handleProofPhoto(message,orderFromQuote(await quotedContext(message)));}else if(!await handleOperationalText(message,p.messageId))operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,'Update needs review');res.json({recorded:true});}catch(e){operations.inbox('intake-'+p.messageId,'orders-whatsapp',p.text,null,e.message);res.status(502).json({error:'Update recorded for review: '+e.message});}});
 
 setInterval(()=>operations.flush().catch(error=>console.error('Dispatch sync pending:',error.message)),60000);
 app.post('/dispatch/update',auth,async(req,res)=>{

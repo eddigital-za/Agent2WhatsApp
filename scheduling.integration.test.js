@@ -18,6 +18,14 @@ async function call(method,path,body={},params={}){let result,status=200;const r
  await call('POST','/dispatch/ingest',{messageId:'query-whatsapp-1',text:'SLA511 delivered?',timestamp:1794124800});assert.equal(sheetRows[0][1],'Pending');
  response=await call('POST','/dispatch/ingest',{messageId:'test-whatsapp-1',text:'SLA511 delivered',timestamp:1794124800});assert.equal(response.status,200);assert.equal(sheetRows[0][1],'Delivered');const messageCount=sent.length;
  await call('POST','/dispatch/ingest',{messageId:'test-whatsapp-1',text:'SLA511 delivered',timestamp:1794124800});assert.equal(sent.length,messageCount);
+ const booking='*New Order - DBN to JHB - R2500*\n\nMake and Model: Honda Cbr';
+ const honda=Array(40).fill('');honda[0]='526';honda[1]='Pending';honda[4]='DBN to JHB';honda[5]='Example customer';honda[15]='Honda';honda[16]='CBR';honda[37]='1123456789abcdef';sheetRows.push(honda);
+ await call('GET','/dispatch/workspace');
+ const proof={text:'Collected',quotedText:booking,quotedMessageId:'original-booking',mediaData:'dGVzdA==',mediaType:'image/jpeg'};
+ response=await call('POST','/dispatch/ingest',{...proof,messageId:'collection-quote'});assert.equal(response.status,200);assert.equal(honda[1],'Collected');
+ const duplicate=[...honda];duplicate[0]='527';duplicate[1]='Pending';duplicate[37]='2123456789abcdef';sheetRows.push(duplicate);
+ await call('GET','/dispatch/workspace');
+ response=await call('POST','/dispatch/ingest',{...proof,messageId:'ambiguous-quote'});assert.equal(response.status,200);assert.equal(duplicate[1],'Pending');
  const record=await call('GET','/dispatch/order/:ref',{}, {ref:'SLA-511'});assert.equal(record.result.order.status,'Delivered');assert.ok(record.result.events.length);assert.equal(record.result.messages[0].state,'awaiting_approval');assert.equal(sent.every(m=>m.group==='12345@g.us'),true);
  console.log('PASS: complete scheduler boot and authenticated routes, manual create/read/edit, exact sheet-column writeback, idempotent retries, WhatsApp-to-sheet-to-dashboard completion, deduplicated acknowledgement, timeline and held client message. All network and WhatsApp mocked.');
 })().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>{for(const db of sqlite)db.close()});
