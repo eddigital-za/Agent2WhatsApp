@@ -7,7 +7,7 @@ const dispatchDomain=require('./dispatch-domain');
 const {createIntakeBridge}=require('./dispatch-intake');
 
 const app=express();
-app.use(express.json({limit:'2mb'}));
+app.use(express.json({limit:'20mb'}));
 const PORT=Number(process.env.PORT||4000);
 const DB_DIR=process.env.DATA_DIR||'/app/data';
 const DB_PATH=path.join(DB_DIR,'order-intake.sqlite');
