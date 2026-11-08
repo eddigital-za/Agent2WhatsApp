@@ -11,6 +11,11 @@ const sqlite=[];const context=vm.createContext({console,Buffer,URLSearchParams,A
 vm.runInContext(fs.readFileSync('scheduling.js','utf8'),context);
 async function call(method,path,body={},params={}){let result,status=200;const req={body,params,get:name=>name==='x-api-key'?'test-access-key':''};const res={set(){return this},status(n){status=n;return this},json(v){result=v;return this}};const handlers=routes[method+' '+path];assert.ok(handlers,path);for(let i=0;i<handlers.length;i++){let next=false;await handlers[i](req,res,()=>next=true);if(i<handlers.length-1&&!next)break;}return {status,result};}
 (async()=>{
+ assert.equal(vm.runInContext("canApproveInGroup({from:'12345@g.us'})",context),false);
+ vm.runInContext("APPROVAL_AUTHORS.add('*')",context);
+ assert.equal(vm.runInContext("canApproveInGroup({from:'12345@g.us',author:'678@lid'})",context),true);
+ assert.equal(vm.runInContext("canApproveInGroup({from:'999@g.us',author:'678@lid'})",context),false);
+ vm.runInContext("APPROVAL_AUTHORS.clear()",context);
  await new Promise(r=>setImmediate(r));let response=await call('GET','/dispatch/workspace');assert.equal(response.status,200);assert.ok(response.result.orders.find(o=>o.externalId==='SLA-511'));
  response=await call('POST','/dispatch/manual',{requestKey:'dashboard-test-create',order:{clientName:'Example manual',bike:'Test bike',route:'DBN to JHB',collection:{date:'2026-11-08',time:'',confidence:'confirmed',precision:'day'}}});assert.equal(response.status,200);assert.equal(response.result.syncState,'synced');const manual=response.result;assert.equal(sheetRows.filter(r=>r[39]===manual.externalId).length,1);
  const again=await call('POST','/dispatch/manual',{requestKey:'dashboard-test-create',order:{clientName:'Example manual',bike:'Test bike',route:'DBN to JHB',collection:{date:'2026-11-08',time:'',confidence:'confirmed',precision:'day'}}});assert.equal(again.result.externalId,manual.externalId);assert.equal(sheetRows.filter(r=>r[39]===manual.externalId).length,1);
