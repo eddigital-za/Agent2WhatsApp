@@ -1,5 +1,5 @@
 const { installBridge, serializeMessage } = require("./bridge-server");
-const { SharedClient, installIngress } = require("./shared-transport");
+const { SharedClient, installIngress, request:bridgeRequest } = require("./shared-transport");
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -863,11 +863,11 @@ const operations=require('./dispatch-operations').createOperations({db,contracto
 operations.install(app,auth);
 const APPROVAL_AUTHORS=new Set((process.env.DISPATCH_APPROVAL_AUTHORS||'').split(',').map(s=>s.trim()).filter(Boolean));
 function canApproveInGroup(message){return GROUP_ID.endsWith('@g.us')&&message.from===GROUP_ID&&(APPROVAL_AUTHORS.has('*')||APPROVAL_AUTHORS.has(message.author||message._data?.author));}
-const communications=require('./dispatch-communications').installCommunications({app,auth,db,operations,sendApproval:GROUP_ID.endsWith('@g.us')&&APPROVAL_AUTHORS.size?sendGroup:null,sendCustomer:async({phone,text,proofs,onPart})=>{
+const communications=require('./dispatch-communications').installCommunications({app,auth,db,operations,sendApproval:GROUP_ID.endsWith('@g.us')&&APPROVAL_AUTHORS.size?sendGroup:null,sendCustomer:async({phone,text,proofs,verifiedTextId,onPart})=>{
  if(!WHATSAPP_OUTBOUND_ENABLED||SHADOW_MODE)throw new Error('Customer sending is disabled in this environment.');if(!client.info)throw new Error('WhatsApp is not ready.');const parts=[];let index=0;
  for(const proof of proofs)if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');
  const send=async content=>{const result=await client.sendMessage(phone+'@c.us',content);const id=result?.id?._serialized;if(!id)throw new Error('WhatsApp send outcome is uncertain');onPart(index++,id);parts.push(id);};
- await send(text);for(const proof of proofs){if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');await send(new MessageMedia(proof.mime_type,fs.readFileSync(proof.file_path).toString('base64'),proof.filename));}return parts;
+ if(verifiedTextId){onPart(index++,verifiedTextId);parts.push(verifiedTextId);}else await send(text);for(const proof of proofs){if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');await send(new MessageMedia(proof.mime_type,fs.readFileSync(proof.file_path).toString('base64'),proof.filename));}return parts;
 }});
 // Correct only the verified status change caused by the misread CBR approval.
 operations.serial(async()=>{
@@ -1296,16 +1296,19 @@ async function applyMultiStageSept23(){
 }
 client.on('ready',async()=>{
  console.log('BTSA Scheduling Agent ready');
- // Complete the explicit 19:16 approval that was rejected before any WhatsApp send.
+ // Reconcile the explicitly approved collection without ever resending uncertain text.
  const ref='SLA-526',order=operations.get(ref),details=order&&operations.details(ref);
  if(!details||order.status!=='Collected'||order.syncState!=='synced'||String(order.phone||'').replace(/\D/g,'').replace(/^0(?=\d{9}$)/,'27')!=='27606226069')return;
  const copy='Hi Johny! We’ve picked up your Honda CBR. Here are the photos we took at collection so you have a record of its condition. We’ll keep you posted on the trip to Johannesburg. Thanks, BTSA';
- const drafts=details.messages.filter(m=>m.kind==='Collected'&&m.state==='awaiting_approval'&&m.text===copy);
+ const drafts=details.messages.filter(m=>m.kind==='Collected'&&m.state==='uncertain'&&m.text===copy);
  const photos=details.proofs.filter(p=>p.stage==='collection'&&p.status==='confirmed');
- const prior=db.prepare("SELECT 1 FROM dispatch_messages m LEFT JOIN dispatch_send_parts p ON p.message_id=m.id WHERE m.ref=? AND m.kind='Collected' AND (m.state IN ('sent','sending','uncertain') OR p.message_id IS NOT NULL)").get(ref);
+ const prior=db.prepare("SELECT 1 FROM dispatch_messages m LEFT JOIN dispatch_send_parts p ON p.message_id=m.id WHERE m.ref=? AND m.kind='Collected' AND (m.state IN ('sent','sending') OR p.message_id IS NOT NULL)").get(ref);
  if(drafts.length!==1||photos.length!==5||prior||!photos.every(p=>fs.existsSync(db.prepare('SELECT file_path FROM proofs WHERE id=?').get(p.id)?.file_path||'')))return;
  try{
-  const result=await communications.send(drafts[0].id,{operatorApproved:true});
+  if(!process.env.SHARED_BRIDGE_URL)return;
+  const receipt=await bridgeRequest(process.env.SHARED_BRIDGE_URL,'/bridge/outbound-receipt',{chatId:'27606226069@c.us',text:copy,since:Date.parse('2026-11-08T17:21:20Z')/1000});
+  if(!receipt.id){console.warn('CBR approved collection update held: exact text receipt not found');return;}
+  const result=await communications.send(drafts[0].id,{operatorApproved:true,verifiedTextId:receipt.id});
   if(result.sent){console.log('CBR approved collection update sent: text plus five photos');await sendGroup('Johny’s collection update and all 5 photos were sent.','cbr-approval-completed-'+drafts[0].id);}
  }catch(e){console.error('CBR approved collection update did not complete:',e.message);}
 });
