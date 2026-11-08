@@ -340,9 +340,13 @@ function orderFromQuote(quote) {
   if(!booking?.bike||!booking.route)return null;
   const norm=value=>String(value||'').toLowerCase().replace(/[^a-z0-9]/g,'');
   const matches=operations.all().filter(o=>norm(o.bike)===norm(booking.bike)&&norm(o.route)===norm(booking.route));
-  // Include closed orders in the ambiguity check; an old booking can look identical.
-  if(matches.length!==1||dispatchDomain.closed(matches[0].status))return null;
-  return db.prepare('SELECT * FROM orders WHERE external_id=?').get(matches[0].externalId);
+  const candidates=matches.filter(o=>o.status!=='Duplicate');
+  if(candidates.length!==1||dispatchDomain.closed(candidates[0].status))return null;
+  const order=candidates[0];
+  const phone=value=>String(value||'').replace(/\D/g,'').replace(/^0(?=\d{9}$)/,'27');
+  // A manually marked duplicate is safe to disregard only for the same customer.
+  if(matches.some(o=>o.status==='Duplicate'&&!(phone(o.phone)&&phone(o.phone)===phone(order.phone))))return null;
+  return db.prepare('SELECT * FROM orders WHERE external_id=?').get(order.externalId);
 }
 function sourceSegmentForOrder(text,externalId){
   return splitOrderUpdates(text).find(segment=>orderKey(segment).includes(orderKey(externalId)))||String(text||'');

@@ -24,7 +24,7 @@ async function call(method,path,body={},params={}){let result,status=200;const r
  response=await call('POST','/dispatch/ingest',{messageId:'test-whatsapp-1',text:'SLA511 delivered',timestamp:1794124800});assert.equal(response.status,200);assert.equal(sheetRows[0][1],'Delivered');const messageCount=sent.length;
  await call('POST','/dispatch/ingest',{messageId:'test-whatsapp-1',text:'SLA511 delivered',timestamp:1794124800});assert.equal(sent.length,messageCount);
  const booking='*New Order - DBN to JHB - R2500*\n\nMake and Model: Honda Cbr';
- const honda=Array(40).fill('');honda[0]='526';honda[1]='Pending';honda[4]='DBN to JHB';honda[5]='Example customer';honda[15]='Honda';honda[16]='CBR';honda[37]='1123456789abcdef';sheetRows.push(honda);
+ const honda=Array(40).fill('');honda[0]='526';honda[1]='Pending';honda[4]='DBN to JHB';honda[5]='Example customer';honda[7]='27000000001';honda[15]='Honda';honda[16]='CBR';honda[37]='1123456789abcdef';sheetRows.push(honda);const marked=[...honda];marked[0]='525';marked[1]='Duplicate';marked[37]='3123456789abcdef';sheetRows.push(marked);
  await call('GET','/dispatch/workspace');
  const proof={text:'Collected',quotedText:booking,quotedMessageId:'original-booking',mediaData:'dGVzdA==',mediaType:'image/jpeg'};
  const album={...proof,mediaData:undefined,messageId:'collection-album',albumPhotos:Array.from({length:5},(_,i)=>({type:'image/jpeg',data:Buffer.from([255,216,255,i]).toString('base64')}))};
