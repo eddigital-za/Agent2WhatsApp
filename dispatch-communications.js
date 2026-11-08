@@ -9,6 +9,20 @@ function installCommunications({app,auth,db,operations,sendCustomer,sendApproval
  const config=()=>JSON.parse(db.prepare('SELECT data FROM dispatch_settings WHERE id=1').get().data);
  let sending=false;
  const approvalStart=now();
+ // Replace the requested draft only if its original text is still awaiting approval.
+ // Keep the original record so a reply to the old preview cannot send it.
+ if(config().autoSend!==true){
+  db.exec('BEGIN IMMEDIATE');
+  try{
+   const old=db.prepare("SELECT id FROM dispatch_messages WHERE ref='SLA-526' AND kind='Collected' AND state='awaiting_approval' AND text=?").all('Your motorcycle has been collected successfully.');
+   if(old.length===1){
+    const id=old[0].id;
+    db.prepare("UPDATE dispatch_messages SET state='held',reason='Replaced with a new preview. Approve the replacement instead.' WHERE id=?").run(id);
+    db.prepare('INSERT INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id+'-warm-copy','SLA-526','Collected','awaiting_approval','Hi! We’ve picked up your Honda CBR. Here are the photos we took at collection so you have a record of its condition. We’ll keep you posted on the trip to Johannesburg. Thanks, BTSA',approvalStart,'Revised copy. Confirm before sending with all matched photos.');
+   }
+   db.exec('COMMIT');
+  }catch(e){db.exec('ROLLBACK');throw e;}
+ }
  function hours(c,at=now()){if(!c.eveningCutoff||!c.morningTime)return false;const time=new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Johannesburg',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(at));return time>=c.morningTime&&time<c.eveningCutoff;}
  function blocked(o,m){if(!o||o.duplicateOf||o.status==='Cancelled'||o.status==='Duplicate')return 'Order is cancelled or duplicate.';if(o.complaintOpen)return 'Customer concern remains unresolved.';if(!phone(o.phone))return 'Confirm the booking customer’s WhatsApp number first.';if(m.kind==='Collected'&&!['Collected','In Transit','Delivered'].includes(o.status))return 'Collection is not confirmed.';if(m.kind==='In Transit'&&o.status!=='In Transit')return 'Order is no longer in transit.';if(m.kind==='Collected'&&o.status==='Delivered')return 'Collection update is superseded by completed delivery.';if(m.kind==='Delivered'&&o.status!=='Delivered')return 'Delivery is not confirmed.';if(['Collection reminder','Collection scheduled'].includes(m.kind)&&(closed(o.status)||['Collected','In Transit'].includes(o.status)||o.actualCollection||o.collection?.confidence!=='confirmed'||o.collection.date<localDay(now())))return 'Collection ETA is missing, stale or no longer applicable.';if(m.kind==='Delivery update'&&(closed(o.status)||o.delivery?.confidence!=='confirmed'||o.delivery.date<localDay(now())))return 'Delivery ETA is missing, stale or no longer applicable.';return '';}
  async function send(id){if(sending)throw Object.assign(Error('Another customer message is being sent. Try again shortly.'),{status:409});const m=db.prepare('SELECT * FROM dispatch_messages WHERE id=?').get(id);if(!m)throw Object.assign(Error('Message not found'),{status:404});if(m.state==='sent')return {alreadySent:true};if(m.state!=='awaiting_approval')throw Object.assign(Error('This message is held or its send outcome needs review.'),{status:409});const c=config(),o=operations.get(m.ref);if(!hours(c))throw Object.assign(Error('Set customer sending hours; send only within those hours.'),{status:409});const problem=blocked(o,m);if(problem)throw Object.assign(Error(problem),{status:409});const legacy=db.prepare('SELECT id FROM orders WHERE external_id=?').get(o.externalId);const stage=m.kind==='Collected'?'collection':m.kind==='Delivered'?'delivery':null;const proofs=stage&&legacy?db.prepare("SELECT * FROM proofs WHERE order_id=? AND stage=? AND status='confirmed' ORDER BY id").all(legacy.id,stage):[];
@@ -39,8 +53,9 @@ for(const d of db.prepare("SELECT * FROM dispatch_deliveries WHERE review_state 
    if(sendApproval)for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' AND created_at>=? AND id NOT IN (SELECT message_id FROM dispatch_approval_quotes) ORDER BY created_at").all(approvalStart)){
     const o=operations.get(m.ref);if(blocked(o,m)||o.syncState!=='synced')continue;
     const stage=m.kind==='Collected'?'collection':m.kind==='Delivered'?'delivery':null;
-    if(stage&&!operations.details(o.externalId).proofs.some(p=>p.stage===stage&&p.status==='confirmed'))continue;
-    const result=await sendApproval(o.externalId+' · '+o.bike+' · '+m.kind+'\n\n'+m.text+'\n\nReply APPROVE to send to the customer, or HOLD.','dispatch-approval-'+m.id);
+    const photoCount=stage?operations.details(o.externalId).proofs.filter(p=>p.stage===stage&&p.status==='confirmed').length:0;
+    if(stage&&!photoCount)continue;
+    const result=await sendApproval('Ready for your review: '+o.bike+' ('+o.externalId+')\n'+m.kind+(photoCount?' with '+photoCount+' '+(photoCount===1?'photo':'photos'):'')+'\n\nHere’s what the customer will get:\n'+m.text+'\n\nReply APPROVE to send '+(photoCount?'the message and photos':'the message')+', or HOLD to pause it.','dispatch-approval-'+m.id);
     if(result.messageId)db.prepare('INSERT OR IGNORE INTO dispatch_approval_quotes VALUES(?,?)').run(result.messageId,m.id);
    }return;
   }if(!withinHours)return;for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' ORDER BY created_at LIMIT 10").all()){const o=operations.get(m.ref);if(m.created_at<(c.autoEnabledAt||now())||blocked(o,m))continue;try{await send(m.id);}catch(e){if(e.status!==409)console.error('Customer message held:',e.message);}}
