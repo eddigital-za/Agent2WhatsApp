@@ -3,6 +3,7 @@ function setup(sendApproval,seedOld=false){const db=new DatabaseSync(':memory:')
 async function delivered(s){const o=await s.ops.createAndSync({bike:'Test bike',phone:'0821234567',status:'Pending'},'comms-test-key');s.ops.update(o.externalId,{status:'Delivered'},undefined,'test');const core=s.db.prepare('SELECT id FROM orders WHERE external_id=?').get(o.externalId);s.db.prepare("INSERT INTO proofs(order_id,stage,whatsapp_message_id,mime_type,filename,file_path,vision_json,status,created_at) VALUES(?,'delivery','test-photo','image/jpeg','photo.jpg','not-read-in-test','{}','confirmed','2026-11-08')").run(core.id);const msg=s.ops.details(o.externalId).messages[0];return {o,msg};}
 (async()=>{
  let s=setup(),d=await delivered(s);await assert.rejects(()=>s.comm.send(d.msg.id),/sending hours/);assert.equal(s.sends(),0);s.configure();await s.comm.send(d.msg.id);assert.equal(s.sends(),1);await s.comm.send(d.msg.id);assert.equal(s.sends(),1);s.setTime('2026-11-08T08:29:00.000Z');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,0);s.setTime('2026-11-08T08:30:00.000Z');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,1);assert.equal(s.sends(),1);s.comm.noteReply('27821234567','There is damage','reply1');assert.equal(s.ops.get(d.o.externalId).complaintOpen,true);assert.equal(s.db.prepare("SELECT state FROM dispatch_messages WHERE kind='Review request'").get().state,'held');
+ s=setup();d=await delivered(s);await s.comm.send(d.msg.id,{operatorApproved:true});assert.equal(s.sends(),1);
  s=setup();d=await delivered(s);s.configure();await s.comm.send(d.msg.id);s.setTime('2026-11-08T08:02:00.000Z');s.comm.noteReply('27821234567','Thanks!','reply2');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,1);
  s=setup();d=await delivered(s);s.configure();s.setFail(true);await assert.rejects(()=>s.comm.send(d.msg.id),/uncertain/);assert.equal(s.db.prepare('SELECT state FROM dispatch_messages WHERE id=?').get(d.msg.id).state,'uncertain');await assert.rejects(()=>s.comm.send(d.msg.id),/outcome/);assert.equal(s.sends(),1);assert.equal(s.db.prepare('SELECT COUNT(*) n FROM dispatch_deliveries').get().n,0);
  s=setup();d=await delivered(s);s.configure();s.setTime('2026-11-08T17:50:00.000Z');await s.comm.send(d.msg.id);s.setTime('2026-11-08T18:25:00.000Z');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,0);s.setTime('2026-11-09T06:00:00.000Z');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,1);
@@ -15,9 +16,9 @@ async function delivered(s){const o=await s.ops.createAndSync({bike:'Test bike',
  s.ops.save(s.ops.get(scheduled.externalId),'synced');
  await s.comm.tick();await s.comm.tick();assert.equal(prompts.length,2);assert.equal(s.sends(),0);
  assert.equal(await s.comm.approveReply(['wrong-quote'],'APPROVE'),null);
- assert.match(await s.comm.approveReply(['STANZA1'],'APPROVE'),/sending hours/);
- assert.equal(await s.comm.approveReply([],'HOLD',prompts[0].text),'Customer update held.');
- assert.equal(s.ops.details(scheduled.externalId).messages.filter(m=>m.state==='held').length,1);
+ assert.match(await s.comm.approveReply(['STANZA1'],'HOLD'),/held/);
+ assert.equal(await s.comm.approveReply([],'HOLD',prompts[1].text),'Customer update held.');
+ assert.equal(s.ops.details(scheduled.externalId).messages.filter(m=>m.state==='held').length,2);
  assert.equal(s.sends(),0);
  console.log('PASS: delivery text+photo completion gates, missing settings, duplicate-send guard, 30-minute timer, positive reply, late complaint, uncertain send hold and next-morning deferral. No real messages sent.');
 })().catch(e=>{console.error(e);process.exitCode=1});
