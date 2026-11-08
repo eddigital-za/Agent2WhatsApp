@@ -1294,15 +1294,22 @@ async function applyMultiStageSept23(){
   db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
   await sendGroup('*Multi-stage updates*\n\n*SLA-402 | Suzuki GSX1300 B-KING*\nStage 1: Durrell | Witbank → Cheetah Express JHB depot\nStage 2: Cheetah Express | JHB depot → Brackenfell\n\n*SLA-403 | Kawasaki ZW14*\nStage 1: Cheetah Express | CPT → JHB depot | collected Wed 23 Sept\nStage 2: BTSA | collect JHB depot Fri 25 Sept → deliver PMB Sat 26 Sept',key+'-message');
 }
-client.on('ready',async()=>{
+let cbrReceiptRecoveryScheduled=false;
+client.on('ready',()=>{
  console.log('BTSA Scheduling Agent ready');
+ if(cbrReceiptRecoveryScheduled)return;
+ cbrReceiptRecoveryScheduled=true;
+ const earliest=Date.parse('2026-11-08T17:51:00Z');
+ const timer=setTimeout(recoverApprovedCbrPhotos,Math.max(0,earliest-Date.now()));timer?.unref?.();
+});
+async function recoverApprovedCbrPhotos(){
  // Reconcile the explicitly approved collection without ever resending uncertain text.
  const ref='SLA-526',order=operations.get(ref),details=order&&operations.details(ref);
  if(!details||order.status!=='Collected'||order.syncState!=='synced'||String(order.phone||'').replace(/\D/g,'').replace(/^0(?=\d{9}$)/,'27')!=='27606226069')return;
  const copy='Hi Johny! We’ve picked up your Honda CBR. Here are the photos we took at collection so you have a record of its condition. We’ll keep you posted on the trip to Johannesburg. Thanks, BTSA';
  const drafts=details.messages.filter(m=>m.kind==='Collected'&&m.state==='uncertain'&&m.text===copy);
  const photos=details.proofs.filter(p=>p.stage==='collection'&&p.status==='confirmed');
- const prior=db.prepare("SELECT 1 FROM dispatch_messages m LEFT JOIN dispatch_send_parts p ON p.message_id=m.id WHERE m.ref=? AND m.kind='Collected' AND (m.state IN ('sent','sending') OR p.message_id IS NOT NULL)").get(ref);
+ const prior=db.prepare("SELECT 1 FROM dispatch_messages m LEFT JOIN dispatch_send_parts p ON p.message_id=m.id WHERE m.ref=? AND m.kind='Collected' AND (m.state IN ('sent','sending') undefined").get(ref);
  if(drafts.length!==1||photos.length!==5||prior||!photos.every(p=>fs.existsSync(db.prepare('SELECT file_path FROM proofs WHERE id=?').get(p.id)?.file_path||'')))return;
  try{
   if(!process.env.SHARED_BRIDGE_URL)return;
@@ -1311,7 +1318,7 @@ client.on('ready',async()=>{
   const result=await communications.send(drafts[0].id,{operatorApproved:true,verifiedTextId:receipt.id});
   if(result.sent){console.log('CBR approved collection update sent: text plus five photos');await sendGroup('Johny’s collection update and all 5 photos were sent.','cbr-approval-completed-'+drafts[0].id);}
  }catch(e){console.error('CBR approved collection update did not complete:',e.message);}
-});
+}
 client.on('auth_failure',m=>console.error('WhatsApp auth failure:',m));
 client.on('disconnected',r=>console.error('WhatsApp disconnected:',r));
 
