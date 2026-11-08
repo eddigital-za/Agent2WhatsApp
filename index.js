@@ -177,13 +177,27 @@ async function getInboundMedia(message) {
       "Standard downloadMedia failed; using event-data fallback:",
       primaryError?.message || String(primaryError)
     );
-    const media = await downloadMediaFromEventData(message);
-    if (!media?.data) throw new Error("event-data fallback returned no data");
-    console.log("Event-data media fallback succeeded");
-    return media;
+    try {
+      const media = await downloadMediaFromEventData(message);
+      if (!media?.data) throw new Error("event-data fallback returned no data");
+      return media;
+    } catch (fallbackError) {
+      if (!process.env.ORDER_INTAKE_GROUP_ID || message.from !== process.env.ORDER_INTAKE_GROUP_ID || message.type !== "image") throw fallbackError;
+      const media = await require("./orders-photo-download").downloadPhoto(message._data);
+      console.log("Orders photo recovered through authenticated media fallback");
+      return media;
+    }
   }
 }
 
+
+const {createAlbumCollector,albumContext}=require("./orders-photo-album");
+async function forwardOrders(payload){
+  const response=await fetch(process.env.ORDER_INTAKE_WEBHOOK_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(45000)});
+  if(!response.ok)throw Error("Order intake HTTP "+response.status);
+  console.log("Message forwarded to Order Intake successfully");
+}
+const orderAlbums=createAlbumCollector({send:forwardOrders,legacy:forwardOrders});
 
 // Forward incoming WhatsApp messages to Make.com
 client.on("message", async (message) => {
@@ -223,6 +237,7 @@ client.on("message", async (message) => {
     }
 
     repairSerializedMessageId(message);
+    const orderAlbum=isGroup&&message.from===ORDER_INTAKE_GROUP_ID&&process.env.ORDER_INTAKE_WEBHOOK_URL?albumContext(message):null;
     const payload = {
       from: message.from,
       phone: message.from.replace("@c.us", ""),
@@ -243,8 +258,8 @@ client.on("message", async (message) => {
       media: null,
 
       // Reply/quoted-message context for conversational order lookup.
-      quotedText: null,
-      quotedMessageId: null,
+      quotedText: message._data?.quotedMsg?.body || message._data?.quotedMsg?.caption || null,
+      quotedMessageId: message._data?.quotedStanzaID || null,
       quotedAuthor: null,
       quotedFrom: null,
     };
@@ -254,8 +269,8 @@ client.on("message", async (message) => {
     if (message.hasQuotedMsg) {
       try {
         const quoted = await message.getQuotedMessage();
-        payload.quotedText = quoted?.body || "";
-        payload.quotedMessageId = quoted?.id?._serialized || "";
+        payload.quotedText = quoted?.body || payload.quotedText;
+        payload.quotedMessageId = quoted?.id?._serialized || payload.quotedMessageId;
         payload.quotedAuthor = quoted?.author || "";
         payload.quotedFrom = quoted?.from || "";
       } catch (quotedError) {
@@ -418,16 +433,8 @@ client.on("message", async (message) => {
     // This is additive: the existing Make/Social handoff remains unchanged.
     if (isGroup && message.from === ORDER_INTAKE_GROUP_ID && process.env.ORDER_INTAKE_WEBHOOK_URL) {
       try {
-        const intakeResponse = await fetch(process.env.ORDER_INTAKE_WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!intakeResponse.ok) {
-          console.error("Order intake webhook failed:", intakeResponse.status, await intakeResponse.text());
-        } else {
-          console.log("Message forwarded to Order Intake successfully");
-        }
+        if(orderAlbum?.parentId && orderAlbums.accept({...payload,media:null},orderAlbum)) return;
+        await forwardOrders(payload);
       } catch (intakeError) {
         console.error("Order intake forwarding failed:", intakeError?.message || intakeError);
       }
