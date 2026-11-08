@@ -688,7 +688,8 @@ async function inbound(message) {
     lastInboundAt = nowIso();
     if(message.from===GROUP_ID&&!message.hasMedia&&['approve','hold'].includes(communications.approvalAction(message.body))){
       if(canApproveInGroup(message)){
-        const reply=await communications.approveReply((await quotedContext(message)).ids,message.body);
+        const quote=await quotedContext(message);
+        const reply=await communications.approveReply(quote.ids,message.body,quote.text);
         await sendGroup(reply||'I couldn’t match that reply to a draft. Please reply directly to the latest customer preview.','dispatch-approval-reply-'+mid);
       }
       return;

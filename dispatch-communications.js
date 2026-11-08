@@ -33,16 +33,33 @@ function installCommunications({app,auth,db,operations,sendCustomer,sendApproval
  }
  function noteReply(number,body,eventKey){const normalized=phone(number);if(!normalized)return;const deliveries=db.prepare("SELECT * FROM dispatch_deliveries WHERE phone=? AND review_state IN ('waiting','ready','queued') ORDER BY sent_at DESC").all(normalized);for(const d of deliveries){const at=now();const negative=/\b(damag\w*|scratch\w*|broken|problem|issue|complain\w*|missing|stop|unsubscribe|do not contact|not received|not delivered|unhappy|wrong|late)\b/i.test(body);const positive=/^(?:(?:thank(?:s| you)|thanks so much|thank you so much|great|perfect|awesome|all good|received|got it|much appreciated|lekker|shot|cheers|ok|okay|yes)[\s!.,🙏👍🏼✅😊🙂❤❤️]*)+$/i.test(String(body||'').trim());const state=negative?'complaint':positive&&deliveries.length===1?'ready':'reply_review';db.prepare('UPDATE dispatch_deliveries SET reply_at=?,review_state=? WHERE id=?').run(at,state,d.id);operations.emit(d.ref,'customer-whatsapp','customer_replied',{text:String(body||'').slice(0,4000),reviewState:state},eventKey+'-'+d.id);if(state!=='ready'){db.prepare("UPDATE dispatch_messages SET state='held',reason='Customer reply needs review' WHERE id=? AND state='awaiting_approval'").run('review-'+d.id);operations.issue(d.ref,negative?'Customer delivery concern: review request held.':'Customer reply needs review before asking for a review.','reply-'+d.id);const o=operations.get(d.ref);if(o)operations.save({...o,complaintOpen:negative||o.complaintOpen},o.syncState);}}}
  function approvalAction(body){const action=String(body||'').trim().toLowerCase().replace(/[.!]+$/,'');return action==='approved'?'approve':action==='held'?'hold':action;}
- async function approveReply(ids,body){
+ function approvalPreview(o,m,photoCount){return 'Ready for your review: '+o.bike+' ('+o.externalId+')\n'+m.kind+(photoCount?' with '+photoCount+' '+(photoCount===1?'photo':'photos'):'')+'\n\nHere’s what the customer will get:\n'+m.text+'\n\nReply APPROVE to send '+(photoCount?'the message and photos':'the message')+', or HOLD to pause it.';}
+ const stanza=value=>String(value||'').match(/^(?:true|false)_[^_]+_([^_]+)/)?.[1]||String(value||'');
+ async function approveReply(ids,body,quotedText=''){
+
   const action=approvalAction(body);
   if(!['approve','hold'].includes(action))return null;
-  for(const id of ids){
-   const matches=db.prepare("SELECT message_id FROM dispatch_approval_quotes WHERE quote=? OR substr(quote,-length(?))=?").all(id,'_'+id,'_'+id);
-   if(matches.length!==1)continue;
-   const key=matches[0].message_id;
+  const candidates=new Set(ids.filter(Boolean).map(stanza));
+  const exact=db.prepare('SELECT quote,message_id FROM dispatch_approval_quotes').all().filter(row=>candidates.has(stanza(row.quote)));
+  let key=exact.length===1?exact[0].message_id:null;
+  if(exact.length>1)return null;
+  if(!key&&quotedText){
+   const ref=String(quotedText).match(/^Ready for your review: .+ \(((?:SLA|M)-\d+)\)\n/)?.[1];
+   const order=ref&&operations.get(ref);
+   if(order){
+    const proofs=operations.details(ref).proofs;
+    const normalize=value=>String(value||'').replace(/\r\n/g,'\n').trim();
+    const matches=db.prepare('SELECT * FROM dispatch_messages WHERE ref=?').all(ref).filter(m=>{
+     const stage=m.kind==='Collected'?'collection':m.kind==='Delivered'?'delivery':null;
+     const count=stage?proofs.filter(p=>p.stage===stage&&p.status==='confirmed').length:0;
+     return normalize(approvalPreview(order,m,count))===normalize(quotedText);
+    });
+    if(matches.length===1)key=matches[0].id;
+   }
+  }
+  if(!key)return null;
    if(action==='hold'){const result=db.prepare("UPDATE dispatch_messages SET state='held',reason='Held in WhatsApp' WHERE id=? AND state='awaiting_approval'").run(key);return result.changes?'Customer update held.':'This update is no longer awaiting approval.';}
    try{const result=await send(key);return result.alreadySent?'Customer update was already sent.':'Customer update sent.';}catch(e){return e.message;}
-  }return null;
  }
  async function tick(){const c=config(),withinHours=hours(c);
  if(withinHours){
@@ -56,7 +73,7 @@ for(const d of db.prepare("SELECT * FROM dispatch_deliveries WHERE review_state 
     const stage=m.kind==='Collected'?'collection':m.kind==='Delivered'?'delivery':null;
     const photoCount=stage?operations.details(o.externalId).proofs.filter(p=>p.stage===stage&&p.status==='confirmed').length:0;
     if(stage&&!photoCount)continue;
-    const result=await sendApproval('Ready for your review: '+o.bike+' ('+o.externalId+')\n'+m.kind+(photoCount?' with '+photoCount+' '+(photoCount===1?'photo':'photos'):'')+'\n\nHere’s what the customer will get:\n'+m.text+'\n\nReply APPROVE to send '+(photoCount?'the message and photos':'the message')+', or HOLD to pause it.','dispatch-approval-'+m.id);
+    const result=await sendApproval(approvalPreview(o,m,photoCount),'dispatch-approval-'+m.id);
     if(result.messageId)db.prepare('INSERT OR IGNORE INTO dispatch_approval_quotes VALUES(?,?)').run(result.messageId,m.id);
    }return;
   }if(!withinHours)return;for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' ORDER BY created_at LIMIT 10").all()){const o=operations.get(m.ref);if(m.created_at<(c.autoEnabledAt||now())||blocked(o,m))continue;try{await send(m.id);}catch(e){if(e.status!==409)console.error('Customer message held:',e.message);}}
