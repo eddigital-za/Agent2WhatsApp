@@ -6,11 +6,16 @@ const fetchMock=async(url,options={})=>{if(url==='https://example.invalid/histor
 process.env.DISPATCH_URL='https://example.invalid/dispatch';process.env.DISPATCH_API_KEY='test-token';
 const context=vm.createContext({console,Buffer,FormData,Blob,URLSearchParams,Date,process:{env:{OPENAI_API_KEY:'fake',ORDERS_GROUP_ID:'123@g.us',WHATSAPP_SEND_URL:'https://example.invalid/send',COMMIT_WEBHOOK_URL:'https://example.invalid/commit',HISTORY_WEBHOOK_URL:'https://example.invalid/history',DATA_DIR:'work-test-state/intake'}},fetch:fetchMock,require:name=>{if(name==='express')return express;if(name==='node:sqlite')return {DatabaseSync:class{constructor(){return db}}};if(name==='./sales-reasoner')return {installSalesReasoner(){}};if(name==='./dispatch-intake')return {createIntakeBridge:options=>require('./dispatch-intake').createIntakeBridge({...options,requestFetch:fetchMock})};return require(name)}});
 vm.runInContext(fs.readFileSync('order-intake.js','utf8'),context);
-async function incoming(text,id){let result,status=200;await routes['POST /inbound'].at(-1)({body:{from:'123@g.us',author:'operator',text,messageId:id}},{json(v){result=v;return this},status(n){status=n;return this}});return {status,result};}
+async function incoming(text,id,quotedText){let result,status=200;await routes['POST /inbound'].at(-1)({body:{from:'123@g.us',author:'operator',text,messageId:id,quotedText}},{json(v){result=v;return this},status(n){status=n;return this}});return {status,result};}
 (async()=>{
  await incoming('New manual order - Example bike DBN to JHB R2500','new-1');assert.equal(aiCalls,1);assert.equal(dispatchCalls.length,1);assert.equal(webhookCalls,0);assert.ok(db.prepare('SELECT 1 FROM drafts').get());
  await incoming('Please send me this imvoice','invoice-1');assert.equal(aiCalls,1);assert.equal(webhookCalls,0);assert.ok(db.prepare('SELECT 1 FROM drafts').get());
  await incoming('SLA511 delivered','update-1');assert.equal(aiCalls,1);assert.ok(dispatchCalls.at(-1).url.endsWith('/ingest'));
+ const schedule='Collection scheduled for Monday 9 November. Delivery scheduled for Tuesday 10 November. Assigned to BTSA';
+ const quote='New Order - JHB to DBN - R2500\nMake and Model: BMW GS 850';
+ const count=dispatchCalls.length;
+ await incoming(schedule,'quoted-schedule-1',quote);
+ assert.equal(dispatchCalls.length,count+1);assert.equal(dispatchCalls.at(-1).body.quotedText,quote);assert.equal(aiCalls,1);assert.equal(webhookCalls,0);
  intent='confirm';await incoming('Save it','confirm-1');assert.equal(webhookCalls,1);assert.equal(db.prepare('SELECT COUNT(*) n FROM drafts').get().n,0);await incoming('Save it','confirm-1');assert.equal(webhookCalls,1);
  console.log('PASS: existing order-agent draft flows, shared manual reference, invoice-intent guard, dispatch forwarding, one legacy commit, committed-message deduplication. No real services used.');
 })().catch(e=>{console.error(e);process.exitCode=1});

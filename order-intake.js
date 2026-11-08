@@ -226,7 +226,7 @@ app.post('/inbound',async(req,res)=>{
   if(p.albumError||Array.isArray(p.albumPhotos)){if(await dispatchBridge.forward(p))return res.json({recorded:true});return res.status(503).json({error:'Dispatch is not connected'});}
   if(p.mediaData&&!existing&&!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text)){if(await dispatchBridge.forward(p))return res.json({recorded:true});}
   if(/\b(invoice|imvoice|invoiced|quickbooks|payment|paid|statement|receipt)\b/i.test(p.text)&&!(/\b(delivered|complete|completed|collected|in transit)\b/i.test(p.text)&&/\b(?:SLA?[ -]?\d+|M-?\d+)\b/i.test(p.text))&&!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text))return res.json({ignored:true,reason:'finance_intent'});
-  if(!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text)&&/\b(delivered|complete|completed|collected|in[ -]?transit|handover|depot|assigned|collection scheduled|delivery scheduled)\b/i.test(p.text)&&(/\b(?:SL(?:A)?[ -]?\d+|M-?\d+)\b/i.test(p.text)||p.hasMedia||p.mediaData)){
+  if(!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text)&&/\b(delivered|complete|completed|collected|in[ -]?transit|handover|depot|assigned|collection scheduled|delivery scheduled)\b/i.test(p.text)&&(/\b(?:SL(?:A)?[ -]?\d+|M-?\d+)\b/i.test(p.text)||p.hasMedia||p.mediaData||/^\s*\*?New Order\s*-/i.test(String(p.quotedText||'')))){
    if(await dispatchBridge.forward(p))return res.json({recorded:true});
   }
 
