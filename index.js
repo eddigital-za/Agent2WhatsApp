@@ -47,9 +47,10 @@ const sharedBridge = installBridge(app, client, MessageMedia);
 
 
 let latestQr = null;
+let gatewayReady = false;
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, whatsappReady: Boolean(client.info) });
+  res.json({ok:true,whatsappReady:gatewayReady,ordersAlbumRelease:true});
 });
 
 app.get("/qr", (req, res) => {
@@ -96,7 +97,9 @@ client.on("qr", (qr) => {
 });
 
 // Log when the WhatsApp client is ready
+client.on("disconnected", () => {gatewayReady=false;});
 client.on("ready", () => {
+  gatewayReady=true;
   console.log("WhatsApp Session is Ready and Connected!");
 });
 
