@@ -29,9 +29,11 @@ function installCommunications({app,auth,db,operations,sendCustomer,sendApproval
    try{const result=await send(key);return result.alreadySent?'Customer update was already sent.':'Customer update sent.';}catch(e){return e.message;}
   }return null;
  }
- async function tick(){const c=config();if(!hours(c))return;
+ async function tick(){const c=config(),withinHours=hours(c);
+ if(withinHours){
  for(const o of operations.all()){if(closed(o.status)||o.actualCollection||o.collection?.confidence!=='confirmed'||o.collection.precision==='week'||o.collection.date!==localDay(now()))continue;const id='collection-reminder-'+o.externalId+'-'+o.collection.date;db.prepare('INSERT OR IGNORE INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id,o.externalId,'Collection reminder','awaiting_approval','A reminder that your motorcycle collection is scheduled for '+o.collection.date+(o.collection.time?' at '+o.collection.time:'')+'. We will keep you updated.',now(),'Confirmed collection date; customer recipient must be verified.');}
 for(const d of db.prepare("SELECT * FROM dispatch_deliveries WHERE review_state IN ('waiting','ready')").all()){const o=operations.get(d.ref);if(!o||o.complaintOpen||o.status!=='Delivered')continue;const due=reviewDue(d.sent_at,d.reply_at,now(),c);if(!due||due>now())continue;const id='review-'+d.id;const content=c.reviewText+'\n'+c.reviewLink;db.prepare('INSERT OR IGNORE INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id,d.ref,'Review request','awaiting_approval',content,now(),'Delivery message and photos sent; review timing satisfied.');db.prepare("UPDATE dispatch_deliveries SET review_state='queued' WHERE id=?").run(d.id);}
+ }
   // Customer automation is opt-in; before configuration, every message stays a draft.
   if(c.autoSend!==true){
    if(sendApproval)for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' AND created_at>=? AND id NOT IN (SELECT message_id FROM dispatch_approval_quotes) ORDER BY created_at").all(approvalStart)){
@@ -41,7 +43,7 @@ for(const d of db.prepare("SELECT * FROM dispatch_deliveries WHERE review_state 
     const result=await sendApproval(o.externalId+' · '+o.bike+' · '+m.kind+'\n\n'+m.text+'\n\nReply APPROVE to send to the customer, or HOLD.','dispatch-approval-'+m.id);
     if(result.messageId)db.prepare('INSERT OR IGNORE INTO dispatch_approval_quotes VALUES(?,?)').run(result.messageId,m.id);
    }return;
-  }for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' ORDER BY created_at LIMIT 10").all()){const o=operations.get(m.ref);if(m.created_at<(c.autoEnabledAt||now())||blocked(o,m))continue;try{await send(m.id);}catch(e){if(e.status!==409)console.error('Customer message held:',e.message);}}
+  }if(!withinHours)return;for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' ORDER BY created_at LIMIT 10").all()){const o=operations.get(m.ref);if(m.created_at<(c.autoEnabledAt||now())||blocked(o,m))continue;try{await send(m.id);}catch(e){if(e.status!==409)console.error('Customer message held:',e.message);}}
  }
  const route=(method,path,fn)=>app[method](path,auth,async(req,res)=>{try{res.json(await fn(req));}catch(e){res.status(e.status||500).json({error:e.message});}});
  route('post','/dispatch/communication-settings',req=>{const p=req.body||{},c=config();for(const k of ['reviewText','reviewLink','eveningCutoff','morningTime'])if(p[k]!==undefined)c[k]=String(p[k]).trim().slice(0,k==='reviewText'?3000:500);for(const k of ['morningTime','eveningCutoff'])if(c[k]&&!/^([01]\d|2[0-3]):[0-5]\d$/.test(c[k]))throw Object.assign(Error('Invalid customer sending hours'),{status:400});if(c.morningTime&&c.eveningCutoff&&c.morningTime>=c.eveningCutoff)throw Object.assign(Error('Morning time must precede evening cutoff'),{status:400});if(c.reviewLink&&!/^https:\/\/[^\s]+$/.test(c.reviewLink))throw Object.assign(Error('Review link must be an HTTPS URL'),{status:400});if(p.autoSend!==undefined){if(p.autoSend===true&&c.autoSend!==true)c.autoEnabledAt=now();c.autoSend=p.autoSend===true;}db.prepare('UPDATE dispatch_settings SET data=? WHERE id=1').run(JSON.stringify(c));operations.emit(null,'dashboard','communication_settings_updated',{...c});return c;});

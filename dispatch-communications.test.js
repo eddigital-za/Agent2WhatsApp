@@ -6,7 +6,7 @@ async function delivered(s){const o=await s.ops.createAndSync({bike:'Test bike',
  s=setup();d=await delivered(s);s.configure();await s.comm.send(d.msg.id);s.setTime('2026-11-08T08:02:00.000Z');s.comm.noteReply('27821234567','Thanks!','reply2');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,1);
  s=setup();d=await delivered(s);s.configure();s.setFail(true);await assert.rejects(()=>s.comm.send(d.msg.id),/uncertain/);assert.equal(s.db.prepare('SELECT state FROM dispatch_messages WHERE id=?').get(d.msg.id).state,'uncertain');await assert.rejects(()=>s.comm.send(d.msg.id),/outcome/);assert.equal(s.sends(),1);assert.equal(s.db.prepare('SELECT COUNT(*) n FROM dispatch_deliveries').get().n,0);
  s=setup();d=await delivered(s);s.configure();s.setTime('2026-11-08T17:50:00.000Z');await s.comm.send(d.msg.id);s.setTime('2026-11-08T18:25:00.000Z');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,0);s.setTime('2026-11-09T06:00:00.000Z');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,1);
- const prompts=[];s=setup(async(text,key)=>{prompts.push({text,key});return {messageId:'group_quote_'+prompts.length};});s.configure();
+ const prompts=[];s=setup(async(text,key)=>{prompts.push({text,key});return {messageId:'group_quote_'+prompts.length};});
  const scheduled=await s.ops.createAndSync({bike:'Test bike',phone:'0821234567',status:'Pending'},'test-schedule-order');
  const dates={collection:{date:'2026-11-09',confidence:'confirmed',precision:'day'},delivery:{date:'2026-11-10',confidence:'confirmed',precision:'day'}};
  s.ops.update(scheduled.externalId,dates,undefined,'test');s.ops.update(scheduled.externalId,dates,undefined,'test');
@@ -14,6 +14,7 @@ async function delivered(s){const o=await s.ops.createAndSync({bike:'Test bike',
  s.ops.save(s.ops.get(scheduled.externalId),'synced');
  await s.comm.tick();await s.comm.tick();assert.equal(prompts.length,2);assert.equal(s.sends(),0);
  assert.equal(await s.comm.approveReply(['wrong-quote'],'APPROVE'),null);
+ assert.match(await s.comm.approveReply(['group_quote_1'],'APPROVE'),/sending hours/);
  assert.equal(await s.comm.approveReply(['group_quote_1'],'HOLD'),'Customer update held.');
  assert.equal(s.ops.details(scheduled.externalId).messages.filter(m=>m.state==='held').length,1);
  assert.equal(s.sends(),0);
