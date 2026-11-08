@@ -32,4 +32,15 @@ function interpret(text,available,base=new Date()){
  return out;
 }
 function reviewDue(deliveredAt,replyAt,now,config){if(!config?.reviewText||!config?.reviewLink||!config?.eveningCutoff||!config?.morningTime)return null;const trigger=replyAt?new Date(replyAt):new Date(new Date(deliveredAt).getTime()+30*60000);let day=localDay(trigger);const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Johannesburg',hour:'2-digit',minute:'2-digit',hour12:false}).format(trigger);if(parts>=config.eveningCutoff)day=addDay(day,1);if(parts>=config.eveningCutoff||parts<config.morningTime)return new Date(day+'T'+config.morningTime+':00+02:00').toISOString();return trigger.toISOString();}
-module.exports={STATUSES,closed,canonical,refs,segments,localDay,when,stageText,contractorNames,interpret,reviewDue};
+function customerGreeting(o){
+ const first=String(o.clientName||'').trim().split(/\s+/)[0];
+ const name=/^\p{L}[\p{L}'’-]{0,39}$/u.test(first)?first[0].toLocaleUpperCase()+(first===first.toLocaleUpperCase()?first.slice(1).toLocaleLowerCase():first.slice(1)):'';
+ return name?'Hi '+name+'! ':'Hi! ';
+}
+const collectionComplete=o=>!!o.actualCollection||['Collected','In Transit','Delivered'].includes(o.status);
+function customerDate(eta){
+ const date=new Date(eta.date+'T12:00:00+02:00');
+ const label=new Intl.DateTimeFormat('en-ZA',{weekday:'long',day:'numeric',month:'long',timeZone:'Africa/Johannesburg'}).format(date);
+ return label+(eta.time?' at '+eta.time:eta.window?' ('+eta.window+')':'');
+}
+module.exports={customerGreeting,collectionComplete,customerDate,STATUSES,closed,canonical,refs,segments,localDay,when,stageText,contractorNames,interpret,reviewDue};
