@@ -240,19 +240,36 @@ client.on("ready",async()=>{
  try{
   const group=process.env.ORDER_INTAKE_GROUP_ID;
   if(!ids.every(id=>id.startsWith("false_"+group+"_")))throw Error("Recovery IDs do not belong to Orders");
-  const chat=await client.getChatById(group);
-  const history=await chat.fetchMessages({limit:80});
-  const parts=ids.map(id=>history.find(m=>m.id?.id===id.split("_")[2]));
+  console.log("Orders recovery: locating exact image IDs");
+  const found=await client.pupPage.evaluate(async (ids)=>{
+    const Msg=window.require("WAWebCollections").Msg;
+    const out=[];
+    for(const serialized of ids){
+      const bare=serialized.split("_")[2];
+      let m=Msg.getModelsArray().find(x=>x.id?.id===bare);
+      if(!m)try{m=(await Msg.getMessagesById([serialized]))?.messages?.find(x=>x.id?.id===bare);}catch{}
+      if(!m){out.push(null);continue;}
+      const plain=window.WWebJS.getMessageModel(m);
+      try{const q=window.require("WAWebQuotedMsgModelUtils").getQuotedMsgObj(m);if(q)plain.recoveryQuote={body:q.body||q.caption,id:q.id?._serialized};}catch{}
+      out.push(plain);
+    }
+    return out;
+  },ids);
+  const Message=require("whatsapp-web.js/src/structures/Message");
+  const parts=found.map(raw=>raw?new Message(client,raw):null);
   if(parts.some(m=>!m||m.from!==group||m.type!=="image"))throw Error("Selected album photos are not all present in WhatsApp history");
   const parents=new Set(parts.map(m=>albumContext(m).parentId));
   if(parents.size!==1||parents.has(""))throw Error("Recovery photos do not share one album");
   const anchor=parts.find(m=>/^collected[.!]?$/i.test(m.body||"")&&m.hasQuotedMsg);
   if(!anchor)throw Error("The selected album has no quoted collection update");
-  const quoted=await anchor.getQuotedMessage();
+  let quoted=anchor._data?.recoveryQuote;
+  if(!quoted?.body)try{quoted=await anchor.getQuotedMessage();}catch{}
+  if(!quoted?.body&&anchor._data?.quotedMsg)quoted={body:anchor._data.quotedMsg.body||anchor._data.quotedMsg.caption,id:anchor._data.quotedStanzaID};
   if(!quoted?.body)throw Error("Original booking quote not available");
+  console.log("Orders recovery: matched all image IDs and original quote");
   const photos=await Promise.all(parts.map(getInboundMedia));
   if(photos.reduce((n,p)=>n+p.data.length,0)>18000000)throw Error("Recovered album exceeds intake size");
-  await forwardOrders({from:group,author:anchor.author,messageId:"recovery-"+[...parents][0],text:anchor.body,hasMedia:true,quotedText:quoted.body,quotedMessageId:quoted.id?._serialized,albumPhotos:photos.map(p=>({type:p.mimetype,data:p.data}))});
+  await forwardOrders({from:group,author:anchor.author,messageId:"recovery-"+[...parents][0],text:anchor.body,hasMedia:true,quotedText:quoted.body,quotedMessageId:quoted.id?._serialized||quoted.id,albumPhotos:photos.map(p=>({type:p.mimetype,data:p.data}))});
   console.log("Orders recovery forwarded:",photos.length,"photos");
  }catch(e){console.error("Orders album recovery held:",e.message);}
 });
