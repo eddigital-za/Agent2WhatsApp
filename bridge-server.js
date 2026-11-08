@@ -57,7 +57,7 @@ function installBridge(app,client,MessageMedia) {
       if(media&&(!media.mimetype||typeof media.data!=="string"))return res.status(400).json({error:"Invalid media"});
       const message=media?new MessageMedia(media.mimetype,media.data,media.filename):text;
       const sent=await client.sendMessage(chatId,message,options||{});
-      res.json({success:true,id:{_serialized:sent?.id?._serialized||""}});
+      res.json({success:true,id:{_serialized:sent?.id?._serialized||sent?.id?.$1||sent?.id?.id||""}});
     }catch(e){console.error("Shared outbound failed:",e.message);res.status(500).json({error:"Send outcome requires reconciliation"});}
   });
   client.on("ready", () => {
