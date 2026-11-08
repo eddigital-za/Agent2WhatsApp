@@ -682,6 +682,10 @@ async function inbound(message) {
       return;
     }
     lastInboundAt = nowIso();
+    if(message.from===GROUP_ID&&/^(approve|hold)$/i.test(String(message.body||'').trim())&&APPROVAL_AUTHORS.has(message.author||message._data?.author)){
+      const reply=await communications.approveReply((await quotedContext(message)).ids,message.body);
+      if(reply){await sendGroup(reply,'dispatch-approval-reply-'+mid);return;}
+    }
     if(!message.hasMedia&&await handleOperationalText(message,mid))return;
     const ingested = message.body ? await ingestGroupOrder(message.body, mid) : null;
     if (ingested) {
@@ -849,7 +853,8 @@ const operations=require('./dispatch-operations').createOperations({db,contracto
  }
 }});
 operations.install(app,auth);
-const communications=require('./dispatch-communications').installCommunications({app,auth,db,operations,sendCustomer:async({phone,text,proofs,onPart})=>{
+const APPROVAL_AUTHORS=new Set((process.env.DISPATCH_APPROVAL_AUTHORS||'').split(',').map(s=>s.trim()).filter(Boolean));
+const communications=require('./dispatch-communications').installCommunications({app,auth,db,operations,sendApproval:APPROVAL_AUTHORS.size?sendGroup:null,sendCustomer:async({phone,text,proofs,onPart})=>{
  if(!WHATSAPP_OUTBOUND_ENABLED||SHADOW_MODE)throw new Error('Customer sending is disabled in this environment.');if(!client.info)throw new Error('WhatsApp is not ready.');const parts=[];let index=0;
  const send=async content=>{const result=await client.sendMessage(phone+'@c.us',content);const id=result?.id?._serialized;if(!id)throw new Error('WhatsApp send outcome is uncertain');onPart(index++,id);parts.push(id);};
  await send(text);for(const proof of proofs){if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');await send(new MessageMedia(proof.mime_type,fs.readFileSync(proof.file_path).toString('base64'),proof.filename));}return parts;
