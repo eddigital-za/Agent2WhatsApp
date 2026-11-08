@@ -31,6 +31,9 @@ async function call(method,path,body={},params={}){let result,status=200;const r
  const duplicate=[...honda];duplicate[0]='527';duplicate[1]='Pending';duplicate[37]='2123456789abcdef';sheetRows.push(duplicate);
  await call('GET','/dispatch/workspace');
  response=await call('POST','/dispatch/ingest',{...proof,messageId:'ambiguous-quote'});assert.equal(response.status,200);assert.equal(duplicate[1],'Pending');
+ const photoUpload={stage:'delivery',photos:[{type:'image/jpeg',data:'/9j/AQ=='},{type:'image/jpeg',data:'/9j/Ag=='}]};
+ response=await call('POST','/dispatch/order/:ref/photos',photoUpload,{ref:'SLA-511'});assert.equal(response.status,200);assert.equal(response.result.proofs.length,2);
+ response=await call('POST','/dispatch/order/:ref/photos',photoUpload,{ref:'SLA-511'});assert.equal(response.result.proofs.length,2);
  const record=await call('GET','/dispatch/order/:ref',{}, {ref:'SLA-511'});assert.equal(record.result.order.status,'Delivered');assert.ok(record.result.events.length);assert.equal(record.result.messages[0].state,'awaiting_approval');assert.equal(sent.every(m=>m.group==='12345@g.us'),true);
  console.log('PASS: complete scheduler boot and authenticated routes, manual create/read/edit, exact sheet-column writeback, idempotent retries, WhatsApp-to-sheet-to-dashboard completion, deduplicated acknowledgement, timeline and held client message. All network and WhatsApp mocked.');
 })().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>{for(const db of sqlite)db.close()});
