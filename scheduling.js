@@ -865,16 +865,30 @@ const APPROVAL_AUTHORS=new Set((process.env.DISPATCH_APPROVAL_AUTHORS||'').split
 function canApproveInGroup(message){return GROUP_ID.endsWith('@g.us')&&message.from===GROUP_ID&&(APPROVAL_AUTHORS.has('*')||APPROVAL_AUTHORS.has(message.author||message._data?.author));}
 const customerBridgeUrl=process.env.CUSTOMER_WHATSAPP_BRIDGE_URL;
 const customerClient=customerBridgeUrl?new SharedClient(customerBridgeUrl):null;
+async function customerSenderReady(){
+ if(!customerClient)return false;
+ const status=await bridgeRequest(customerBridgeUrl,'/bridge/status');
+ return status.whatsappReady&&status.accountPrefix==='2772';
+}
+if(customerClient){
+ const checkCustomerSender=async()=>{
+  try{if(await customerSenderReady()){console.log('Dispatch customer sender verified as 072');clearInterval(customerSenderCheck);}}
+  catch(e){console.error('Dispatch customer sender verification failed:',e.message);}
+ };
+ const customerSenderCheck=setInterval(checkCustomerSender,15000);
+ customerSenderCheck.unref();
+ void checkCustomerSender();
+}
 const communications=require('./dispatch-communications').installCommunications({
  app,auth,db,operations,sendApproval:GROUP_ID.endsWith('@g.us')&&APPROVAL_AUTHORS.size?sendGroup:null,
  prepareCustomerSend:async({text,proof})=>{
   const hold=message=>Object.assign(new Error(message),{status:409});
   if(!WHATSAPP_OUTBOUND_ENABLED||SHADOW_MODE)throw hold('Customer sending is disabled in this environment.');
   if(!customerClient)throw hold('Customer update is still pending. Connect the 072 WhatsApp sender before sending.');
-  let status;
-  try{status=await bridgeRequest(customerBridgeUrl,'/bridge/status');}
+  let ready;
+  try{ready=await customerSenderReady();}
   catch{throw hold('Customer update is still pending. The 072 WhatsApp sender could not be reached.');}
-  if(!status.whatsappReady||status.accountPrefix!=='2772')
+  if(!ready)
    throw hold('Customer update is still pending. The connected sender could not be verified as 072.');
   if(!proof)return {content:text,options:{waitUntilMsgSent:true}};
   let data;
