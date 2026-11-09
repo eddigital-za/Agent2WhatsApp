@@ -1,3 +1,4 @@
+try { require("./patch-whatsapp-media-send"); } catch (error) { console.error("WhatsApp media compatibility patch unavailable:", error.message); }
 const { SharedClient, installIngress, request: bridgeRequest, auth } = require("./shared-transport");
 const { installOutboundSafety } = require("./outbound-safety");
 const express = require("express");
@@ -462,7 +463,22 @@ async function maybeSendDailyReport() {
 }
 
 client.on("qr", qr => { latestQr = qr; console.log("New WhatsApp QR generated. Open /qr to scan it."); });
-client.on("authenticated", () => { latestQr = null; console.log("WhatsApp authenticated."); });
+let startupTimer;
+let startupRecoveryUsed = false;
+client.on("authenticated", () => {
+  latestQr = null;
+  console.log("WhatsApp authenticated.");
+  if (startupRecoveryUsed || startupTimer || !client.pupPage) return;
+  startupTimer = setTimeout(async () => {
+    if (startupRecoveryUsed || !client.pupPage || client.pupPage.isClosed()) return;
+    startupRecoveryUsed = true;
+    console.warn("072 authenticated without readiness; reloading the existing session once.");
+    try { await client.pupPage.reload({ waitUntil: "domcontentloaded", timeout: 30000 }); }
+    catch (error) { console.error("072 startup recovery failed:", error.name); }
+  }, 35000);
+  startupTimer.unref();
+});
+client.once("ready", () => clearTimeout(startupTimer));
 client.on("loading_screen", (percent, message) => console.log("WhatsApp loading:", percent, message));
 client.on("change_state", state => console.log("WhatsApp state:", state));
 client.on("ready", () => console.log("BTSA Lead WhatsApp service is ready."));
