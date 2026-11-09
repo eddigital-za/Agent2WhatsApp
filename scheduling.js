@@ -1173,43 +1173,53 @@ async function dueReminders(){
     recalc(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
   }
 }
+function formatDispatchBrief(open,today){
+  const noon=new Date(today+'T12:00:00+02:00');
+  const tomorrow=localDate(new Date(noon.getTime()+86400000));
+  const dayLabel=date=>new Intl.DateTimeFormat('en-ZA',{timeZone:TZ,weekday:'short',day:'numeric',month:'short'}).format(date).replaceAll(',','');
+  const stampDay=value=>value&&Number.isFinite(Date.parse(value))?localDate(new Date(value)):'';
+  const clean=value=>String(value||'').replace(/[\s*_~`]+/g,' ').trim();
+  const route=value=>clean(value).replace(/\s+to\s+/gi,' → ');
+  const job=o=>['*'+(clean(o.bike).replace(/\b2,0(?=\d{2}\b)/g,'20')||'Motorcycle')+'*',dispatchDomain.customerFirstName({clientName:o.client_name}).replace(/^\p{L}$/u,''),route(o.route)].filter(Boolean).join(' · ');
+  const time=value=>String(value||'').includes('T')?new Intl.DateTimeFormat('en-ZA',{timeZone:TZ,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(value)):'';
+  const line=(o,value)=>[time(value),job(o)].filter(Boolean).join(' · ');
+  const confirmed=(o,stage)=>o[stage+'_confidence']==='confirmed'?stampDay(o[stage+'_at']):'';
+  const collected=o=>['collected','in_transit'].includes(o.status);
+  const pendingPickup=open.filter(o=>!collected(o));
+  const pickups=pendingPickup.filter(o=>confirmed(o,'collection')===today);
+  const drops=open.filter(o=>confirmed(o,'delivery')===today);
+  const overdue=[
+    ...open.filter(o=>confirmed(o,'delivery')&&confirmed(o,'delivery')<today).map(o=>[o,'Delivery date passed',o.delivery_at]),
+    ...pendingPickup.filter(o=>confirmed(o,'collection')&&confirmed(o,'collection')<today).map(o=>[o,'Pickup date passed',o.collection_at]),
+  ];
+  const unassigned=open.filter(o=>!clean(o.contractor||o.transport_method)).length;
+  const missingEta=open.filter(o=>collected(o)&&!confirmed(o,'delivery')).length;
+  const tomorrowPickups=pendingPickup.filter(o=>confirmed(o,'collection')===tomorrow);
+  const tomorrowDrops=open.filter(o=>confirmed(o,'delivery')===tomorrow);
+  const count=(n,label)=>n+' '+label+(n===1?'':'s');
+  const lines=['*BTSA DISPATCH · '+dayLabel(noon).toUpperCase()+'*',count(pickups.length,'pickup')+' · '+count(drops.length,'drop-off')+' · '+open.length+' open'];
+  const section=(title,items)=>{if(items.length)lines.push('',title,...items);};
+  section('🟢 *PICK UP TODAY*',pickups.map(o=>line(o,o.collection_at)));
+  section('🔵 *DROP OFF TODAY*',drops.map(o=>line(o,o.delivery_at)));
+  if(!pickups.length&&!drops.length)lines.push('','No confirmed stops today.');
+  section('🔴 *CHASE FIRST*',overdue.map(([o,reason,value])=>job(o)+'\n'+reason+' · '+dayLabel(new Date(value))));
+  section('🟠 *ALSO NEEDS ACTION*',[
+    missingEta&&(count(missingEta,'bike')+' in transit '+(missingEta===1?'needs':'need')+' a confirmed delivery ETA'),
+    unassigned&&(count(unassigned,'bike')+' '+(unassigned===1?'needs':'need')+' a contractor'),
+  ].filter(Boolean));
+  section('📅 *TOMORROW*',[
+    ...tomorrowPickups.map(o=>'Pick up · '+line(o,o.collection_at)),
+    ...tomorrowDrops.map(o=>'Drop off · '+line(o,o.delivery_at)+(pickups.includes(o)?' · pickup due today':''))
+  ]);
+  return [...lines,'','Full schedule in BTSA Dispatch.'].join('\n');
+}
 async function summary(period,requestedKey=''){
   await syncSlaSheet();
   if(!lastSheetSync.ok)throw new Error('Schedule report withheld: '+lastSheetSync.error);
   const key=requestedKey||`${period}-summary-${localDate()}`;
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND (external_id GLOB 'M-[0-9]*' OR (external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380)) ORDER BY contractor COLLATE NOCASE, CAST(substr(external_id,5) AS INTEGER)").all();
-  const today=localDate();
-  const dateOnly=v=>v ? new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v)) : '';
-  const collectionsToday=open.filter(o=>dateOnly(o.collection_at)===today).length;
-  const deliveriesToday=open.filter(o=>dateOnly(o.delivery_at)===today).length;
-  const inTransit=open.filter(o=>o.status==='in_transit').length;
-  const scheduled=open.filter(o=>o.status==='scheduled').length;
-  const unscheduled=open.filter(o=>o.status==='unscheduled').length;
-  const needsAttention=open.filter(o=>!o.collection_at||!o.delivery_at||!(o.contractor||o.transport_method)).length;
-  const groups=new Map();
-  for(const o of open){
-    const via=o.contractor||o.transport_method||'UNASSIGNED';
-    if(!groups.has(via))groups.set(via,[]);
-    groups.get(via).push(o);
-  }
-  const sections=[...groups.entries()].map(([via,orders])=>{
-    const cards=orders.map(o=>[
-      `*${o.external_id} | ${o.bike||'Motorcycle'}*`,
-      `Route: ${o.route||'Not recorded'}`,
-      `C: ${fmt(o.collection_at)}`,
-      `D: ${fmt(o.delivery_at)}`,
-      `Status: ${String(o.status).replaceAll('_',' ')}`
-    ].join('\n')).join('\n\n');
-    return `*${via}*\n${cards}`;
-  }).join('\n\n──────────\n\n');
-  const text=[
-    `📋 *Morning schedule | ${open.length} open*`,
-    `Today: ${collectionsToday} collections | ${deliveriesToday} deliveries`,
-    `Scheduled: ${scheduled} | In transit: ${inTransit} | Unscheduled: ${unscheduled} | Needs attention: ${needsAttention}`,
-    '',
-    sections
-  ].join('\n');
+  const text=formatDispatchBrief(open,localDate());
   const sent=await sendGroup(text,key);
   if(!sent.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
