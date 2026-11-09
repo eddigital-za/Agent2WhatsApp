@@ -464,21 +464,40 @@ async function maybeSendDailyReport() {
 
 client.on("qr", qr => { latestQr = qr; console.log("New WhatsApp QR generated. Open /qr to scan it."); });
 let startupTimer;
-let startupRecoveryUsed = false;
+let startupRecoveryAttempts = 0;
+let customerReady = false;
+let recoveryInProgress = false;
 client.on("authenticated", () => {
   latestQr = null;
   console.log("WhatsApp authenticated.");
-  if (startupRecoveryUsed || startupTimer || !client.pupPage) return;
-  startupTimer = setTimeout(async () => {
-    if (startupRecoveryUsed || !client.pupPage || client.pupPage.isClosed()) return;
-    startupRecoveryUsed = true;
-    console.warn("072 authenticated without readiness; reloading the existing session once.");
-    try { await client.pupPage.reload({ waitUntil: "domcontentloaded", timeout: 30000 }); }
-    catch (error) { console.error("072 startup recovery failed:", error.name); }
+  if (customerReady || startupTimer) return;
+  startupTimer = setTimeout(() => {
+    startupTimer = null;
+    recoverCustomerSession().catch(error => console.error("072 readiness recovery error:", error.message));
   }, 35000);
   startupTimer.unref();
 });
-client.once("ready", () => clearTimeout(startupTimer));
+client.on("ready", () => {
+  customerReady = true;
+  startupRecoveryAttempts = 0;
+  if (startupTimer) clearTimeout(startupTimer);
+  startupTimer = null;
+});
+client.on("disconnected", () => { customerReady = false; });
+async function recoverCustomerSession() {
+  if (customerReady || client.info || recoveryInProgress || !client.pupPage || client.pupPage.isClosed()) return;
+  recoveryInProgress = true;
+  startupRecoveryAttempts++;
+  console.warn("072 authenticated but not ready; reloading session", startupRecoveryAttempts);
+  try { await client.pupPage.reload({ waitUntil: "domcontentloaded", timeout: 30000 }); }
+  catch (error) { console.error("072 readiness reload failed:", error.message); }
+  finally { recoveryInProgress = false; }
+}
+setInterval(() => {
+  if (!customerReady && !client.info && !startupTimer && startupRecoveryAttempts < 6) {
+    recoverCustomerSession().catch(error => console.error("072 readiness watchdog:", error.message));
+  }
+}, 90000);
 client.on("loading_screen", (percent, message) => console.log("WhatsApp loading:", percent, message));
 client.on("change_state", state => console.log("WhatsApp state:", state));
 client.on("ready", () => console.log("BTSA Lead WhatsApp service is ready."));
