@@ -41,12 +41,12 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
  async function refresh(){const rows=await sheet.read();await beforeReconcile(rows);reconcile(rows);return rows;}
  function queueMessages(o,kind,content=''){
   const templates={
-   Collected:'We’ve picked up your bike. Here are the photos we took at collection so you have a record of its condition. We’ll keep you posted along the way. Thanks, BTSA',
-   Delivered:'Your bike has arrived! Here are the photos from delivery. Thanks for trusting us to get it there. BTSA'
+   Collected:'We’ve picked up your bike. Here’s a photo from collection so you have a record of its condition. We’ll keep you posted along the way. Thanks, BTSA',
+   Delivered:'Your bike has arrived! Here’s a photo from delivery. Thanks for trusting us to get it there. BTSA'
   };
   if(!templates[kind]&&!content)return;
   const id=crypto.createHash('sha256').update(o.externalId+'-'+kind+'-'+content+'-'+(kind==='Delivery update'?'schedule':o.completedAt||o.actualCollection?.date||'once')).digest('hex');
-  db.prepare('INSERT OR IGNORE INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id,o.externalId,kind,'awaiting_approval',domain.customerGreeting(o)+(content||templates[kind]),now(),templates[kind]?'Confirm before sending with all matched photos.':'Confirm before sending.');
+  db.prepare('INSERT OR IGNORE INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id,o.externalId,kind,'awaiting_approval',domain.customerGreeting(o)+(content||templates[kind]),now(),templates[kind]?'Confirm before sending with one photo.':'Confirm before sending.');
  }
  function queueDeliverySchedule(o){
   if(!o||!domain.collectionComplete(o)||domain.closed(o.status)||o.delivery?.confidence!=='confirmed'||o.delivery.precision==='week'||o.delivery.date<domain.localDay(now()))return;

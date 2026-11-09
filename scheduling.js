@@ -863,12 +863,34 @@ const operations=require('./dispatch-operations').createOperations({db,contracto
 operations.install(app,auth);
 const APPROVAL_AUTHORS=new Set((process.env.DISPATCH_APPROVAL_AUTHORS||'').split(',').map(s=>s.trim()).filter(Boolean));
 function canApproveInGroup(message){return GROUP_ID.endsWith('@g.us')&&message.from===GROUP_ID&&(APPROVAL_AUTHORS.has('*')||APPROVAL_AUTHORS.has(message.author||message._data?.author));}
-const communications=require('./dispatch-communications').installCommunications({app,auth,db,operations,sendApproval:GROUP_ID.endsWith('@g.us')&&APPROVAL_AUTHORS.size?sendGroup:null,sendCustomer:async({phone,text,proofs,verifiedTextId,onPart})=>{
- if(!WHATSAPP_OUTBOUND_ENABLED||SHADOW_MODE)throw new Error('Customer sending is disabled in this environment.');if(!client.info)throw new Error('WhatsApp is not ready.');const parts=[];let index=0;
- for(const proof of proofs)if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');
- const send=async content=>{const result=await client.sendMessage(phone+'@c.us',content,{waitUntilMsgSent:true});const id=result?.id?._serialized;if(!id)throw new Error('WhatsApp send outcome is uncertain');onPart(index++,id);parts.push(id);};
- if(verifiedTextId){onPart(index++,verifiedTextId);parts.push(verifiedTextId);}else await send(text);for(const proof of proofs){if(!fs.existsSync(proof.file_path))throw new Error('A confirmed photo file is unavailable.');await send(new MessageMedia(proof.mime_type,fs.readFileSync(proof.file_path).toString('base64'),proof.filename));}return parts;
-}});
+const customerBridgeUrl=process.env.CUSTOMER_WHATSAPP_BRIDGE_URL;
+const customerClient=customerBridgeUrl?new SharedClient(customerBridgeUrl):null;
+const communications=require('./dispatch-communications').installCommunications({
+ app,auth,db,operations,sendApproval:GROUP_ID.endsWith('@g.us')&&APPROVAL_AUTHORS.size?sendGroup:null,
+ prepareCustomerSend:async({text,proof})=>{
+  const hold=message=>Object.assign(new Error(message),{status:409});
+  if(!WHATSAPP_OUTBOUND_ENABLED||SHADOW_MODE)throw hold('Customer sending is disabled in this environment.');
+  if(!customerClient)throw hold('Customer update is still pending. Connect the 072 WhatsApp sender before sending.');
+  let status;
+  try{status=await bridgeRequest(customerBridgeUrl,'/bridge/status');}
+  catch{throw hold('Customer update is still pending. The 072 WhatsApp sender could not be reached.');}
+  if(!status.whatsappReady||status.accountPrefix!=='2772')
+   throw hold('Customer update is still pending. The connected sender could not be verified as 072.');
+  if(!proof)return {content:text,options:{waitUntilMsgSent:true}};
+  let data;
+  try{data=fs.readFileSync(proof.file_path).toString('base64');}
+  catch{throw hold('The confirmed photo file is unavailable.');}
+  return {content:new MessageMedia(proof.mime_type,data,proof.filename),options:{caption:text,waitUntilMsgSent:true}};
+ },
+ sendCustomer:async({phone,prepared,verifiedTextId,onPart})=>{
+  if(verifiedTextId)throw new Error('A previous send needs manual reconciliation.');
+  const result=await customerClient.sendMessage(phone+'@c.us',prepared.content,prepared.options);
+  const id=result?.id?._serialized;
+  if(!id)throw new Error('WhatsApp send outcome is uncertain');
+  onPart(0,id);
+  return [id];
+ }
+});
 // Correct only the verified status change caused by the misread CBR approval.
 operations.serial(async()=>{
  const ref='SLA-526',key='wa-false_120363429221367816@g.us_3A33A2AA804F27299FA0_219859560452258@lid-'+ref;
@@ -1350,23 +1372,10 @@ async function verifySchedulingBridgeRoute(){
    }
    if(!status.routes?.some(r=>r.group===GROUP_ID))throw Error('Scheduling group is not registered in the shared bridge');
    console.log('Scheduling inbound bridge route verified');
-   await recoverUnforwardedScheduleApprovals();
    return;
   }catch(e){problem=e;}
  }
  throw problem||Error('Scheduling group route could not be verified');
 }
 
-async function recoverUnforwardedScheduleApprovals(){
- for(const ref of ['SLA-527','SLA-528']){
-  const o=operations.get(ref),details=o&&operations.details(ref);
-  if(!details||o.syncState!=='synced'||o.collection?.date!=='2026-11-09'||o.collection?.confidence!=='confirmed'||o.actualCollection||!['New Order','Pending'].includes(o.status))continue;
-  const drafts=details.messages.filter(m=>m.kind==='Collection scheduled'&&m.state==='awaiting_approval'&&m.created_at>='2026-11-08T18:12:00Z'&&m.created_at<='2026-11-08T18:15:40Z'&&m.text.includes('We’ve scheduled pickup of your bike for '));
-  const prior=db.prepare("SELECT 1 FROM dispatch_messages m LEFT JOIN dispatch_send_parts p ON p.message_id=m.id WHERE m.ref=? AND m.kind='Collection scheduled' AND (m.state IN ('sent','sending','uncertain') OR p.message_id IS NOT NULL)").get(ref);
-  if(drafts.length!==1||prior)continue;
-  try{
-   const result=await communications.send(drafts[0].id,{operatorApproved:true});
-   if(result.sent)console.log('Recovered quoted schedule approval sent:',ref);
-  }catch(e){console.error('Recovered quoted schedule approval held:',ref,e.message);}
- }
-}
+
