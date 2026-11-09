@@ -185,9 +185,7 @@ async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
   if (!client.info) throw new Error("WhatsApp session not ready");
   let targetChatId = chatId;
   if (!targetChatId && phone) {
-    const registered = await client.getNumberId(normalizeZaPhone(phone));
-    if (!registered?._serialized) throw new Error("WhatsApp number not registered or lookup unavailable");
-    targetChatId = registered._serialized;
+    targetChatId = `${normalizeZaPhone(phone)}@c.us`;
   }
   if (!targetChatId) throw new Error("Valid phone or chatId required");
   const prior = idempotencyKey ? readSendLedger()[idempotencyKey] : null;
@@ -403,7 +401,7 @@ setTimeout(logFirstTouchStatus, 15000);
 
 async function processFirstTouches() {
   if (!client.info) return;
-  const rows = db.prepare(`SELECT * FROM leads WHERE first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND manual_review=0 AND first_touch_due_at<=? ORDER BY first_touch_due_at ASC LIMIT 20`).all(isoNow());
+  const rows = db.prepare(`SELECT * FROM leads WHERE first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND first_touch_due_at<=? ORDER BY first_touch_due_at ASC LIMIT 20`).all(isoNow());
   for (const lead of rows) {
     const key = `lead-first-touch-phone-${lead.phone}-${formatLocalDate(new Date(lead.submitted_at))}`;
     const text = `Hi ${lead.name || "there"}, thanks for reaching out to Bike Transport South Africa 🇿🇦\n\nI see you already got an estimate from our website 💪\n${[lead.bike_make, lead.bike_model].filter(Boolean).join(" ")}\nRoute: ${lead.pickup} → ${lead.dropoff}${!lead.manual_review && lead.estimated_price ? ` with an estimate of R${lead.estimated_price}` : ""}${lead.urgency ? ` | ${lead.urgency}` : ""}\n\nHow soon do you need transport? Availability and routing change quickly, so this allows me to secure the best rate before slots fill.\n\nThanks, Duane`;
@@ -413,7 +411,25 @@ async function processFirstTouches() {
       else db.prepare("UPDATE leads SET first_touch_sent_at=? WHERE id=?").run(isoNow(), lead.id);
       logEvent({ leadId: lead.id, phone: lead.phone, type: out.deduplicated ? "first_touch_suppressed" : "first_touch_sent", key: `${key}-event-${lead.id}`, details: out });
       console.log("First-touch dispatch", JSON.stringify({ leadId: lead.id, result: out.deduplicated ? "suppressed" : "sent", messageId: out.messageId || null }));
-    } catch (e) { console.error("First-touch dispatch failed", JSON.stringify({ leadId: lead.id, error: e.message })); logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_failed", key: `first-touch-failed-${lead.id}-${Date.now()}`, details: { error: e.message } }); }
+    } catch (e) {
+      if (e.message === "Duplicate outbound suppressed") {
+        // A prior send was reserved by the outbound circuit before WhatsApp delivery.
+        // Never retry blindly: reconcile against WhatsApp chat history first.
+        try {
+          const chat = await client.getChatById(`${normalizeZaPhone(lead.phone)}@c.us`);
+          const messages = await chat.fetchMessages({ limit: 40 });
+          const matching = messages.find(m => m.fromMe && String(m.body || "") === text && m.timestamp * 1000 >= Date.parse(lead.received_at) - 60000);
+          if (matching) {
+            db.prepare("UPDATE leads SET first_touch_sent_at=? WHERE id=?").run(new Date(matching.timestamp * 1000).toISOString(), lead.id);
+            logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_reconciled", key: `reconciled-${lead.id}`, details: { messageId: matching.id?._serialized || null } });
+            console.log("First-touch reconciled", JSON.stringify({ leadId: lead.id, messageId: matching.id?._serialized || null }));
+            continue;
+          }
+        } catch (lookupError) { console.error("First-touch reconciliation failed", JSON.stringify({ leadId: lead.id, error: lookupError.message })); }
+      }
+      console.error("First-touch dispatch failed", JSON.stringify({ leadId: lead.id, error: e.message }));
+      logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_failed", key: `first-touch-failed-${lead.id}-${Date.now()}`, details: { error: e.message } });
+    }
   }
 }
 
