@@ -1,7 +1,7 @@
 const { SharedClient, installIngress, request: bridgeRequest, auth } = require("./shared-transport");
 const { installOutboundSafety } = require("./outbound-safety");
 const express = require("express");
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("fs");
 const path = require("path");
@@ -192,6 +192,36 @@ async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
   recordAcceptedSend(idempotencyKey, { messageId, chatId: targetChatId });
   return { success: true, accepted: true, deduplicated: false, messageId, chatId: targetChatId };
 }
+
+function dispatchSenderPrefix() {
+  return String(client.info?.wid?.user || "").slice(0, 4);
+}
+
+app.get("/bridge/status", auth, (_req, res) => {
+  const accountPrefix = dispatchSenderPrefix();
+  res.json({ whatsappReady: accountPrefix === "2772", accountPrefix });
+});
+
+app.post("/bridge/send", auth, async (req, res) => {
+  if (dispatchSenderPrefix() !== "2772") return res.status(503).json({ error: "072 sender unavailable" });
+  const { chatId, text, media, options } = req.body || {};
+  if (!/^27\d{9}@c\.us$/.test(String(chatId || ""))) {
+    return res.status(400).json({ error: "A South African customer number is required" });
+  }
+  const caption = media ? options?.caption : text;
+  if (typeof caption !== "string" || !caption.trim() || caption.length > 4096 ||
+      (media && (!/^image\/(jpeg|png|webp|heic)$/.test(media.mimetype) || typeof media.data !== "string" || !media.data || media.data.length > 8000000))) {
+    return res.status(400).json({ error: "Provide a customer message with at most one image" });
+  }
+  try {
+    const content = media ? new MessageMedia(media.mimetype, media.data, media.filename) : text;
+    const result = await client.sendMessage(chatId, content, media ? { caption, waitUntilMsgSent: true } : { waitUntilMsgSent: true });
+    res.json({ id: { _serialized: result?.id?._serialized || "" } });
+  } catch (error) {
+    console.error("Dispatch customer send failed:", error.message);
+    res.status(500).json({ error: "Customer send needs reconciliation" });
+  }
+});
 
 app.get("/health", (req, res) => {
   let dbOk = false;
