@@ -388,6 +388,15 @@ async function handleOutgoing(message) {
 }
 client.on("message_create", handleOutgoing);
 
+function logFirstTouchStatus() {
+  try {
+    const counts = db.prepare(`SELECT COUNT(*) total, SUM(first_touch_sent_at IS NOT NULL) sent, SUM(first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND manual_review=0 AND first_touch_due_at<=?) pending, SUM(manual_review=1) manual_review, SUM(duplicate_suppressed_at IS NOT NULL) suppressed FROM leads WHERE received_at>=?`).get(isoNow(), addHoursIso(isoNow(), -72));
+    console.log("First-touch status 72h", JSON.stringify({ whatsappReady: Boolean(client.info), ...counts }));
+  } catch (error) { console.error("First-touch status query failed:", error.message); }
+}
+setInterval(logFirstTouchStatus, 60000);
+setTimeout(logFirstTouchStatus, 15000);
+
 async function processFirstTouches() {
   if (!client.info) return;
   const rows = db.prepare(`SELECT * FROM leads WHERE first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND manual_review=0 AND first_touch_due_at<=? ORDER BY first_touch_due_at ASC LIMIT 20`).all(isoNow());
@@ -399,7 +408,8 @@ async function processFirstTouches() {
       if (out.deduplicated) db.prepare("UPDATE leads SET duplicate_suppressed_at=? WHERE id=?").run(isoNow(), lead.id);
       else db.prepare("UPDATE leads SET first_touch_sent_at=? WHERE id=?").run(isoNow(), lead.id);
       logEvent({ leadId: lead.id, phone: lead.phone, type: out.deduplicated ? "first_touch_suppressed" : "first_touch_sent", key: `${key}-event-${lead.id}`, details: out });
-    } catch (e) { logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_failed", key: `first-touch-failed-${lead.id}-${Date.now()}`, details: { error: e.message } }); }
+      console.log("First-touch dispatch", JSON.stringify({ leadId: lead.id, result: out.deduplicated ? "suppressed" : "sent", messageId: out.messageId || null }));
+    } catch (e) { console.error("First-touch dispatch failed", JSON.stringify({ leadId: lead.id, error: e.message })); logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_failed", key: `first-touch-failed-${lead.id}-${Date.now()}`, details: { error: e.message } }); }
   }
 }
 
