@@ -184,7 +184,11 @@ async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
   if (!text) throw new Error("Text is required");
   if (!client.info) throw new Error("WhatsApp session not ready");
   let targetChatId = chatId;
-  if (!targetChatId && phone) targetChatId = `${normalizeZaPhone(phone)}@c.us`;
+  if (!targetChatId && phone) {
+    const registered = await client.getNumberId(normalizeZaPhone(phone));
+    if (!registered?._serialized) throw new Error("WhatsApp number not registered or lookup unavailable");
+    targetChatId = registered._serialized;
+  }
   if (!targetChatId) throw new Error("Valid phone or chatId required");
   const prior = idempotencyKey ? readSendLedger()[idempotencyKey] : null;
   if (prior) return { success: true, accepted: true, deduplicated: true, messageId: prior.messageId || null, chatId: prior.chatId || targetChatId };
@@ -390,7 +394,7 @@ client.on("message_create", handleOutgoing);
 
 function logFirstTouchStatus() {
   try {
-    const counts = db.prepare(`SELECT COUNT(*) total, SUM(first_touch_sent_at IS NOT NULL) sent, SUM(first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND manual_review=0 AND first_touch_due_at<=?) pending, SUM(manual_review=1) manual_review, SUM(duplicate_suppressed_at IS NOT NULL) suppressed FROM leads WHERE received_at>=?`).get(isoNow(), addHoursIso(isoNow(), -72));
+    const counts = db.prepare(`SELECT COUNT(*) total, SUM(first_touch_sent_at IS NOT NULL) sent, SUM(first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND first_touch_due_at<=?) pending, SUM(manual_review=1) manual_review, SUM(duplicate_suppressed_at IS NOT NULL) suppressed FROM leads WHERE received_at>=?`).get(isoNow(), addHoursIso(isoNow(), -72));
     console.log("First-touch status 72h", JSON.stringify({ whatsappReady: Boolean(client.info), ...counts }));
   } catch (error) { console.error("First-touch status query failed:", error.message); }
 }
@@ -402,7 +406,7 @@ async function processFirstTouches() {
   const rows = db.prepare(`SELECT * FROM leads WHERE first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND manual_review=0 AND first_touch_due_at<=? ORDER BY first_touch_due_at ASC LIMIT 20`).all(isoNow());
   for (const lead of rows) {
     const key = `lead-first-touch-phone-${lead.phone}-${formatLocalDate(new Date(lead.submitted_at))}`;
-    const text = `Hi ${lead.name || "there"}, thanks for reaching out to Bike Transport South Africa 🇿🇦\n\nI see you already got an estimate from our website 💪\n${[lead.bike_make, lead.bike_model].filter(Boolean).join(" ")}\nRoute: ${lead.pickup} → ${lead.dropoff}${lead.estimated_price ? ` with an estimate of R${lead.estimated_price}` : ""}${lead.urgency ? ` | ${lead.urgency}` : ""}\n\nHow soon do you need transport? Availability and routing change quickly, so this allows me to secure the best rate before slots fill.\n\nThanks, Duane`;
+    const text = `Hi ${lead.name || "there"}, thanks for reaching out to Bike Transport South Africa 🇿🇦\n\nI see you already got an estimate from our website 💪\n${[lead.bike_make, lead.bike_model].filter(Boolean).join(" ")}\nRoute: ${lead.pickup} → ${lead.dropoff}${!lead.manual_review && lead.estimated_price ? ` with an estimate of R${lead.estimated_price}` : ""}${lead.urgency ? ` | ${lead.urgency}` : ""}\n\nHow soon do you need transport? Availability and routing change quickly, so this allows me to secure the best rate before slots fill.\n\nThanks, Duane`;
     try {
       const out = await sendWhatsApp({ phone: lead.phone, text, idempotencyKey: key });
       if (out.deduplicated) db.prepare("UPDATE leads SET duplicate_suppressed_at=? WHERE id=?").run(isoNow(), lead.id);
