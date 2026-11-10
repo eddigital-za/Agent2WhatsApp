@@ -7,7 +7,7 @@ const path = require("node:path");
 const {DatabaseSync} = require("node:sqlite");
 const {installOutboundSafety} = require("./outbound-safety");
 const {installSalesAgent} = require("./sales-agent");
-const {resolveWhatsAppRecipient} = require("./whatsapp-recipient");
+const {resolveWhatsAppRecipient,findExactOutboundReceipts} = require("./whatsapp-recipient");
 const {selectFirstTouchCandidates} = require("./first-touch-store");
 test("outbound phone resolution prefers the WhatsApp LID and rejects unknown numbers before send",async()=>{
  const normalize=x=>String(x||"").replace(/\D/g,"");
@@ -15,6 +15,10 @@ test("outbound phone resolution prefers the WhatsApp LID and rejects unknown num
  assert.equal(await resolveWhatsAppRecipient(lidClient,"+27 72 000 0000",normalize),"123456789@lid");
  const unknownClient={getContactLidAndPhone:async()=>[{}],getNumberId:async()=>null};
  await assert.rejects(resolveWhatsAppRecipient(unknownClient,"27720000000",normalize),/not registered/);
+});
+test("exact outbound receipt lookup returns only matching sent text",async()=>{
+ const client={pupPage:{evaluate:async(_fn,args)=>args.text==="expected"?["true_lid_message"]:[]}};
+ assert.deepEqual(await findExactOutboundReceipts(client,"123@lid","expected",Date.now()-5000),["true_lid_message"]);
 });
 test("first-touch recovery selects yesterday and new leads without replaying older leads",()=>{
  const db=new DatabaseSync(":memory:");

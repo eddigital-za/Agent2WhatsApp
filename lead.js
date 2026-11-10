@@ -7,7 +7,7 @@ const { DatabaseSync } = require("node:sqlite");
 const fs = require("fs");
 const path = require("path");
 const { installSalesAgent } = require("./sales-agent");
-const { resolveWhatsAppRecipient } = require("./whatsapp-recipient");
+const { resolveWhatsAppRecipient, findExactOutboundReceipts } = require("./whatsapp-recipient");
 const { selectFirstTouchCandidates } = require("./first-touch-store");
 
 const app = express();
@@ -208,8 +208,14 @@ async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
   if (!targetChatId) throw new Error("Valid phone or chatId required");
   const prior = idempotencyKey ? readSendLedger()[idempotencyKey] : null;
   if (prior) return { success: true, accepted: true, deduplicated: true, messageId: prior.messageId || null, chatId: prior.chatId || targetChatId };
+  const sendStartedAt = Date.now() - 5000;
   const result = await client.sendMessage(targetChatId, text);
-  const messageId = result?.id?._serialized || null;
+  let messageId = result?.id?._serialized || null;
+  if (!messageId) {
+    const receipts = await findExactOutboundReceipts(client, targetChatId, text, sendStartedAt);
+    if (receipts.length === 1) messageId = receipts[0];
+    else if (receipts.length > 1) throw new Error("Multiple matching WhatsApp receipts; send outcome is ambiguous");
+  }
   if (!messageId) throw new Error("WhatsApp send returned no delivery receipt");
   recordAcceptedSend(idempotencyKey, { messageId, chatId: targetChatId });
   return { success: true, accepted: true, deduplicated: false, messageId, chatId: targetChatId };
@@ -472,13 +478,11 @@ async function processFirstTouches() {
         // Never retry blindly: reconcile against WhatsApp chat history first.
         try {
           const resolvedChatId = await resolveWhatsAppRecipient(client, lead.phone, normalizeZaPhone);
-          const chat = await client.getChatById(resolvedChatId);
-          const messages = await chat.fetchMessages({ limit: 40 });
-          const matching = messages.find(m => m.fromMe && String(m.body || "") === text && m.timestamp * 1000 >= Date.parse(lead.received_at) - 60000);
-          if (matching) {
-            db.prepare("UPDATE leads SET first_touch_sent_at=? WHERE id=?").run(new Date(matching.timestamp * 1000).toISOString(), lead.id);
-            logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_reconciled", key: `reconciled-${lead.id}`, details: { messageId: matching.id?._serialized || null } });
-            console.log("First-touch reconciled", JSON.stringify({ leadId: lead.id, messageId: matching.id?._serialized || null }));
+          const receipts = await findExactOutboundReceipts(client, resolvedChatId, text, Date.parse(lead.received_at) - 60000);
+          if (receipts.length === 1) {
+            db.prepare("UPDATE leads SET first_touch_sent_at=? WHERE id=?").run(isoNow(), lead.id);
+            logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_reconciled", key: `reconciled-${lead.id}`, details: { messageId: receipts[0] } });
+            console.log("First-touch reconciled", JSON.stringify({ leadId: lead.id, messageId: receipts[0] }));
             continue;
           }
         } catch (lookupError) { console.error("First-touch reconciliation failed", JSON.stringify({ leadId: lead.id, error: lookupError.message })); }

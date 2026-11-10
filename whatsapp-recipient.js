@@ -27,4 +27,15 @@ async function resolveWhatsAppRecipient(client, phone, normalizePhone) {
   return phoneId;
 }
 
-module.exports = { resolveWhatsAppRecipient };
+async function findExactOutboundReceipts(client, chatId, text, sinceMs) {
+  if (!client.pupPage?.evaluate) return [];
+  return client.pupPage.evaluate(async ({ chatId, text, since }) => {
+    const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+    return (chat?.msgs?.getModelsArray() || [])
+      .filter(message => message.id?.fromMe === true && message.type === "chat" && message.body === text && message.t >= since)
+      .map(message => message.id._serialized || message.id.$1 || message.id.id)
+      .filter(Boolean);
+  }, { chatId, text, since: Math.floor(sinceMs / 1000) });
+}
+
+module.exports = { resolveWhatsAppRecipient, findExactOutboundReceipts };
