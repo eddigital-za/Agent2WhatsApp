@@ -403,3 +403,30 @@ test("a reply quoting the no-send status can show the current draft without send
   assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-DRAFT'").get().state,"pending");
  } finally {global.fetch=savedFetch;db.close();}
 });
+
+test("wording feedback misclassified as send is saved as a revision and still needs approval", async () => {
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:"), cards=[];
+ let sent=0;
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async(_to,text)=>{sent++;return {id:{_serialized:"client-1"},body:text};}};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:`card-${cards.length}`}};}};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)")
+  .run("SA-WORDING","27760000000","What is included?","The rate is R3,500.",new Date().toISOString());
+ const revised="The R3,500 rate includes hassle-free door-to-door delivery and full comprehensive insurance.";
+ const savedFetch=global.fetch;
+ global.fetch=async(_url,options)=>{
+  const p=JSON.parse(options.body);
+  return {ok:true,json:async()=>({intent:"send",finalReply:p.instruction.includes("door-to-door")?revised:p.proposedReply})};
+ };
+ try {
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:"wording-1"},body:"Add the door-to-door and insurance inclusions",hasQuotedMsg:true,getQuotedMessage:async()=>({body:"Understood. Revised reply for *SA-WORDING*:"}),timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(sent,0);
+  assert.match(cards[0],/Revised reply for \*SA-WORDING\*/);
+  assert.equal(db.prepare("SELECT proposed_reply FROM sales_approvals WHERE case_ref='SA-WORDING'").get().proposed_reply,revised);
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:"wording-2"},body:"send it",hasQuotedMsg:true,getQuotedMessage:async()=>({body:cards[0]}),timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(sent,1);
+  assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-WORDING'").get().state,"sent");
+ } finally {global.fetch=savedFetch;db.close();}
+});
