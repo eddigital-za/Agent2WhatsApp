@@ -179,7 +179,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (message.hasQuotedMsg) {
       try { const q = await message.getQuotedMessage(); quotedId = q?.id?._serialized || ""; quotedText = q?.body || ""; } catch (_) {}
     }
-    const ref = quotedText.match(/^(?:Understood\. Revised reply for )?\*?(SA-[A-Z0-9-]+)\b/)?.[1]
+    const ref = quotedText.match(/^(?:Understood\. Revised reply for |I haven't sent anything for |I’m not certain you meant to send anything for )?\*?(SA-[A-Z0-9-]+)\b/)?.[1]
       || String(message.body || "").match(/^\s*(SA-[A-Z0-9-]+)\b/)?.[1];
     if (ref) {
       const row = db.prepare("SELECT * FROM sales_approvals WHERE case_ref=? AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=sales_approvals.phone AND newer.id>sales_approvals.id)").get(ref);
@@ -592,6 +592,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (m?.data) audio = { data: m.data, mimetype: m.mimetype || "audio/ogg", filename: m.filename || "approval.ogg" };
     }
     const instruction = String(message.body || "").trim();
+    const asksToSeeDraft = /\b(?:show|see|view|repeat|resend)\b.{0,20}\b(?:draft|reply|message)\b|\bwhat(?:'s| is) the (?:draft|reply|message)\b/i.test(instruction);
+    if (asksToSeeDraft && row.proposed_reply) {
+      await group(`Current draft for *${row.case_ref}*:\n\n${row.proposed_reply}\n\nIf that is right, just say “send it”.`);
+      return true;
+    }
     if (isNoReplyInstruction(instruction)) {
       db.prepare("UPDATE sales_approvals SET state='cancelled',decided_at=?,decision_text=? WHERE id=? AND state IN ('pending','delivery_unknown')")
         .run(now(), instruction, row.id);
