@@ -173,25 +173,29 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const sent = await approvalClient.sendMessage(approvalGroup(), text);
     return sent?.id?._serialized || null;
   }
-  function pendingForApproval(message) {
-    const quoted = message?.hasQuotedMsg ? null : null;
-    return quoted;
-  }
   async function findPending(message) {
     let quotedId = "";
     let quotedText = "";
     if (message.hasQuotedMsg) {
       try { const q = await message.getQuotedMessage(); quotedId = q?.id?._serialized || ""; quotedText = q?.body || ""; } catch (_) {}
     }
-    let row = quotedId ? db.prepare("SELECT * FROM sales_approvals WHERE group_message_id=? AND state='pending'").get(quotedId) : null;
-    if (!row && quotedText) {
-      const m = quotedText.match(/\b(SA-[A-Z0-9-]+)\b/); if (m) row = db.prepare("SELECT * FROM sales_approvals WHERE case_ref=? AND state='pending'").get(m[1]);
+    const ref = quotedText.match(/^(?:Understood\. Revised reply for )?\*?(SA-[A-Z0-9-]+)\b/)?.[1]
+      || String(message.body || "").match(/^\s*(SA-[A-Z0-9-]+)\b/)?.[1];
+    if (ref) {
+      const row = db.prepare("SELECT * FROM sales_approvals WHERE case_ref=? AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=sales_approvals.phone AND newer.id>sales_approvals.id)").get(ref);
+      if (row?.state === "pending") return row;
+      // A direct quote proves the card reached WhatsApp even if its send acknowledgement failed.
+      if (row?.state === "delivery_unknown" && quotedText.startsWith(`*${ref} `) && !row.followup_id && !row.sequence_id) return row;
+      return null;
     }
-    if (!row && !quotedId && !quotedText) {
-      const rows = db.prepare("SELECT a.* FROM sales_approvals a WHERE a.state='pending' AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=a.phone AND newer.id>a.id) ORDER BY a.id DESC LIMIT 2").all();
-      if (rows.length === 1) row = rows[0];
+    if (quotedId) {
+      const stanza = quotedId.split("_").pop();
+      const rows = db.prepare("SELECT * FROM sales_approvals WHERE state='pending' AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=sales_approvals.phone AND newer.id>sales_approvals.id) AND (group_message_id=? OR substr(group_message_id, -length(?)-1)='_' || ?) LIMIT 2").all(quotedId, stanza, stanza);
+      return rows.length === 1 ? rows[0] : null;
     }
-    return row;
+    if (message.hasQuotedMsg) return null;
+    const rows = db.prepare("SELECT a.* FROM sales_approvals a WHERE a.state='pending' AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=a.phone AND newer.id>a.id) ORDER BY a.id DESC LIMIT 2").all();
+    return rows.length === 1 ? rows[0] : null;
   }
 
   async function onCustomer(message, lead, phone) {
@@ -561,6 +565,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const row = await findPending(message);
     if (!row) {
       console.log("Sales approval ignored: no unambiguous active case");
+      if (message.hasQuotedMsg || /^\s*SA-[A-Z0-9-]+\b/.test(String(message.body || ""))) {
+        await group("I couldn't match that reply to a current sales card. Please reply to the latest card or start your reply with its SA reference. Nothing was sent to the client.");
+      }
       return true;
     }
     if (row.followup_id) {
@@ -586,7 +593,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     }
     const instruction = String(message.body || "").trim();
     if (isNoReplyInstruction(instruction)) {
-      db.prepare("UPDATE sales_approvals SET state='cancelled',decided_at=?,decision_text=? WHERE id=? AND state='pending'")
+      db.prepare("UPDATE sales_approvals SET state='cancelled',decided_at=?,decision_text=? WHERE id=? AND state IN ('pending','delivery_unknown')")
         .run(now(), instruction, row.id);
       if (row.followup_id) db.prepare("UPDATE sales_sla_followups SET state='cancelled_owner',updated_at=? WHERE id=? AND state='approval_requested'").run(now(), row.followup_id);
       if (row.sequence_id) db.prepare("UPDATE sales_lead_sequence SET state='cancelled_owner',updated_at=? WHERE id=? AND state='approval_requested'").run(now(), row.sequence_id);
@@ -596,9 +603,16 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     }
     const out = await reason("/sales/approval", {
       caseRef: row.case_ref, customerMessage: row.customer_text, proposedReply: row.proposed_reply,
-      instruction, audio, context: row.context_json ? JSON.parse(row.context_json) : {}
+      instruction, audio, context: { ...(row.context_json ? JSON.parse(row.context_json) : {}), ownerAnswerHandling: !row.proposed_reply ? "The card asked Duane for missing facts. When his response supplies those facts or gives wording directions, use them to draft the next customer reply and return intent=revise with finalReply populated. Do not send; ask for a separate approval." : undefined }
     });
     const approvalWords = [instruction, out.transcript].filter(Boolean).join("\n");
+    if (row.state === "delivery_unknown") {
+      // Reconcile the observed card, but require a separate send instruction.
+      const recovered = db.prepare("UPDATE sales_approvals SET state='pending' WHERE id=? AND state='delivery_unknown'").run(row.id);
+      if (recovered.changes !== 1) return true;
+      if (out.intent === "send") out.intent = "revise";
+    }
+    if (!row.proposed_reply && out.intent === "send") out.intent = "revise";
     if (out.intent === "cancel" || isNoReplyInstruction(approvalWords)) {
       db.prepare("UPDATE sales_approvals SET state='cancelled',decided_at=?,decision_text=? WHERE id=? AND state='pending'")
         .run(now(), approvalWords || "No reply", row.id);

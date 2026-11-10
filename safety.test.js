@@ -354,3 +354,29 @@ test("Day 3 and Day 7 website follow-ups require approval and do not duplicate",
   assert.equal(await agent.processLeadSequence(),0);assert.equal(db.prepare("SELECT COUNT(*) n FROM sales_lead_sequence").get().n,2);
  } finally {global.fetch=savedFetch;db.close();}
 });
+
+test("a quoted sales card with uncertain delivery is recovered for drafting only", async () => {
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:"), cards=[];
+ let sent=0;
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sent++;}};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);}};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ const insert=db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,state,created_at) VALUES(?,?,?,?,?,?)");
+ insert.run("SA-RECOVER","27760000000","ASAP","","delivery_unknown",new Date().toISOString());
+ insert.run("SA-OTHER","27760000001","When?","Other draft","pending",new Date().toISOString());
+ const savedFetch=global.fetch;
+ global.fetch=async(_url, options)=>{
+  const p=JSON.parse(options.body);
+  assert.equal(p.caseRef,"SA-RECOVER");
+  assert.match(p.context.ownerAnswerHandling,/intent=revise/);
+  return {ok:true,json:async()=>({intent:"send",finalReply:"I can collect tomorrow morning for R1,250."})};
+ };
+ try {
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:"recover-1"},body:"Tomorrow morning, R1,250",hasQuotedMsg:true,getQuotedMessage:async()=>({body:"*SA-RECOVER — Test*"}),timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(sent,0);
+  assert.match(cards[0],/Revised reply for \*SA-RECOVER\*/);
+  assert.match(db.prepare("SELECT proposed_reply FROM sales_approvals WHERE case_ref='SA-RECOVER'").get().proposed_reply,/R1,250/);
+ } finally {global.fetch=savedFetch;db.close();}
+});
