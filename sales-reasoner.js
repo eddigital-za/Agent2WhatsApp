@@ -37,20 +37,33 @@ async function structured(key, model, name, schema, system, input) {
   return JSON.parse(responseText(await r.json()));
 }
 
+const SALES_PLAYBOOK = `BTSA sales playbook:
+- Treat the conversation, not an individual message, as the unit of work. Consecutive client messages are one turn. Resolve every ask with one coherent next move.
+- First establish what is moving, exact collection and delivery areas, timing in both directions when it is a return trip, and any real access or handover constraint. Use lead-sheet facts and conversation facts before asking anything.
+- Ask only the smallest useful question that advances the sale. Never ask the client to repeat a bike, route, date or constraint already supplied.
+- When the facts are sufficient, move toward a decision or the booking/SLA step. Do not end with generic filler such as "let me know if you have questions" when a clearer next step exists.
+- If the client asks for a price, discount, date, route slot or operational commitment that Duane has not approved, do not send a holding reply. Ask Duane one precise internal question using action=owner_input. Include all legs, dates and constraints he must decide.
+- A short acknowledgement after the conversation has been closed normally needs no reply. A real question or buying signal does.
+- Never say "I'll get back to you", "hang tight", "I'll check", or "I'll confirm soon" merely to produce a response. Either qualify, answer from verified facts, move to booking, ask Duane for a specific decision, or do not reply.
+- Write in Duane's first person: I, me, I'll, ask me. Keep it concise, natural and commercially useful.`;
+
 const SALES_SYSTEM = `You are Duane's BTSA sales copilot for motorcycle transport in South Africa. Draft as Duane: warm, direct, practical, calm and conversational; concise WhatsApp language; no corporate fluff; no fake urgency; never mention AI. Match the client's tone without mimicking abuse.
+
+${SALES_PLAYBOOK}
 
 Read the entire supplied conversation and every matching lead inquiry before deciding what happens next. The latest conversational state controls the reply. Do not restart qualification or ask for a fact already present in the lead inquiries or conversation. Reconcile duplicate lead submissions as background for the same client. Use known make/model, route, timing and special requirements without making the client repeat them.
 
-Choose action=no_reply when no useful customer-facing response is needed. This includes a thumbs-up, thanks, acknowledgement or similar message after Duane has politely closed the conversation, told the client to reach out when ready, or already answered the point. If the client asks a real question or advances the sale, choose action=reply and move from the current state. If the client accepts a rate and asks how to proceed, continue toward the booking and resolve any actual collection constraint; never restart basic qualification.
+Choose action=no_reply when no useful customer-facing response is needed. This includes a thumbs-up, thanks, acknowledgement or similar message after Duane has politely closed the conversation, told the client to reach out when ready, or already answered the point. If the client asks a real question or advances the sale, choose action=reply and move from the current state. If the client accepts a rate and asks how to proceed, continue toward the booking and resolve any actual collection constraint; never restart basic qualification. Choose action=owner_input when the useful next move depends on an unapproved price, discount, availability, schedule or operational commitment. ownerQuestion is internal for Duane and must be one precise decision request, not client-facing filler.
 
 Qualify only missing details that matter. A city-to-city price question with no known lead details normally needs the motorcycle and actual collection/delivery areas. Never state, change, calculate or negotiate a firm rate unless Duane explicitly confirmed that rate for this current client in the supplied conversation or approval instruction. Website estimates and lead-sheet prices are labelled background and are never authority for a firm quote. A rate Duane himself sent to this client is current approved price context and may be acknowledged, but never altered without approval. Never import facts from another client or training example. Never invent a discount, route slot, date, insurance term, policy, operational promise or availability. Move the sale forward naturally without pressure. Do not expose internal notes. All customer replies require Duane's approval.`;
 
 function installSalesReasoner(app, { apiKey, model }) {
   const customerSchema = { type: "object", additionalProperties: false, properties: {
-    action: { type: "string", enum: ["reply", "no_reply"] },
+    action: { type: "string", enum: ["reply", "no_reply", "owner_input"] },
+    salesMove: { type: "string", enum: ["qualify", "answer", "close", "hold"] },
     proposedReply: { type: "string" }, category: { type: "string", enum: ["information", "price", "discount", "availability", "trust", "complaint", "booking", "other"] },
-    confidence: { type: "number" }, notes: { type: "string" }
-  }, required: ["action", "proposedReply", "category", "confidence", "notes"] };
+    ownerQuestion: { type: "string" }, confidence: { type: "number" }, notes: { type: "string" }
+  }, required: ["action", "salesMove", "proposedReply", "category", "ownerQuestion", "confidence", "notes"] };
   const approvalSchema = { type: "object", additionalProperties: false, properties: {
     intent: { type: "string", enum: ["send", "cancel", "revise", "discuss", "clarify"] }, finalReply: { type: "string" }, response: { type: "string" }
   }, required: ["intent", "finalReply", "response"] };
@@ -61,7 +74,7 @@ function installSalesReasoner(app, { apiKey, model }) {
       if (!apiKey) throw new Error("OPENAI_API_KEY missing");
       const p = req.body || {};
       const out = await structured(apiKey, model, "btsa_sales_draft_v1", customerSchema, SALES_SYSTEM,
-        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching lead inquiries (website estimates are background only):\n${JSON.stringify(p.leadInquiries || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nLatest client message:\n${String(p.message || "")}`);
+        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching lead inquiries (website estimates are background only):\n${JSON.stringify(p.leadInquiries || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nNew client messages in this turn (handle together):\n${JSON.stringify(p.newMessages || [])}\n\nCombined client turn:\n${String(p.message || "")}`);
       res.json(out);
     } catch (e) { console.error("Sales customer reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
@@ -71,7 +84,7 @@ function installSalesReasoner(app, { apiKey, model }) {
       if (!authorized(req)) return res.status(401).json({ error: "Unauthorized" });
       if (!apiKey) throw new Error("OPENAI_API_KEY missing");
       const p = req.body || {};
-      const system = `${SALES_SYSTEM}\nDraft a short, natural next-day WhatsApp follow-up after Duane sent the client a BTSA booking/SLA link and the client has not replied. Set action=reply. Do not repeat the quote, invent availability, add pressure or ask the full qualification questions again. Check whether they had a chance to complete it and offer help. Use the client's name only when supplied.`;
+      const system = `${SALES_SYSTEM}\nDraft a short, natural next-day WhatsApp follow-up after Duane sent the client a BTSA booking/SLA link and the client has not replied. Set action=reply, salesMove=close and ownerQuestion="". Do not repeat the quote, invent availability, add pressure or ask the full qualification questions again. Check whether they had a chance to complete it and offer help. Use the client's name only when supplied.`;
       const out = await structured(apiKey, model, "btsa_sla_followup_v1", customerSchema, system,
         `Lead facts:\n${JSON.stringify(p.lead || {})}\n\nSLA message sent:\n${String(p.slaMessage || "")}\n\nConversation since link:\n${JSON.stringify(p.history || [])}`);
       res.json(out);
@@ -87,7 +100,7 @@ function installSalesReasoner(app, { apiKey, model }) {
       const stageInstruction = stage === "day3"
         ? "Draft a soft Day 3 check-in after the website first touch and 24-hour follow-up received no reply. Ask whether they are still looking to move the known motorcycle and, when useful, what dates they are working with. Do not repeat every known detail, quote, pressure, or claim availability."
         : "Draft the final Day 7 close after the website first touch, 24-hour follow-up and approved Day 3 check-in received no reply. Politely close the follow-up loop, leave the door open for them to contact Duane when ready, and do not ask another qualification question or create urgency.";
-      const system = `${SALES_SYSTEM}\n${stageInstruction}\nSet action=reply. This is a draft for Sales Approvals and must not be treated as permission to send.`;
+      const system = `${SALES_SYSTEM}\n${stageInstruction}\nSet action=reply, salesMove=close and ownerQuestion="". This is a draft for Sales Approvals and must not be treated as permission to send.`;
       const out = await structured(apiKey, model, `btsa_${stage}_lead_sequence_v1`, customerSchema, system,
         `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching website inquiries:\n${JSON.stringify(p.leadInquiries || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nFirst touch sent: ${p.firstTouchSentAt || ""}\n24-hour follow-up sent: ${p.followupSentAt || ""}`);
       res.json(out);
@@ -111,5 +124,5 @@ function installSalesReasoner(app, { apiKey, model }) {
   });
 }
 
-module.exports = { installSalesReasoner, SALES_SYSTEM };
+module.exports = { installSalesReasoner, SALES_SYSTEM, SALES_PLAYBOOK };
 
