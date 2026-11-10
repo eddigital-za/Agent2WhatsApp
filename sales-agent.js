@@ -179,7 +179,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (message.hasQuotedMsg) {
       try { const q = await message.getQuotedMessage(); quotedId = q?.id?._serialized || ""; quotedText = q?.body || ""; } catch (_) {}
     }
-    const ref = quotedText.match(/^(?:Understood\. Revised reply for |I haven't sent anything for |I’m not certain you meant to send anything for )?\*?(SA-[A-Z0-9-]+)\b/)?.[1]
+    const ref = quotedText.match(/^(?:Understood\. Revised reply for |Current draft for |I haven't sent anything for |I’m not certain you meant to send anything for )?\*?(SA-[A-Z0-9-]+)\b/)?.[1]
       || String(message.body || "").match(/^\s*(SA-[A-Z0-9-]+)\b/)?.[1];
     if (ref) {
       const row = db.prepare("SELECT * FROM sales_approvals WHERE case_ref=? AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=sales_approvals.phone AND newer.id>sales_approvals.id)").get(ref);
@@ -618,6 +618,12 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (out.intent === "send") out.intent = "revise";
     }
     if (!row.proposed_reply && out.intent === "send") out.intent = "revise";
+    const sendAuthorized = explicitlyAuthorizesSend(approvalWords);
+    if (out.intent === "send" && !sendAuthorized && out.finalReply && out.finalReply.trim() !== row.proposed_reply.trim()) {
+      // The model sometimes labels wording feedback as "send". Preserve the revision,
+      // but keep the separate explicit-send gate closed.
+      out.intent = "revise";
+    }
     if (out.intent === "cancel" || isNoReplyInstruction(approvalWords)) {
       db.prepare("UPDATE sales_approvals SET state='cancelled',decided_at=?,decision_text=? WHERE id=? AND state='pending'")
         .run(now(), approvalWords || "No reply", row.id);
@@ -625,7 +631,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (row.sequence_id) db.prepare("UPDATE sales_lead_sequence SET state='cancelled_owner',updated_at=? WHERE id=? AND state='approval_requested'").run(now(), row.sequence_id);
       await group(`Understood. I won't reply to ${row.case_ref}.`);
       logEvent({ leadId: row.lead_id, phone: row.phone, type: "sales_reply_cancelled", key: `sales-cancelled-${row.case_ref}`, details: { ref: row.case_ref } });
-    } else if (out.intent === "send" && out.finalReply && explicitlyAuthorizesSend(approvalWords)) {
+    } else if (out.intent === "send" && out.finalReply && sendAuthorized) {
       // Atomic send-once lock; uncertain sends stay locked for manual reconciliation.
       const locked = db.prepare("UPDATE sales_approvals SET state='sending',decided_at=? WHERE id=? AND state='pending'").run(now(), row.id);
       if (locked.changes !== 1) return true;
