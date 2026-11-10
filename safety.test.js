@@ -380,3 +380,26 @@ test("a quoted sales card with uncertain delivery is recovered for drafting only
   assert.match(db.prepare("SELECT proposed_reply FROM sales_approvals WHERE case_ref='SA-RECOVER'").get().proposed_reply,/R1,250/);
  } finally {global.fetch=savedFetch;db.close();}
 });
+
+
+test("a reply quoting the no-send status can show the current draft without sending", async () => {
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:"), cards=[];
+ let sent=0, reasoned=0;
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sent++;}};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:`card-${cards.length}`}};}};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)")
+  .run("SA-DRAFT","27760000000","Can you quote?","Door-to-door is R3,500 including comprehensive insurance.",new Date().toISOString());
+ const savedFetch=global.fetch;
+ global.fetch=async()=>{reasoned++;throw new Error("reasoner should not be called");};
+ try {
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:"draft-1"},body:"I need to see the draft",hasQuotedMsg:true,getQuotedMessage:async()=>({body:"I haven't sent anything for SA-DRAFT. I need a clear instruction such as “send it” before any client message can leave."}),timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(sent,0);
+  assert.equal(reasoned,0);
+  assert.match(cards[0],/^Current draft for \*SA-DRAFT\*/);
+  assert.match(cards[0],/Door-to-door is R3,500 including comprehensive insurance\./);
+  assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-DRAFT'").get().state,"pending");
+ } finally {global.fetch=savedFetch;db.close();}
+});
