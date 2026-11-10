@@ -146,6 +146,14 @@ function recordAcceptedSend(idempotencyKey, record) {
   fs.writeFileSync(tmp, JSON.stringify(ledger), "utf8");
   fs.renameSync(tmp, SEND_LEDGER_PATH);
 }
+function removeAcceptedSend(idempotencyKey) {
+  const ledger = readSendLedger();
+  if (!ledger[idempotencyKey]) return;
+  delete ledger[idempotencyKey];
+  const tmp = `${SEND_LEDGER_PATH}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(ledger), "utf8");
+  fs.renameSync(tmp, SEND_LEDGER_PATH);
+}
 
 const approvalClient = process.env.SHARED_BRIDGE_URL ? new SharedClient(process.env.SHARED_BRIDGE_URL) : null;
 const client = process.env.CUSTOMER_SESSION_LOCAL === "true" ? new Client({
@@ -202,6 +210,7 @@ async function sendWhatsApp({ phone, chatId, text, idempotencyKey }) {
   if (prior) return { success: true, accepted: true, deduplicated: true, messageId: prior.messageId || null, chatId: prior.chatId || targetChatId };
   const result = await client.sendMessage(targetChatId, text);
   const messageId = result?.id?._serialized || null;
+  if (!messageId) throw new Error("WhatsApp send returned no delivery receipt");
   recordAcceptedSend(idempotencyKey, { messageId, chatId: targetChatId });
   return { success: true, accepted: true, deduplicated: false, messageId, chatId: targetChatId };
 }
@@ -409,12 +418,48 @@ function logFirstTouchStatus() {
 setInterval(logFirstTouchStatus, 60000);
 setTimeout(logFirstTouchStatus, 15000);
 
+function firstTouchText(lead) {
+  return `Hi ${lead.name || "there"}, thanks for reaching out to Bike Transport South Africa 🇿🇦\n\nI see you already got an estimate from our website 💪\n${[lead.bike_make, lead.bike_model].filter(Boolean).join(" ")}\nRoute: ${lead.pickup} → ${lead.dropoff}${!lead.manual_review && lead.estimated_price ? ` with an estimate of R${lead.estimated_price}` : ""}${lead.urgency ? ` | ${lead.urgency}` : ""}\n\nHow soon do you need transport? Availability and routing change quickly, so this allows me to secure the best rate before slots fill.\n\nThanks, Duane`;
+}
+
+async function reconcileUnverifiedFirstTouches() {
+  if (!process.env.SHARED_BRIDGE_URL || !client.info) return;
+  const rows = db.prepare(`SELECT l.* FROM leads l
+    WHERE l.submitted_at>=? AND l.first_touch_sent_at IS NOT NULL
+      AND EXISTS (SELECT 1 FROM events e WHERE e.lead_id=l.id AND e.event_type='first_touch_sent' AND e.details LIKE '%"messageId":null%')
+      AND NOT EXISTS (SELECT 1 FROM events r WHERE r.lead_id=l.id AND r.event_type IN ('first_touch_receipt_verified','first_touch_receipt_missing','first_touch_receipt_ambiguous'))
+    ORDER BY l.id`).all(FIRST_TOUCH_START_AT);
+  for (const lead of rows) {
+    try {
+      const text = firstTouchText(lead);
+      const receipt = await bridgeRequest(process.env.SHARED_BRIDGE_URL, "/bridge/outbound-receipt", {
+        chatId: `${normalizeZaPhone(lead.phone)}@c.us`, text,
+        since: Math.floor((Date.parse(lead.received_at) - 60000) / 1000),
+      });
+      if (!Number.isInteger(receipt.count)) continue;
+      if (receipt.count === 1 && receipt.id) {
+        logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_receipt_verified", key: `first-touch-receipt-verified-${lead.id}`, details: { messageId: receipt.id } });
+        console.log("First-touch receipt verified", JSON.stringify({ leadId: lead.id, messageId: receipt.id }));
+      } else if (receipt.count === 0) {
+        const key = `lead-first-touch-phone-${lead.phone}-${formatLocalDate(new Date(lead.submitted_at))}`;
+        db.prepare("UPDATE leads SET first_touch_sent_at=NULL WHERE id=?").run(lead.id);
+        removeAcceptedSend(key);
+        logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_receipt_missing", key: `first-touch-receipt-missing-${lead.id}` });
+        console.log("First-touch released for safe retry", JSON.stringify({ leadId: lead.id }));
+      } else {
+        logEvent({ leadId: lead.id, phone: lead.phone, type: "first_touch_receipt_ambiguous", key: `first-touch-receipt-ambiguous-${lead.id}`, details: { count: receipt.count } });
+        console.error("First-touch receipt ambiguous; not retrying", JSON.stringify({ leadId: lead.id, count: receipt.count }));
+      }
+    } catch (error) { console.error("First-touch receipt check deferred", JSON.stringify({ leadId: lead.id, error: error.message })); }
+  }
+}
+
 async function processFirstTouches() {
   if (!client.info) return;
   const rows = selectFirstTouchCandidates(db, FIRST_TOUCH_START_AT, isoNow());
   for (const lead of rows) {
     const key = `lead-first-touch-phone-${lead.phone}-${formatLocalDate(new Date(lead.submitted_at))}`;
-    const text = `Hi ${lead.name || "there"}, thanks for reaching out to Bike Transport South Africa 🇿🇦\n\nI see you already got an estimate from our website 💪\n${[lead.bike_make, lead.bike_model].filter(Boolean).join(" ")}\nRoute: ${lead.pickup} → ${lead.dropoff}${!lead.manual_review && lead.estimated_price ? ` with an estimate of R${lead.estimated_price}` : ""}${lead.urgency ? ` | ${lead.urgency}` : ""}\n\nHow soon do you need transport? Availability and routing change quickly, so this allows me to secure the best rate before slots fill.\n\nThanks, Duane`;
+    const text = firstTouchText(lead);
     try {
       const out = await sendWhatsApp({ phone: lead.phone, text, idempotencyKey: key });
       if (out.deduplicated) db.prepare("UPDATE leads SET duplicate_suppressed_at=? WHERE id=?").run(isoNow(), lead.id);
@@ -576,6 +621,7 @@ async function discoverApprovalRoute() {
 }
 if (approvalClient && approvalClient !== client) approvalClient.initialize().then(discoverApprovalRoute).catch(error=>console.error("Approval transport initialization failed:",error.message));
 setInterval(() => { if (!sales.ready()) discoverApprovalRoute(); }, 30000);
+setInterval(() => { reconcileUnverifiedFirstTouches().catch(console.error); }, 60000);
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
 setInterval(() => { sales.processDueFollowups().catch(console.error); }, 60000);
