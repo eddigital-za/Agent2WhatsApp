@@ -7,6 +7,25 @@ const path = require("node:path");
 const {DatabaseSync} = require("node:sqlite");
 const {installOutboundSafety} = require("./outbound-safety");
 const {installSalesAgent} = require("./sales-agent");
+const {resolveWhatsAppRecipient} = require("./whatsapp-recipient");
+const {selectFirstTouchCandidates} = require("./first-touch-store");
+test("outbound phone resolution prefers the WhatsApp LID and rejects unknown numbers before send",async()=>{
+ const normalize=x=>String(x||"").replace(/\D/g,"");
+ const lidClient={getContactLidAndPhone:async ids=>[{pn:ids[0],lid:"123456789@lid"}],getNumberId:async()=>{throw Error("fallback must not run");}};
+ assert.equal(await resolveWhatsAppRecipient(lidClient,"+27 72 000 0000",normalize),"123456789@lid");
+ const unknownClient={getContactLidAndPhone:async()=>[{}],getNumberId:async()=>null};
+ await assert.rejects(resolveWhatsAppRecipient(unknownClient,"27720000000",normalize),/not registered/);
+});
+test("first-touch recovery selects yesterday and new leads without replaying older leads",()=>{
+ const db=new DatabaseSync(":memory:");
+ db.exec("CREATE TABLE leads(id INTEGER PRIMARY KEY,submitted_at TEXT,first_touch_due_at TEXT,first_touch_sent_at TEXT,replied_at TEXT,duplicate_suppressed_at TEXT)");
+ const add=db.prepare("INSERT INTO leads(id,submitted_at,first_touch_due_at) VALUES(?,?,?)");
+ add.run(1,"2026-11-08T21:59:59.999Z","2026-11-08T22:00:00.000Z");
+ add.run(2,"2026-11-08T22:00:00.000Z","2026-11-08T22:01:00.000Z");
+ add.run(3,"2026-11-10T04:00:00.000Z","2026-11-10T04:01:00.000Z");
+ assert.deepEqual(selectFirstTouchCandidates(db,"2026-11-08T22:00:00.000Z","2026-11-10T05:00:00.000Z").map(row=>row.id),[2,3]);
+ db.close();
+});
 test("outbound reservations deduplicate concurrent sends and persist across restart", async () => {
  const file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),"btsa-safety-")),"state.json");
  let sent=0;
