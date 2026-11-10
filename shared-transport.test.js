@@ -34,7 +34,7 @@ const server=load("bridge-server.js",{"./shared-transport":{auth:transport.auth,
 process.env.SHARED_BRIDGE_WORKERS='["https://social.example"]';
 const endpoints={};const sent=[];
 const bridge=server.installBridge({get:(p,...h)=>endpoints[p]=h,post:(p,...h)=>endpoints[p]=h},
-{info:{wid:{user:"27670000000"}},sendMessage:async(...args)=>{sent.push(args);return {id:{_serialized:"sent"}};}},class{});
+{info:{wid:{user:"27670000000"}},on(){},sendMessage:async(...args)=>{sent.push(args);return {id:{_serialized:"sent"}};}},class{});
 await endpoints["/bridge/refresh"].at(-1)({},result);
 assert.equal(bridge.pending("456@g.us"),true);assert.equal(bridge.hasRoute("456@g.us"),false);
 active=true;await endpoints["/bridge/refresh"].at(-1)({},result);

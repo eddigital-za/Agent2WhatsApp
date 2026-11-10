@@ -1,6 +1,14 @@
 "use strict";
 const {auth,request} = require("./shared-transport");
 const {installOutboundSafety} = require("./outbound-safety");
+async function resolveDirectRecipient(client, chatId) {
+  if (!/^\d{7,15}@c\.us$/.test(String(chatId || ""))) return chatId;
+  if (typeof client.getContactLidAndPhone !== "function") throw new Error("WhatsApp LID lookup unavailable");
+  const mappings = await client.getContactLidAndPhone([chatId]);
+  const lid = mappings?.[0]?.lid?._serialized || mappings?.[0]?.lid || "";
+  if (!String(lid).endsWith("@lid")) throw new Error("WhatsApp LID unavailable for direct recipient");
+  return String(lid);
+}
 function installBridge(app,client,MessageMedia) {
   const safety = installOutboundSafety(client);
   app.get("/bridge/safety",auth,(_req,res)=>res.json(safety.status()));
@@ -56,18 +64,22 @@ function installBridge(app,client,MessageMedia) {
       if(!text&&!media?.data)return res.status(400).json({error:"Message required"});
       if(media&&(!media.mimetype||typeof media.data!=="string"))return res.status(400).json({error:"Invalid media"});
       const message=media?new MessageMedia(media.mimetype,media.data,media.filename):text;
-      const sent=await client.sendMessage(chatId,message,options||{});
-      res.json({success:true,id:{_serialized:sent?.id?._serialized||sent?.id?.$1||sent?.id?.id||""}});
+      const targetChatId=await resolveDirectRecipient(client,chatId);
+      const sent=await client.sendMessage(targetChatId,message,{...(options||{}),waitUntilMsgSent:true});
+      const messageId=sent?.id?._serialized||sent?.id?.$1||sent?.id?.id||"";
+      if(!messageId)throw new Error("WhatsApp did not return an outbound receipt");
+      res.json({success:true,id:{_serialized:messageId}});
     }catch(e){console.error("Shared outbound failed:",e.message);res.status(500).json({error:"Send outcome requires reconciliation"});}
   });
   app.post("/bridge/outbound-receipt",auth,async(req,res)=>{
     try{
       const {chatId,text,since}=req.body||{};
       if(!client.info||!/^\d{9,15}@c\.us$/.test(chatId||"")||typeof text!=="string"||text.length>4000||!Number.isFinite(since))return res.status(400).json({error:"Invalid receipt lookup"});
-      const ids=await client.pupPage.evaluate(async ({chatId,text,since})=>{
-        const chat=await window.WWebJS.getChat(chatId,{getAsModel:false});
+      const targetChatId=await resolveDirectRecipient(client,chatId);
+      const ids=await client.pupPage.evaluate(async ({targetChatId,text,since})=>{
+        const chat=await window.WWebJS.getChat(targetChatId,{getAsModel:false});
         return (chat?.msgs?.getModelsArray()||[]).filter(m=>m.id?.fromMe===true&&m.type==="chat"&&m.body===text&&m.t>=since).map(m=>m.id._serialized||m.id.$1||m.id.id).filter(Boolean);
-      },{chatId,text,since});
+      },{targetChatId,text,since});
       res.json({id:ids.length===1?ids[0]:null});
     }catch(e){res.status(502).json({error:"WhatsApp receipt lookup unavailable"});}
   });
@@ -133,5 +145,5 @@ async function serializeMessage(message,downloadMedia,client) {
   return payload;
 }
 
-module.exports={installBridge,serializeMessage};
+module.exports={installBridge,serializeMessage,resolveDirectRecipient};
 
