@@ -430,3 +430,23 @@ test("wording feedback misclassified as send is saved as a revision and still ne
   assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-WORDING'").get().state,"sent");
  } finally {global.fetch=savedFetch;db.close();}
 });
+
+test("placeholder booking links are blocked even with explicit send approval", async () => {
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:"), cards=[];
+ let sent=0;
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sent++;}};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:"warning"}};}};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)")
+  .run("SA-LINK","27760000000","How do I book?","Please complete the booking here: [link](https://yourwebsite.com/booking).",new Date().toISOString());
+ const savedFetch=global.fetch;
+ global.fetch=async()=>({ok:true,json:async()=>({intent:"send",finalReply:"Please complete the booking here: [link](https://yourwebsite.com/booking)."})});
+ try {
+  await agent.onApproval({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:"link-1"},body:"send it",hasQuotedMsg:true,getQuotedMessage:async()=>({body:"Understood. Revised reply for *SA-LINK*:"}),timestamp:Math.floor(Date.now()/1000)});
+  assert.equal(sent,0);
+  assert.match(cards[0],/placeholder link/);
+  assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-LINK'").get().state,"pending");
+ } finally {global.fetch=savedFetch;db.close();}
+});
