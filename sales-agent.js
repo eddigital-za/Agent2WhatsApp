@@ -99,6 +99,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (!text || isNoReplyInstruction(text)) return false;
     return /\b(?:send(?: it| that| this| the reply| the message)?|go ahead|yes,? send|reply(?: with| saying| to)?|respond(?: with| saying| to)?|tell (?:him|her|them|the client|the customer)|say (?:that|this|to him|to her|to them)|let (?:him|her|them|the client|the customer) know|confirm (?:that|with|to))\b/.test(text);
   }
+  function hasPlaceholderLink(value) {
+    const text = String(value || "");
+    return /https?:\/\/(?:www\.)?(?:yourwebsite\.com|example\.(?:com|org))\b/i.test(text)
+      || /\[(?:link|booking link|sla link|insert[^\]]*link)\]/i.test(text);
+  }
   function supersedePreCohortApprovals() {
     const start = cohortStart();
     if (start === null) return;
@@ -618,6 +623,10 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (out.intent === "send") out.intent = "revise";
     }
     if (!row.proposed_reply && out.intent === "send") out.intent = "revise";
+    if (out.finalReply && hasPlaceholderLink(out.finalReply)) {
+      await group(`I haven't sent anything for ${row.case_ref}. The draft contains a placeholder link. Send me the real BTSA booking link, or tell me to leave the link out.`);
+      return true;
+    }
     const sendAuthorized = explicitlyAuthorizesSend(approvalWords);
     if (out.intent === "send" && !sendAuthorized && out.finalReply && out.finalReply.trim() !== row.proposed_reply.trim()) {
       // The model sometimes labels wording feedback as "send". Preserve the revision,
