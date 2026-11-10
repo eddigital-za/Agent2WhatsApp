@@ -628,6 +628,7 @@ setInterval(() => { if (!sales.ready()) discoverApprovalRoute(); }, 30000);
 setInterval(() => { reconcileUnverifiedFirstTouches().catch(console.error); }, 60000);
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
+setInterval(() => { sales.processInboundConversations().catch(console.error); }, 2000);
 setInterval(() => { sales.processDueFollowups().catch(console.error); }, 60000);
 setInterval(() => { sales.processLeadSequence().catch(console.error); }, 300000);
 setInterval(() => { sales.processOrderConfirmations().catch(console.error); }, 60000);

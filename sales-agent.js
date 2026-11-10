@@ -16,6 +16,17 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       decided_at TEXT, decision_text TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_sales_approvals_state ON sales_approvals(state, created_at);
+    CREATE TABLE IF NOT EXISTS sales_conversation_queue(
+      phone TEXT PRIMARY KEY,
+      lead_id INTEGER,
+      first_message_at TEXT NOT NULL,
+      last_message_at TEXT NOT NULL,
+      due_at TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sales_conversation_queue_due ON sales_conversation_queue(state, due_at);
     CREATE TABLE IF NOT EXISTS sales_sla_followups(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       phone TEXT NOT NULL,
@@ -212,29 +223,111 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       logEvent({ leadId: lead.id, phone, type: "sales_duplicate_inbound_suppressed", key: `sales-duplicate-${message.id?._serialized || now()}`, details: { text } });
       return true;
     }
-    remember(phone, "customer", text, message.id?._serialized);
+    const receivedAt = now();
+    remember(phone, "customer", text, message.id?._serialized, receivedAt);
     await hydrateWhatsAppHistory(message, phone);
-    const context = process.env.SALES_TEST_MODE === "false"
-      ? leadContext(phone, lead)
-      : { current: { id: lead.id, phone, context_status: "isolated test enquiry; saved form details intentionally excluded" }, inquiries: [] };
-    const conversation = history(phone);
-    const out = await reason("/sales/customer", { lead: context.current, leadInquiries: context.inquiries, message: text, history: conversation });
-    if (out.action === "no_reply" || !out.proposedReply) {
-      logEvent({ leadId: lead?.id || null, phone, type: "sales_no_reply", key: `sales-no-reply-${message.id?._serialized || now()}`, details: { category: out.category, notes: out.notes } });
-      return true;
+    const debounceSeconds = Math.max(0, Number(process.env.SALES_REPLY_DEBOUNCE_SECONDS ?? 20));
+    const dueAt = new Date(Date.parse(receivedAt) + debounceSeconds * 1000).toISOString();
+    db.prepare(`INSERT INTO sales_conversation_queue(phone,lead_id,first_message_at,last_message_at,due_at,state,updated_at)
+      VALUES(?,?,?,?,?,'pending',?)
+      ON CONFLICT(phone) DO UPDATE SET
+        lead_id=excluded.lead_id,
+        first_message_at=CASE WHEN sales_conversation_queue.state IN ('pending','processing') THEN sales_conversation_queue.first_message_at ELSE excluded.first_message_at END,
+        last_message_at=excluded.last_message_at,
+        due_at=excluded.due_at,
+        state='pending',
+        attempts=CASE WHEN sales_conversation_queue.state IN ('pending','processing') THEN sales_conversation_queue.attempts ELSE 0 END,
+        updated_at=excluded.updated_at`)
+      .run(phone, lead?.id || null, receivedAt, receivedAt, dueAt, receivedAt);
+    logEvent({ leadId: lead?.id || null, phone, type: "sales_conversation_queued", key: `sales-queued-${message.id?._serialized || receivedAt}`, details: { dueAt } });
+    return true;
+  }
+
+  async function processInboundConversations() {
+    if (!conversationReady()) return 0;
+    const rows = db.prepare("SELECT * FROM sales_conversation_queue WHERE state='pending' AND due_at<=? ORDER BY due_at ASC LIMIT 5").all(now());
+    let processed = 0;
+    for (const queued of rows) {
+      const locked = db.prepare("UPDATE sales_conversation_queue SET state='processing',attempts=attempts+1,updated_at=? WHERE phone=? AND state='pending' AND due_at=?")
+        .run(now(), queued.phone, queued.due_at);
+      if (locked.changes !== 1) continue;
+      try {
+        const lead = queued.lead_id
+          ? db.prepare("SELECT * FROM leads WHERE id=?").get(queued.lead_id)
+          : db.prepare("SELECT * FROM leads WHERE phone=? ORDER BY submitted_at DESC,id DESC LIMIT 1").get(queued.phone);
+        if (!eligibleLead(lead)) {
+          db.prepare("UPDATE sales_conversation_queue SET state='ignored',updated_at=? WHERE phone=? AND state='processing' AND last_message_at=?")
+            .run(now(), queued.phone, queued.last_message_at);
+          continue;
+        }
+        const newMessages = db.prepare(`SELECT body,created_at FROM sales_messages
+          WHERE phone=? AND direction='customer' AND created_at>=? AND created_at<=?
+          ORDER BY created_at ASC,id ASC`).all(queued.phone, queued.first_message_at, queued.last_message_at);
+        const customerText = newMessages.map(row => row.body).filter(Boolean).join("\n");
+        if (!customerText) throw new Error("Queued conversation has no customer text");
+        const context = process.env.SALES_TEST_MODE === "false"
+          ? leadContext(queued.phone, lead)
+          : { current: { id: lead.id, phone: queued.phone, context_status: "isolated test enquiry; saved form details intentionally excluded" }, inquiries: [] };
+        const conversation = history(queued.phone);
+        const out = await reason("/sales/customer", {
+          lead: context.current,
+          leadInquiries: context.inquiries,
+          message: customerText,
+          newMessages,
+          history: conversation,
+        });
+        const active = db.prepare("SELECT state,last_message_at FROM sales_conversation_queue WHERE phone=?").get(queued.phone);
+        if (!active || active.state !== "processing" || active.last_message_at !== queued.last_message_at) continue;
+        if (out.action === "no_reply") {
+          db.prepare("UPDATE sales_conversation_queue SET state='completed',updated_at=? WHERE phone=? AND state='processing' AND last_message_at=?")
+            .run(now(), queued.phone, queued.last_message_at);
+          logEvent({ leadId: lead.id, phone: queued.phone, type: "sales_no_reply", key: `sales-no-reply-${queued.last_message_at}`, details: { category: out.category, notes: out.notes } });
+          processed++;
+          continue;
+        }
+        if (out.action !== "reply" && out.action !== "owner_input") throw new Error("Reasoner returned an unsupported sales action");
+        if (out.action === "reply" && !String(out.proposedReply || "").trim()) throw new Error("Reasoner returned no proposed reply");
+        if (out.action === "owner_input" && !String(out.ownerQuestion || "").trim()) throw new Error("Reasoner returned no owner question");
+        const ref = caseRef();
+        db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=?,decision_text='Newer client turn' WHERE phone=? AND state='pending'")
+          .run(now(), queued.phone);
+        const contextJson = JSON.stringify({ lead: context.current, leadInquiries: context.inquiries, history: conversation, newMessages, salesMove: out.salesMove });
+        const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,context_json,created_at) VALUES(?,?,?,?,?,?,?)")
+          .run(ref, lead.id, queued.phone, customerText, String(out.proposedReply || ""), contextJson, now());
+        const bike = [context.current.bike_make, context.current.bike_model].filter(Boolean).join(" ");
+        const route = [context.current.pickup, context.current.dropoff].filter(Boolean).join(" → ");
+        const label = `${context.current.name || `Lead …${queued.phone.slice(-4)}`}${bike ? ` | ${bike}` : ""}${route ? `\n${route}` : ""}`;
+        const move = String(out.salesMove || "answer").replace(/_/g, " ");
+        const recommendation = out.action === "owner_input"
+          ? `*I need from you:*\n${out.ownerQuestion}`
+          : `*My suggested reply:*\n${out.proposedReply}`;
+        const card = `*${ref} — ${label}*\n\n*Client (${newMessages.length} message${newMessages.length === 1 ? "" : "s"}):*\n${customerText}\n\n*Sales move:* ${move}\n\n${recommendation}\n\nReply naturally or send a voice note. I will wait for your approval before sending anything.`;
+        let groupId;
+        try { groupId = await group(card); }
+        catch (error) {
+          db.prepare("UPDATE sales_approvals SET state='delivery_unknown',decided_at=?,decision_text='Approval card delivery unknown' WHERE id=? AND state='pending'")
+            .run(now(), Number(result.lastInsertRowid));
+          db.prepare("UPDATE sales_conversation_queue SET state='approval_unknown',updated_at=? WHERE phone=? AND state='processing' AND last_message_at=?")
+            .run(now(), queued.phone, queued.last_message_at);
+          throw error;
+        }
+        db.prepare("UPDATE sales_approvals SET group_message_id=? WHERE id=?").run(groupId, Number(result.lastInsertRowid));
+        db.prepare("UPDATE sales_conversation_queue SET state='completed',updated_at=? WHERE phone=? AND state='processing' AND last_message_at=?")
+          .run(now(), queued.phone, queued.last_message_at);
+        logEvent({ leadId: lead.id, phone: queued.phone, type: "sales_approval_requested", key: `sales-request-${ref}`, details: { ref, action: out.action, salesMove: out.salesMove, category: out.category, confidence: out.confidence, messageCount: newMessages.length } });
+        processed++;
+      } catch (error) {
+        const current = db.prepare("SELECT state,attempts FROM sales_conversation_queue WHERE phone=?").get(queued.phone);
+        if (current?.state === "processing") {
+          const state = current.attempts >= 3 ? "failed" : "pending";
+          const retryAt = new Date(Date.now() + 60000).toISOString();
+          db.prepare("UPDATE sales_conversation_queue SET state=?,due_at=?,updated_at=? WHERE phone=? AND state='processing'")
+            .run(state, retryAt, now(), queued.phone);
+        }
+        console.error("Sales conversation processing failed:", error.message);
+      }
     }
-    const ref = caseRef();
-    db.prepare("UPDATE sales_approvals SET state='superseded' WHERE phone=? AND state='pending'").run(phone);
-    const contextJson = JSON.stringify({ lead: context.current, leadInquiries: context.inquiries, history: conversation });
-    const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,context_json,created_at) VALUES(?,?,?,?,?,?,?)")
-      .run(ref, lead?.id || null, phone, text, out.proposedReply, contextJson, now());
-    const bike = [context.current.bike_make, context.current.bike_model].filter(Boolean).join(" ");
-    const route = [context.current.pickup, context.current.dropoff].filter(Boolean).join(" → ");
-    const label = `${context.current.name || `Lead …${phone.slice(-4)}`}${bike ? ` | ${bike}` : ""}${route ? `\n${route}` : ""}`;
-    const prompt = `*${ref} — ${label}*\n\n*Client:* ${text}\n\n*My suggested reply:*\n${out.proposedReply}\n\nReply naturally or send a voice note. I will wait for your approval before sending.`;
-    const groupId = await group(prompt);
-    db.prepare("UPDATE sales_approvals SET group_message_id=? WHERE id=?").run(groupId, Number(result.lastInsertRowid));
-    logEvent({ leadId: lead?.id || null, phone, type: "sales_approval_requested", key: `sales-request-${ref}`, details: { ref, category: out.category, confidence: out.confidence } });
+    return processed;
   }
 
   async function onOutgoing(message, phone) {
@@ -535,7 +628,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return true;
   }
 
-  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processDueFollowups, processLeadSequence, processOrderConfirmations, ready, conversationReady };
+  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processInboundConversations, processDueFollowups, processLeadSequence, processOrderConfirmations, ready, conversationReady };
 }
 
 module.exports = { installSalesAgent };

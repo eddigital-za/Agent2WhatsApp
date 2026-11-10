@@ -50,17 +50,20 @@ test("outbound reservations deduplicate concurrent sends and persist across rest
  assert.equal(sent,3);
 });
 test("fresh test enquiries exclude old form facts and an unquoted correction selects only the latest case", async () => {
- process.env.SALES_ENABLED="true";process.env.SALES_CONVERSATION_ENABLED="true";process.env.SALES_TEST_MODE="true";process.env.SALES_TEST_PHONES="27760000000";
+ process.env.SALES_ENABLED="true";process.env.SALES_CONVERSATION_ENABLED="true";process.env.SALES_TEST_MODE="true";process.env.SALES_TEST_PHONES="27760000000";process.env.SALES_REPLY_DEBOUNCE_SECONDS="0";
  const db=new DatabaseSync(":memory:");let sent=0;const cards=[],payloads=[];
+	 db.exec("CREATE TABLE leads(id INTEGER PRIMARY KEY,submitted_at TEXT,received_at TEXT,name TEXT,phone TEXT,pickup TEXT,dropoff TEXT,bike_make TEXT,estimated_price TEXT)");
+	 db.prepare("INSERT INTO leads VALUES(?,?,?,?,?,?,?,?,?)").run(317,new Date().toISOString(),new Date().toISOString(),"test","27760000000","OLD ADDRESS","OTHER OLD ADDRESS","test","2750");
  const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sent++;}};
  const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:"card-"+cards.length}};}};
  const norm=x=>String(x||"").replace(/\D/g,"");
  const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
  db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)").run("SA-OLD","27760000000","old enquiry","R2750",new Date().toISOString());
  const savedFetch=global.fetch;
- global.fetch=async(url,opts)=>{payloads.push(JSON.parse(opts.body));return {ok:true,json:async()=>url.endsWith("customer")?{proposedReply:"What bike and which collection/delivery areas?"}:{intent:"revise",finalReply:"What bike are you moving, and which areas?",response:""}};};
+	 global.fetch=async(url,opts)=>{payloads.push(JSON.parse(opts.body));return {ok:true,json:async()=>url.endsWith("customer")?{action:"reply",salesMove:"qualify",proposedReply:"What bike and which collection/delivery areas?",ownerQuestion:"",category:"price",confidence:1,notes:""}:{intent:"revise",finalReply:"What bike are you moving, and which areas?",response:""}};};
  try {
   await agent.onCustomer({from:"27760000000@c.us",body:"What's your Durban to Johannesburg rate?",id:{_serialized:"false_new"},timestamp:Math.floor(Date.now()/1000)}, {id:317,name:"test",pickup:"OLD ADDRESS",dropoff:"OTHER OLD ADDRESS",bike_make:"test",estimated_price:"2750"},"27760000000");
+	  await agent.processInboundConversations();
   assert.equal(payloads[0].lead.pickup,undefined);assert.equal(payloads[0].lead.estimated_price,undefined);
   assert.equal(cards[0].includes("OLD ADDRESS"),false);assert.equal(cards[0].includes("2750"),false);
   assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-OLD'").get().state,"superseded");
@@ -186,7 +189,7 @@ test("corrected SLA submissions suppress repeated confirmations but a different 
  } finally {db.close();}
 });
 test("sales uses WhatsApp history and all matching lead rows, and suppresses acknowledgements",async()=>{
- process.env.SALES_ENABLED="true";process.env.SALES_CONVERSATION_ENABLED="true";process.env.SALES_TEST_MODE="false";process.env.SALES_LEAD_COHORT_START="2026-11-01T00:00:00.000Z";
+ process.env.SALES_ENABLED="true";process.env.SALES_CONVERSATION_ENABLED="true";process.env.SALES_TEST_MODE="false";process.env.SALES_LEAD_COHORT_START="2026-11-01T00:00:00.000Z";process.env.SALES_REPLY_DEBOUNCE_SECONDS="0";
  const db=new DatabaseSync(":memory:");
  db.exec(`CREATE TABLE leads(
   id INTEGER PRIMARY KEY, submitted_at TEXT, received_at TEXT, first_touch_sent_at TEXT, name TEXT, phone TEXT,
@@ -213,6 +216,7 @@ test("sales uses WhatsApp history and all matching lead rows, and suppresses ack
   assert.equal(await agent.onOutgoing(manual,"760000000"),true);
   const latest=db.prepare("SELECT * FROM leads WHERE id=2").get();
   await agent.onCustomer(thumb,latest,"760000000");
+	  await agent.processInboundConversations();
   assert.equal(cards.length,0);
   assert.equal(payloads.length,1);
   assert.equal(payloads[0].leadInquiries.length,2);
@@ -271,7 +275,7 @@ test("a transcribed voice instruction not to reply cancels without sending",asyn
  } finally {global.fetch=savedFetch;db.close();}
 });
 test("conversation sales handles only the new website cohort and suppresses repeated inbound text",async()=>{
- process.env.SALES_ENABLED="true";process.env.SALES_CONVERSATION_ENABLED="true";process.env.SALES_TEST_MODE="false";
+ process.env.SALES_ENABLED="true";process.env.SALES_CONVERSATION_ENABLED="true";process.env.SALES_TEST_MODE="false";process.env.SALES_REPLY_DEBOUNCE_SECONDS="0";
  const cohort=new Date(Date.now()-3600000).toISOString();process.env.SALES_LEAD_COHORT_START=cohort;
  const db=new DatabaseSync(":memory:");db.exec(`CREATE TABLE leads(
   id INTEGER PRIMARY KEY, submitted_at TEXT, received_at TEXT, first_touch_sent_at TEXT, replied_at TEXT,
@@ -292,7 +296,37 @@ test("conversation sales handles only the new website cohort and suppresses repe
   assert.equal(await agent.onCustomer({fromMe:false,body:"Still interested",id:{_serialized:"false_old_cohort"},timestamp:stamp},db.prepare("SELECT * FROM leads WHERE id=1").get(),"760000001"),false);
   await agent.onCustomer({fromMe:false,body:"Still interested",id:{_serialized:"false_new_cohort_1"},timestamp:stamp},db.prepare("SELECT * FROM leads WHERE id=2").get(),"760000002");
   await agent.onCustomer({fromMe:false,body:"Still interested",id:{_serialized:"false_new_cohort_2"},timestamp:stamp},db.prepare("SELECT * FROM leads WHERE id=2").get(),"760000002");
+	  await agent.processInboundConversations();
   assert.equal(payloads.length,1);assert.equal(cards.length,1);assert.match(cards[0],/New/);
+ } finally {global.fetch=savedFetch;db.close();}
+});
+test("consecutive client messages create one approval for the whole sales turn",async()=>{
+ process.env.SALES_ENABLED="true";process.env.SALES_CONVERSATION_ENABLED="true";process.env.SALES_TEST_MODE="false";process.env.SALES_REPLY_DEBOUNCE_SECONDS="0";
+ process.env.SALES_LEAD_COHORT_START=new Date(Date.now()-3600000).toISOString();
+ const db=new DatabaseSync(":memory:");db.exec(`CREATE TABLE leads(
+  id INTEGER PRIMARY KEY, submitted_at TEXT, received_at TEXT, first_touch_sent_at TEXT, replied_at TEXT,
+  followup_sent_at TEXT, duplicate_suppressed_at TEXT, name TEXT, phone TEXT, pickup TEXT, dropoff TEXT,
+  bike_type TEXT, bike_make TEXT, bike_model TEXT, urgency TEXT, estimated_price TEXT
+ )`);
+ const received=new Date().toISOString();
+ db.prepare("INSERT INTO leads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(1,received,received,null,null,null,null,"Antoun","760000000","Johannesburg","Cape Town","Standard","BMW","R 1250 GS","December","2800");
+ const cards=[],payloads=[];
+ const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async()=>({id:{_serialized:"sent"}})};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:`card-${cards.length}`}};}};
+ const norm=x=>String(x||"").replace(/\D/g,"");const local=x=>{const n=norm(x);return n.startsWith("27")?n.slice(2):n;};
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:local,logEvent:()=>{}});
+ const savedFetch=global.fetch;global.fetch=async(_url,opts)=>{const p=JSON.parse(opts.body);payloads.push(p);return {ok:true,json:async()=>({action:"owner_input",salesMove:"close",proposedReply:"",ownerQuestion:"What return rate should I offer for the January leg?",category:"price",confidence:1,notes:"Two-leg quote needs approval"})};};
+ const stamp=Math.floor(Date.now()/1000);
+ try {
+  await agent.onCustomer({fromMe:false,body:"I need it in Cape Town by 8 December",id:{_serialized:"false_leg_1"},timestamp:stamp},db.prepare("SELECT * FROM leads WHERE id=1").get(),"760000000");
+  await agent.onCustomer({fromMe:false,body:"Then I need it back to Joburg late January",id:{_serialized:"false_leg_2"},timestamp:stamp},db.prepare("SELECT * FROM leads WHERE id=1").get(),"760000000");
+  assert.equal(cards.length,0);
+  assert.equal(await agent.processInboundConversations(),1);
+  assert.equal(payloads.length,1);assert.equal(payloads[0].newMessages.length,2);
+  assert.match(payloads[0].message,/8 December[\s\S]*late January/);
+  assert.equal(cards.length,1);assert.match(cards[0],/Client \(2 messages\)/);
+  assert.match(cards[0],/I need from you/);assert.match(cards[0],/return rate/);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM sales_approvals").get().n,1);
  } finally {global.fetch=savedFetch;db.close();}
 });
 test("Day 3 and Day 7 website follow-ups require approval and do not duplicate",async()=>{
