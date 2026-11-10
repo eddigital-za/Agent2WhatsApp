@@ -1,5 +1,7 @@
 "use strict";
 
+const { createDefaultRetriever } = require("./sales-example-retriever");
+
 function responseText(payload) {
   if (payload.output_text) return payload.output_text;
   for (const item of payload.output || []) for (const c of item.content || []) if (c.type === "output_text") return c.text;
@@ -9,6 +11,21 @@ function responseText(payload) {
 function authorized(req) {
   const expected = String(process.env.SALES_AGENT_TOKEN || "");
   return expected.length >= 32 && req.get("authorization") === `Bearer ${expected}`;
+}
+
+function importAuthorized(req) {
+  const expected = String(process.env.SALES_EXAMPLE_IMPORT_TOKEN || "");
+  return expected.length >= 32 && req.get("authorization") === `Bearer ${expected}`;
+}
+
+function historicalExampleForPrompt(example) {
+  const sanitize = value => String(value || "")
+    .replace(/https?:\/\/\S+/gi, "[HISTORICAL_LINK]")
+    .replace(/\bR\s?\d+(?:[.,]\d+)?\s*k\b/gi, "[HISTORICAL_RATE]")
+    .replace(/\bR\s?\d[\d ,.]*\b/gi, "[HISTORICAL_RATE]")
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:k|rand)\b/gi, "[HISTORICAL_RATE]")
+    .slice(0, 1200);
+  return { customer: sanitize(example.customer), btsaResponse: sanitize(example.btsaResponse) };
 }
 
 function isNoReplyInstruction(value) {
@@ -47,9 +64,18 @@ const SALES_PLAYBOOK = `BTSA sales playbook:
 - Never say "I'll get back to you", "hang tight", "I'll check", or "I'll confirm soon" merely to produce a response. Either qualify, answer from verified facts, move to booking, ask Duane for a specific decision, or do not reply.
 - Write in Duane's first person: I, me, I'll, ask me. Keep it concise, natural and commercially useful.`;
 
+const EXAMPLE_RULES = `Historical BTSA examples:
+- Use the retrieved examples to understand Duane's tone, sales judgement, objection handling and closing style.
+- They are historical evidence, not templates. Never copy them blindly or expose their source IDs.
+- Never reuse an example's customer facts, route, price, availability, collection date, delivery date, insurance statement or operational promise.
+- Current lead facts, the current conversation and Duane's current approvals always override an example.
+- If an example conflicts with the current playbook or known facts, ignore it.`;
+
 const SALES_SYSTEM = `You are Duane's BTSA sales copilot for motorcycle transport in South Africa. Draft as Duane: warm, direct, practical, calm and conversational; concise WhatsApp language; no corporate fluff; no fake urgency; never mention AI. Match the client's tone without mimicking abuse.
 
 ${SALES_PLAYBOOK}
+
+${EXAMPLE_RULES}
 
 Read the entire supplied conversation and every matching lead inquiry before deciding what happens next. The latest conversational state controls the reply. Do not restart qualification or ask for a fact already present in the lead inquiries or conversation. Reconcile duplicate lead submissions as background for the same client. Use known make/model, route, timing and special requirements without making the client repeat them.
 
@@ -57,7 +83,7 @@ Choose action=no_reply when no useful customer-facing response is needed. This i
 
 Qualify only missing details that matter. A city-to-city price question with no known lead details normally needs the motorcycle and actual collection/delivery areas. Never state, change, calculate or negotiate a firm rate unless Duane explicitly confirmed that rate for this current client in the supplied conversation or approval instruction. Website estimates and lead-sheet prices are labelled background and are never authority for a firm quote. A rate Duane himself sent to this client is current approved price context and may be acknowledged, but never altered without approval. Never import facts from another client or training example. Never invent a discount, route slot, date, insurance term, policy, operational promise or availability. Move the sale forward naturally without pressure. Do not expose internal notes. All customer replies require Duane's approval.`;
 
-function installSalesReasoner(app, { apiKey, model }) {
+function installSalesReasoner(app, { apiKey, model, exampleRetriever = createDefaultRetriever() }) {
   const customerSchema = { type: "object", additionalProperties: false, properties: {
     action: { type: "string", enum: ["reply", "no_reply", "owner_input"] },
     salesMove: { type: "string", enum: ["qualify", "answer", "close", "hold"] },
@@ -73,10 +99,27 @@ function installSalesReasoner(app, { apiKey, model }) {
       if (!authorized(req)) return res.status(401).json({ error: "Unauthorized" });
       if (!apiKey) throw new Error("OPENAI_API_KEY missing");
       const p = req.body || {};
+      const retrievalQuery = [
+        String(p.message || ""),
+        JSON.stringify(p.lead || {}),
+        JSON.stringify((p.history || []).slice(-8)),
+      ].join("\n");
+      const historicalExamples = exampleRetriever.retrieve(retrievalQuery, 3).map(historicalExampleForPrompt);
       const out = await structured(apiKey, model, "btsa_sales_draft_v1", customerSchema, SALES_SYSTEM,
-        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching lead inquiries (website estimates are background only):\n${JSON.stringify(p.leadInquiries || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nNew client messages in this turn (handle together):\n${JSON.stringify(p.newMessages || [])}\n\nCombined client turn:\n${String(p.message || "")}`);
+        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching lead inquiries (website estimates are background only):\n${JSON.stringify(p.leadInquiries || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nNew client messages in this turn (handle together):\n${JSON.stringify(p.newMessages || [])}\n\nCombined client turn:\n${String(p.message || "")}\n\nRetrieved historical examples (tone and sales logic only; never copy historical facts):\n${JSON.stringify(historicalExamples)}`);
       res.json(out);
     } catch (e) { console.error("Sales customer reasoner:", e.message); res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/sales/examples/import", async (req, res) => {
+    try {
+      if (!importAuthorized(req)) return res.status(401).json({ error: "Unauthorized" });
+      const encoded = String(req.body?.dataBase64 || "");
+      if (!encoded) return res.status(400).json({ error: "dataBase64 is required" });
+      const jsonl = Buffer.from(encoded, "base64").toString("utf8");
+      const count = exampleRetriever.replace(jsonl);
+      res.json({ ok: true, exampleCount: count });
+    } catch (e) { console.error("Sales example import:", e.message); res.status(400).json({ error: e.message }); }
   });
 
   app.post("/sales/followup", async (req, res) => {
@@ -122,7 +165,8 @@ function installSalesReasoner(app, { apiKey, model }) {
       res.json({ ...out, transcript });
     } catch (e) { console.error("Sales approval reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
+  return { get exampleCount() { return exampleRetriever.examples?.length || 0; } };
 }
 
-module.exports = { installSalesReasoner, SALES_SYSTEM, SALES_PLAYBOOK };
+module.exports = { installSalesReasoner, SALES_SYSTEM, SALES_PLAYBOOK, EXAMPLE_RULES };
 

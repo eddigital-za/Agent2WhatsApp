@@ -18,7 +18,7 @@ const WHATSAPP_SEND_URL=process.env.WHATSAPP_SEND_URL||'https://agent2whatsapp-p
 const COMMIT_WEBHOOK_URL=process.env.COMMIT_WEBHOOK_URL||'';
 const HISTORY_WEBHOOK_URL=process.env.HISTORY_WEBHOOK_URL||'';
 
-installSalesReasoner(app,{apiKey:OPENAI_API_KEY,model:OPENAI_MODEL});
+const salesReasonerStatus=installSalesReasoner(app,{apiKey:OPENAI_API_KEY,model:OPENAI_MODEL});
 
 fs.mkdirSync(DB_DIR,{recursive:true});
 const db=new DatabaseSync(DB_PATH);
@@ -215,7 +215,7 @@ async function commit(author,d,messageId){
  await send(`✅ *Manual order saved — ${slaRef}*\n${final.route} | ${final.make} ${final.model} | R${Number(final.rate).toLocaleString('en-ZA')}`);
  return {slaRef};
 }
-app.get('/health',(req,res)=>res.json({ok:true,openai:Boolean(OPENAI_API_KEY),commit:Boolean(COMMIT_WEBHOOK_URL),history:Boolean(HISTORY_WEBHOOK_URL),group:Boolean(ORDERS_GROUP_ID),dispatchConfigured:Boolean(process.env.DISPATCH_URL&&process.env.DISPATCH_API_KEY),dispatchConnected:dispatchBridge.isConnected()}));
+app.get('/health',(req,res)=>res.json({ok:true,openai:Boolean(OPENAI_API_KEY),commit:Boolean(COMMIT_WEBHOOK_URL),history:Boolean(HISTORY_WEBHOOK_URL),group:Boolean(ORDERS_GROUP_ID),dispatchConfigured:Boolean(process.env.DISPATCH_URL&&process.env.DISPATCH_API_KEY),dispatchConnected:dispatchBridge.isConnected(),salesExamples:salesReasonerStatus.exampleCount}));
 app.post('/inbound',async(req,res)=>{
  try{
   const p=req.body||{};

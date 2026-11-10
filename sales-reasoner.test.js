@@ -7,7 +7,12 @@ test("customer reasoning treats consecutive messages as one sales turn and can r
   process.env.SALES_AGENT_TOKEN = "x".repeat(32);
   const routes = new Map();
   const app = { post: (route, handler) => routes.set(route, handler) };
-  installSalesReasoner(app, { apiKey: "test-key", model: "test-model" });
+  const exampleRetriever = { examples: [{}], retrieve: () => [{
+    sourceConversationId: "BTSA-TEST",
+    customer: "That quote is expensive",
+    btsaResponse: "The old rate was R4,500. Let me see whether route flexibility helps.",
+  }] };
+  installSalesReasoner(app, { apiKey: "test-key", model: "test-model", exampleRetriever });
   const originalFetch = global.fetch;
   let request;
   global.fetch = async (_url, options) => {
@@ -48,4 +53,7 @@ test("customer reasoning treats consecutive messages as one sales turn and can r
   assert.ok(request.text.format.schema.properties.action.enum.includes("owner_input"));
   assert.match(request.input[0].content, /Treat the conversation, not an individual message/);
   assert.match(request.input[1].content, /8 December[\s\S]*late January/);
+  assert.match(request.input[1].content, /Retrieved historical examples/);
+  assert.match(request.input[1].content, /\[HISTORICAL_RATE\]/);
+  assert.doesNotMatch(request.input[1].content, /BTSA-TEST|R4,500/);
 });
