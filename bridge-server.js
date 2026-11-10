@@ -80,7 +80,7 @@ function installBridge(app,client,MessageMedia) {
         const chat=await window.WWebJS.getChat(targetChatId,{getAsModel:false});
         return (chat?.msgs?.getModelsArray()||[]).filter(m=>m.id?.fromMe===true&&m.type==="chat"&&m.body===text&&m.t>=since).map(m=>m.id._serialized||m.id.$1||m.id.id).filter(Boolean);
       },{targetChatId,text,since});
-      res.json({id:ids.length===1?ids[0]:null});
+      res.json({id:ids.length===1?ids[0]:null,count:ids.length});
     }catch(e){res.status(502).json({error:"WhatsApp receipt lookup unavailable"});}
   });
   client.on("ready", () => {
