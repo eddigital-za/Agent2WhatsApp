@@ -286,5 +286,50 @@ app.post('/inbound',async(req,res)=>{
   res.json({ok:true,missing:miss,historyCandidates:candidates.length});
  }catch(e){console.error('Inbound error',e);res.status(500).json({error:e.message});}
 });
-app.listen(PORT,()=>{console.log(`BTSA Order Intake listening on ${PORT}; db=${DB_PATH}`);dispatchBridge.probe().catch(console.error);});
+
+// One-time recovery of two user-requested approval drafts; no SLA commit.
+db.exec("CREATE TABLE IF NOT EXISTS recovery_draft_posts (draft_key TEXT PRIMARY KEY, posted_at TEXT NOT NULL)");
+async function postRecoveredDrafts(){
+ const drafts=[
+  {key:'recovery-20261111-gurpreet-vw',text:`*ORDER DRAFT 1/2 — APPROVAL REQUIRED*
+Customer: Gurpreet Kindra
+Vehicle: VW Beetle
+Route: Durban to Randburg
+Rate: R4,500
+Collection: Monday 16 November
+Delivery: Tuesday 17 November
+Assigned: BTSA
+Collection contact: Chirjeev Kindra | 083 788 5566
+Collection address: 166 Smiso Nkwanyana Road, Morningside, Durban, 4001
+Delivery contact: Gurpreet Kindra | 082 963 1921
+Delivery address: 44 7th Avenue, Parktown North, Randburg, 2193
+
+Recovered from the existing group conversation. *DRAFT ONLY — NOT SAVED.*
+Reply *Approve VW draft* or send corrections. No booking will be committed automatically.`},
+  {key:'recovery-20261111-ronnie-ktm',text:`*ORDER DRAFT 2/2 — APPROVAL REQUIRED*
+Customer: Ronnie (existing client, Rocket Racing)
+Vehicle: KTM 390 Duke
+Route: Rocket Racing, Pinetown to 27 Liefdesliedjie Crescent, Pellissier, Bloemfontein
+Rate: R3,500
+Collection: Monday 16 November
+Delivery: Thursday 19 November
+Assigned: BTSA Durban–Johannesburg portion; handover to Cheetah Express on 17 November for Johannesburg–Bloemfontein portion
+Collection contact: Ronnie | +27 83 643 3360
+Delivery contact: Adèle | +27 76 011 2379
+Collection street address: Rocket Racing, Pinetown (full street address not verified)
+Delivery street address: 27 Liefdesliedjie Crescent, Pellissier, Bloemfontein
+
+Recovered from the existing group conversation. *DRAFT ONLY — NOT SAVED.*
+Reply *Approve KTM draft* or send corrections. No booking will be committed automatically.`}
+ ];
+ for(const draft of drafts){
+  if(db.prepare('SELECT 1 FROM recovery_draft_posts WHERE draft_key=?').get(draft.key))continue;
+  try{
+   await send(draft.text);
+   db.prepare('INSERT OR IGNORE INTO recovery_draft_posts(draft_key,posted_at) VALUES(?,?)').run(draft.key,now());
+   console.log('Recovered order approval draft posted',draft.key);
+  }catch(error){console.error('Recovered order draft posting failed',draft.key,error.message);break;}
+ }
+}
+app.listen(PORT,()=>{console.log(`BTSA Order Intake listening on ${PORT}; db=${DB_PATH}`);dispatchBridge.probe().catch(console.error);setTimeout(()=>postRecoveredDrafts().catch(console.error),5000);});
 
