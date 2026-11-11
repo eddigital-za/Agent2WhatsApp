@@ -155,6 +155,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     db.prepare("UPDATE sales_approvals SET instruction_history_json=? WHERE id=?").run(JSON.stringify(history), row.id);
     return history;
   }
+  function honoursQuotedRate(text) {
+    return /\b(?:honou?r|keep|stick to|stand by)\s+(?:the\s+)?(?:original|quoted|quoter|quater|motorcycle|two[- ]wheel(?:er)?)\s+(?:rate|price|quote)\b/i.test(text);
+  }
   function priceFromInstruction(value) {
     const text = String(value || "");
     const values = [];
@@ -172,6 +175,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (match) add(match[1], match[2]);
     }
     const unique = [...new Set(values)];
+    if (unique.length > 1 && honoursQuotedRate(text)) {
+      // A named price that Duane explicitly honours is the offer. The quad range is a comparison.
+      const reference = [...text.matchAll(/\b(R\s*\d[\d,.]*(?:\s*k\b)?)\s+(?:is|was)\s+the\s+(?:(?:rate|price|quote)\s+for\s+(?:a\s+)?(?:two[- ]wheel(?:er)?|motorcycle)|(?:original|quoted|motorcycle)\s+(?:rate|price|quote))\b/gi)];
+      if (reference.length === 1) return priceFromInstruction(reference[0][1]);
+    }
     return unique.length === 1 ? unique[0] : unique.length ? 0 : null;
   }
   function generatedBookingLink(context, instructions) {
@@ -190,6 +198,22 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (!price || !pickup || !dropoff) return "";
     const route = `${pickup} to ${dropoff}`;
     return `https://biketransport.co.za/booking-form/?ts=${Math.floor(Date.now() / 1000)}&route=${encodeURIComponent(route)}&price=${price}`;
+  }
+  function requestsBookingLink(value) {
+    const text = String(value || "");
+    return /\b(?:booking|sla)\s+(?:link|form)\b/i.test(text) &&
+      /\b(?:close|add|include|generate|use|send|give|provide|put|create|need|with)\b/i.test(text) &&
+      !/\b(?:don['’]?t|do not|no|without|omit|remove|leave out)\b[^.!?]{0,45}\b(?:booking|sla)\s+(?:link|form)\b/i.test(text);
+  }
+  function bookingClose(draft, link) {
+    const text = String(draft || "").replace(/https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:booking-form|timestamp)\/?[^\s]*/gi, "").trim();
+    const body = text.split(/\n{2,}/).map(paragraph =>
+      paragraph.split(/(?<=[.!?])\s+/).filter(sentence =>
+        !(/\b(?:access (?:details|constraints)|specific dates|collection dates|preferred dates|dates (?:you|for collection))\b/i.test(sentence) &&
+        /\?|\b(?:let me know|share|tell me|please confirm)\b/i.test(sentence)))
+      .join(" ").trim()).filter(Boolean).join("\n\n");
+    const action = /\b(?:complete|fill (?:in|out))\b[^.!?]*\b(?:booking|form)\b/i.test(body) ? "" : "\n\nPlease complete the booking form below and I’ll take it from there.";
+    return body ? body + action + "\n\n" + link : "";
   }
   function priorBookingInstructions(lead, phone) {
     if (!lead?.id || !lead.pickup || !lead.dropoff) return {};
@@ -727,6 +751,16 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const baseContext = row.context_json ? JSON.parse(row.context_json) : {};
     const inheritedBooking = Date.now() - baseContext.bookingQuotedAt < 24 * 3600000 ? baseContext.bookingInstructions : [];
     const bookingLink = generatedBookingLink(baseContext, [...(inheritedBooking || []), ...priorInstructions, instruction]);
+    const forceBookingClose = !row.followup_id && !row.sequence_id &&
+      (requestsBookingLink(instruction) || /\bassumptive\s+clos/i.test(instruction) ||
+        (honoursQuotedRate(instruction) && /\b(?:have|got) (?:space|availability|a slot)\b/i.test(instruction))) && Boolean(bookingLink);
+    if (!row.followup_id && !row.sequence_id && requestsBookingLink(instruction) && !bookingLink) {
+      appendInstruction(row, instruction);
+      const lead = baseContext.lead || {};
+      const missing = lead.pickup && lead.dropoff ? "one final customer rate" : "the exact collection and delivery route";
+      await group(`I haven’t sent anything for ${row.case_ref}. I need ${missing} to prepare the booking link.`);
+      return true;
+    }
     const out = await reason("/sales/approval", {
       caseRef: row.case_ref, customerMessage: row.customer_text, proposedReply: row.proposed_reply,
       instruction, audio, context: {
@@ -734,7 +768,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         ownerPreferences: preferences,
         ownerInstructionHistory: priorInstructions,
         generatedBookingLink: bookingLink || undefined,
-        ownerAnswerHandling: !row.proposed_reply ? "The card asked Duane for missing facts. When his response supplies those facts or gives wording directions, use them to draft the next customer reply and return intent=revise with finalReply populated. Do not send; ask for a separate approval." : undefined
+        ownerAnswerHandling: forceBookingClose ? "Return a revised draft. This case is past qualification. Preserve the exact normal price range as a comparison, the separately honoured final price and the owner-confirmed availability when supplied. Close directly with the supplied booking form. Do not ask for dates, access details, or whether they want to proceed. Do not send." : !row.proposed_reply ? "The card asked Duane for missing facts. When his response supplies those facts or gives wording directions, use them to draft the next customer reply and return intent=revise with finalReply populated. Do not send; ask for a separate approval." : undefined
       }
     });
     const approvalWords = [instruction, out.transcript].filter(Boolean).join("\n");
@@ -751,6 +785,10 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (out.finalReply && hasPlaceholderLink(out.finalReply)) {
       await group(`I haven't sent anything for ${row.case_ref}. The draft contains a placeholder link. Send me the real BTSA booking link, or tell me to leave the link out.`);
       return true;
+    }
+    if (forceBookingClose && out.intent !== "cancel" && out.finalReply) {
+      out.finalReply = bookingClose(out.finalReply, bookingLink);
+      out.intent = "revise";
     }
     const sendAuthorized = explicitlyAuthorizesSend(approvalWords);
     if (out.intent === "send" && !sendAuthorized && out.finalReply && out.finalReply.trim() !== row.proposed_reply.trim()) {

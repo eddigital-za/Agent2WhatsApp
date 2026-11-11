@@ -493,3 +493,34 @@ test("approval corrections persist and a real BTSA booking link is generated fro
   ]);
  } finally {global.fetch=savedFetch;db.close();}
 });
+
+test("honouring a motorcycle quote for a quad keeps the comparison separate and closes with the booking link", async () => {
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:"), cards=[], requests=[];
+ let sent=0;
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient:{info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sent++;}},approvalClient:{info:{},sendMessage:async(_to,text)=>{cards.push(text);}},approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ const draft="Normally R3,500 to R4,000 for a quad. I have space next week and I'll honour R2,500.\n\nIf that works for you, could you share any access details or specific dates?";
+ const insert=db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,context_json,instruction_history_json,created_at) VALUES(?,?,?,?,?,?,?)");
+ const context=JSON.stringify({lead:{pickup:"Johannesburg",dropoff:"Durban",bike_type:"quad"}});
+ const coaching="R2,500 is the rate for a two wheel motorcycle - quad bikes are actually priced higher at R3,500 to R4,000 depending on size. We do have space next week for a small quad and will honor the quater rate and not increase it. Make sure to clearly explain this and sell the value of the lower price.";
+ insert.run("SA-QUAD","27760000000","Budget price, not in a hurry",draft,context,null,new Date().toISOString());
+ insert.run("SA-AMBIGUOUS","27760000001","Budget price, not in a hurry",draft,context,JSON.stringify(["The options are R3,500 or R4,000"]),new Date().toISOString());
+ const savedFetch=global.fetch;
+ global.fetch=async(_url,opts)=>{requests.push(JSON.parse(opts.body));return {ok:true,json:async()=>({intent:"revise",bookingNext:false,finalReply:draft})};};
+ const owner=(ref,id,body)=>({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:id},body,hasQuotedMsg:true,getQuotedMessage:async()=>({body:"Understood. Revised reply for *"+ref+"*:"}),timestamp:Math.floor(Date.now()/1000)});
+ try {
+  await agent.onApproval(owner("SA-QUAD","quad-quote",coaching));
+  await agent.onApproval(owner("SA-QUAD","quad-close","Better but imstead of asking for dates mention next weeks availability and use an assumptive close"));
+  const link=new URL(requests[0].context.generatedBookingLink);
+  assert.equal(link.searchParams.get("price"),"2500");
+  assert.equal(link.searchParams.get("route"),"Johannesburg to Durban");
+  assert.match(cards[0],/R3,500 to R4,000[\s\S]*next week[\s\S]*R2,500[\s\S]*complete the booking form[\s\S]*price=2500/i);
+  assert.doesNotMatch(cards[0],/access details|specific dates/);
+  assert.match(cards[1],/complete the booking form[\s\S]*price=2500/i);
+  await agent.onApproval(owner("SA-AMBIGUOUS","quad-ambiguous","Close the sale with a booking link!"));
+  assert.match(cards[2],/one final customer rate/i);
+  assert.doesNotMatch(cards[2],/send it/);
+  assert.equal(sent,0);
+ } finally {global.fetch=savedFetch;db.close();}
+});
