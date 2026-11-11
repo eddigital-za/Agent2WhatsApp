@@ -222,6 +222,21 @@ app.post('/inbound',async(req,res)=>{
   if(p.from!==ORDERS_GROUP_ID||(!p.text&&!p.mediaData&&!p.hasMedia))return res.json({ignored:true});
   p.text=String(p.text||'');
   const author=String(p.author||p.phone||'group-controller');
+  // Explicit approvals for the two recovered orders must never be interpreted against the author's unrelated draft.
+  const recoveryApproval=/^\s*approve\s+(vw|ktm)\s+draft\s*[.!]?\s*$/i.exec(p.text);
+  if(recoveryApproval){
+   const key=recoveryApproval[1].toLowerCase();
+   db.exec("CREATE TABLE IF NOT EXISTS recovery_approvals (order_key TEXT PRIMARY KEY, message_id TEXT, approved_at TEXT NOT NULL)");
+   const already=db.prepare('SELECT 1 FROM recovery_approvals WHERE order_key=?').get(key);
+   if(already)return res.json({deduplicated:true,order:key});
+   db.prepare('INSERT INTO recovery_approvals(order_key,message_id,approved_at) VALUES(?,?,?)').run(key,p.messageId||null,now());
+   if(key==='ktm'){
+    await send('KTM 390 Duke draft: approval recorded for Ronnie. The full Rocket Racing collection street address was not verified in the recovered details, so I have NOT submitted an incomplete booking. I will retain this approval separately from the VW order.');
+   }else{
+    await send('VW Beetle draft: approval recorded for Gurpreet Kindra. This approval is tied only to the VW draft, not the current manual-order draft. Booking submission is pending verification of the recovered details.');
+   }
+   return res.json({approvalRecorded:true,order:key,committed:false});
+  }
   const existing=getDraft(author);
   if (existing && /^\s*(?:show|display|view|repeat|summari[sz]e)\s+(?:me\s+)?(?:the\s+|my\s+)?(?:current\s+)?draft\s*[?.!]*\s*$/i.test(p.text)) {
    await send(`${summary(existing.data)}\n\nDraft only. No booking has been saved.`);
