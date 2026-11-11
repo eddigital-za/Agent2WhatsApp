@@ -476,6 +476,7 @@ test("approval corrections persist and a real BTSA booking link is generated fro
   assert.ok(payloads[0].context.ownerPreferences.some(x=>/door-to-door/i.test(x)));
   await agent.onApproval({...base,id:{_serialized:"learn-2"},body:"Make it warmer"});
   assert.deepEqual(payloads[1].context.ownerInstructionHistory,["R1,250, use an assumptive close, include door to door and insurance, and generate a booking link"]);
+  assert.match(payloads[1].context.generatedBookingLink,/price=1250$/);
   assert.deepEqual(JSON.parse(db.prepare("SELECT instruction_history_json FROM sales_approvals WHERE case_ref='SA-LEARN'").get().instruction_history_json),[
    "R1,250, use an assumptive close, include door to door and insurance, and generate a booking link",
    "Make it warmer"
