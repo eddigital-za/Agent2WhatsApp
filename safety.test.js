@@ -381,7 +381,6 @@ test("a quoted sales card with uncertain delivery is recovered for drafting only
  } finally {global.fetch=savedFetch;db.close();}
 });
 
-
 test("a reply quoting the no-send status can show the current draft without sending", async () => {
  process.env.SALES_ENABLED="true";
  const db=new DatabaseSync(":memory:"), cards=[];
@@ -448,5 +447,38 @@ test("placeholder booking links are blocked even with explicit send approval", a
   assert.equal(sent,0);
   assert.match(cards[0],/placeholder link/);
   assert.equal(db.prepare("SELECT state FROM sales_approvals WHERE case_ref='SA-LINK'").get().state,"pending");
+ } finally {global.fetch=savedFetch;db.close();}
+});
+
+test("approval corrections persist and a real BTSA booking link is generated from approved case facts", async () => {
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:"), cards=[], payloads=[];
+ let sent=0;
+ const customerClient={info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sent++;}};
+ const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:`card-${cards.length}`}};}};
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ const context={lead:{pickup:"Durban North",dropoff:"Pietermaritzburg",bike_make:"Big Boy",bike_model:"Velocity 175"}};
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,context_json,created_at) VALUES(?,?,?,?,?,?)")
+  .run("SA-LEARN","27760000000","ASAP","Can do tomorrow.",JSON.stringify(context),new Date().toISOString());
+ const savedFetch=global.fetch;
+ global.fetch=async(_url,options)=>{
+  const p=JSON.parse(options.body);payloads.push(p);
+  const link=p.context.generatedBookingLink || "";
+  return {ok:true,json:async()=>({intent:"revise",finalReply:`I completely understand. Door-to-door transport with comprehensive insurance is R1,250.\n\n${link}`,response:""})};
+ };
+ try {
+  const base={from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,hasQuotedMsg:true,getQuotedMessage:async()=>({body:"Understood. Revised reply for *SA-LEARN*:"}),timestamp:Math.floor(Date.now()/1000)};
+  await agent.onApproval({...base,id:{_serialized:"learn-1"},body:"R1,250, use an assumptive close, include door to door and insurance, and generate a booking link"});
+  assert.equal(sent,0);
+  assert.match(payloads[0].context.generatedBookingLink,/^https:\/\/biketransport\.co\.za\/booking-form\/\?ts=\d+&route=Durban%20North%20to%20Pietermaritzburg&price=1250$/);
+  assert.ok(payloads[0].context.ownerPreferences.some(x=>/assumptive close/i.test(x)));
+  assert.ok(payloads[0].context.ownerPreferences.some(x=>/door-to-door/i.test(x)));
+  await agent.onApproval({...base,id:{_serialized:"learn-2"},body:"Make it warmer"});
+  assert.deepEqual(payloads[1].context.ownerInstructionHistory,["R1,250, use an assumptive close, include door to door and insurance, and generate a booking link"]);
+  assert.deepEqual(JSON.parse(db.prepare("SELECT instruction_history_json FROM sales_approvals WHERE case_ref='SA-LEARN'").get().instruction_history_json),[
+   "R1,250, use an assumptive close, include door to door and insurance, and generate a booking link",
+   "Make it warmer"
+  ]);
  } finally {global.fetch=savedFetch;db.close();}
 });
