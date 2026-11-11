@@ -16,6 +16,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       decided_at TEXT, decision_text TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_sales_approvals_state ON sales_approvals(state, created_at);
+    CREATE TABLE IF NOT EXISTS sales_owner_preferences(
+      rule_key TEXT PRIMARY KEY,
+      instruction TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS sales_conversation_queue(
       phone TEXT PRIMARY KEY,
       lead_id INTEGER,
@@ -69,6 +74,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   if (!approvalColumns.includes("followup_id")) db.exec("ALTER TABLE sales_approvals ADD COLUMN followup_id INTEGER");
   if (!approvalColumns.includes("context_json")) db.exec("ALTER TABLE sales_approvals ADD COLUMN context_json TEXT");
   if (!approvalColumns.includes("sequence_id")) db.exec("ALTER TABLE sales_approvals ADD COLUMN sequence_id INTEGER");
+  if (!approvalColumns.includes("instruction_history_json")) db.exec("ALTER TABLE sales_approvals ADD COLUMN instruction_history_json TEXT");
   const confirmationColumns = db.prepare("PRAGMA table_info(sales_order_confirmations)").all().map(row => row.name);
   if (!confirmationColumns.includes("booking_key")) db.exec("ALTER TABLE sales_order_confirmations ADD COLUMN booking_key TEXT");
   if (!confirmationColumns.includes("duplicate_of_sla_ref")) db.exec("ALTER TABLE sales_order_confirmations ADD COLUMN duplicate_of_sla_ref TEXT");
@@ -103,6 +109,71 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const text = String(value || "");
     return /https?:\/\/(?:www\.)?(?:yourwebsite\.com|example\.(?:com|org))\b/i.test(text)
       || /\[(?:link|booking link|sla link|insert[^\]]*link)\]/i.test(text);
+  }
+  const ownerPreferenceRules = [
+    ["style.no-em-dash", /\b(?:do not|don't|dont|never)\s+use\s+(?:em|emb)\s*dash/i, "Do not use em dashes. Use normal punctuation and short WhatsApp paragraphs."],
+    ["tone.acknowledge", /\b(?:note of understanding|i completely understand|sales 101)\b/i, "After the greeting, acknowledge what the client actually said. Use natural understanding instead of empty small talk such as 'hope you're well'."],
+    ["sales.assumptive-close", /\bassumptive(?:ly)?\s+clos/i, "When the facts and an approved rate are sufficient, use an assumptive close with one clear next step instead of asking whether the client wants to proceed."],
+    ["quote.benefits", /\bdoor[- ]to[- ]door\b[\s\S]*\binsurance\b|\binsurance\b[\s\S]*\bdoor[- ]to[- ]door\b/i, "After stating an approved rate, reinforce that it includes hassle-free door-to-door delivery and full comprehensive insurance for the bike and declared extras."],
+    ["schedule.windows", /\b(?:exact dates?|exact times?|don't confirm dates|do not confirm dates|transport industry is unpredictable|first come first serve)\b/i, "Do not promise exact collection or delivery dates or times unless Duane explicitly approves them. Commit to a realistic window or deadline and allow routing flexibility."],
+    ["transport.open", /\b(?:open van|open trailer|closed vehicles?|enclosed)\b/i, "Standard BTSA transport is on an open van and trailer, not an enclosed vehicle. Reassure clients that this is safe when they ask."],
+    ["context.use-approved-quote", /\b(?:already quoted|already gave you|including price|confirmed rate|correct rate)\b/i, "Use the latest rate Duane approved for the current case. Never revert to a website estimate or an older draft price."],
+  ];
+  function ownerPreferences() {
+    return db.prepare("SELECT instruction FROM sales_owner_preferences ORDER BY rule_key").all().map(row => row.instruction);
+  }
+  function learnOwnerPreferences(instruction) {
+    const text = String(instruction || "");
+    for (const [key, pattern, rule] of ownerPreferenceRules) {
+      if (!pattern.test(text)) continue;
+      db.prepare(`INSERT INTO sales_owner_preferences(rule_key,instruction,updated_at) VALUES(?,?,?)
+        ON CONFLICT(rule_key) DO UPDATE SET instruction=excluded.instruction,updated_at=excluded.updated_at`)
+        .run(key, rule, now());
+    }
+    return ownerPreferences();
+  }
+  function instructionHistory(row) {
+    try {
+      const parsed = JSON.parse(String(row?.instruction_history_json || "[]"));
+      return Array.isArray(parsed) ? parsed.filter(Boolean).slice(-20) : [];
+    } catch (_) { return []; }
+  }
+  function appendInstruction(row, value) {
+    const text = String(value || "").trim();
+    const items = instructionHistory(row);
+    if (text && items.at(-1) !== text) items.push(text);
+    const history = items.slice(-20);
+    db.prepare("UPDATE sales_approvals SET instruction_history_json=? WHERE id=?").run(JSON.stringify(history), row.id);
+    return history;
+  }
+  function priceFromInstruction(value) {
+    const text = String(value || "");
+    const values = [];
+    const add = (raw, k) => {
+      let normalized = String(raw || "").replace(/\s/g, "");
+      let amount;
+      if (k) amount = Number(normalized.replace(",", ".")) * 1000;
+      else if (/^\d{1,3},\d{3}$/.test(normalized)) amount = Number(normalized.replace(",", ""));
+      else amount = Number(normalized.replace(/,/g, ""));
+      if (Number.isFinite(amount) && amount >= 100 && amount <= 100000) values.push(Math.round(amount));
+    };
+    for (const match of text.matchAll(/\bR\s*(\d[\d.,]*)\s*(k)?\b/gi)) add(match[1], match[2]);
+    if (!values.length) {
+      const match = text.match(/\b(?:rate|price)\D{0,20}(\d[\d.,]*)\s*(k)?\b/i);
+      if (match) add(match[1], match[2]);
+    }
+    const unique = [...new Set(values)];
+    return unique.length === 1 ? unique[0] : null;
+  }
+  function generatedBookingLink(context, instruction) {
+    if (!/\b(?:generate|create|include|add|send|use)?\s*(?:a\s+)?(?:timestamp|booking|sla|quote)\s+link\b|\bcomplete the booking\b/i.test(String(instruction || ""))) return "";
+    const price = priceFromInstruction(instruction);
+    const lead = context?.lead || {};
+    const pickup = String(lead.pickup || "").trim();
+    const dropoff = String(lead.dropoff || "").trim();
+    if (!price || !pickup || !dropoff) return "";
+    const route = `${pickup} to ${dropoff}`;
+    return `https://biketransport.co.za/booking-form/?ts=${Math.floor(Date.now() / 1000)}&route=${encodeURIComponent(route)}&price=${price}`;
   }
   function supersedePreCohortApprovals() {
     const start = cohortStart();
@@ -284,6 +355,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
           message: customerText,
           newMessages,
           history: conversation,
+          ownerPreferences: ownerPreferences(),
         });
         const active = db.prepare("SELECT state,last_message_at FROM sales_conversation_queue WHERE phone=?").get(queued.phone);
         if (!active || active.state !== "processing" || active.last_message_at !== queued.last_message_at) continue;
@@ -611,11 +683,22 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       logEvent({ leadId: row.lead_id, phone: row.phone, type: "sales_reply_cancelled", key: `sales-cancelled-${row.case_ref}`, details: { ref: row.case_ref } });
       return true;
     }
+    const preferences = learnOwnerPreferences(instruction);
+    const priorInstructions = instructionHistory(row);
+    const baseContext = row.context_json ? JSON.parse(row.context_json) : {};
+    const bookingLink = generatedBookingLink(baseContext, instruction);
     const out = await reason("/sales/approval", {
       caseRef: row.case_ref, customerMessage: row.customer_text, proposedReply: row.proposed_reply,
-      instruction, audio, context: { ...(row.context_json ? JSON.parse(row.context_json) : {}), ownerAnswerHandling: !row.proposed_reply ? "The card asked Duane for missing facts. When his response supplies those facts or gives wording directions, use them to draft the next customer reply and return intent=revise with finalReply populated. Do not send; ask for a separate approval." : undefined }
+      instruction, audio, context: {
+        ...baseContext,
+        ownerPreferences: preferences,
+        ownerInstructionHistory: priorInstructions,
+        generatedBookingLink: bookingLink || undefined,
+        ownerAnswerHandling: !row.proposed_reply ? "The card asked Duane for missing facts. When his response supplies those facts or gives wording directions, use them to draft the next customer reply and return intent=revise with finalReply populated. Do not send; ask for a separate approval." : undefined
+      }
     });
     const approvalWords = [instruction, out.transcript].filter(Boolean).join("\n");
+    appendInstruction(row, approvalWords);
     if (row.state === "delivery_unknown") {
       // Reconcile the observed card, but require a separate send instruction.
       const recovered = db.prepare("UPDATE sales_approvals SET state='pending' WHERE id=? AND state='delivery_unknown'").run(row.id);
