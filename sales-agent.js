@@ -165,9 +165,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const unique = [...new Set(values)];
     return unique.length === 1 ? unique[0] : null;
   }
-  function generatedBookingLink(context, instruction) {
-    if (!/\b(?:generate|create|include|add|send|use)?\s*(?:a\s+)?(?:timestamp|booking|sla|quote)\s+link\b|\bcomplete the booking\b/i.test(String(instruction || ""))) return "";
-    const price = priceFromInstruction(instruction);
+  function generatedBookingLink(context, instructions) {
+    const values = Array.isArray(instructions) ? instructions : [instructions];
+    if (values.some(value => /\b(?:do not|don't|dont|no)\s+(?:include|add|send|use)?\s*(?:a\s+)?(?:booking|sla|quote)?\s*link\b/i.test(String(value || "")))) return "";
+    let price = null;
+    for (let i = values.length - 1; i >= 0 && !price; i--) price = priceFromInstruction(values[i]);
     const lead = context?.lead || {};
     const pickup = String(lead.pickup || "").trim();
     const dropoff = String(lead.dropoff || "").trim();
@@ -686,7 +688,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const preferences = learnOwnerPreferences(instruction);
     const priorInstructions = instructionHistory(row);
     const baseContext = row.context_json ? JSON.parse(row.context_json) : {};
-    const bookingLink = generatedBookingLink(baseContext, instruction);
+    const bookingLink = generatedBookingLink(baseContext, [...priorInstructions, instruction]);
     const out = await reason("/sales/approval", {
       caseRef: row.case_ref, customerMessage: row.customer_text, proposedReply: row.proposed_reply,
       instruction, audio, context: {
