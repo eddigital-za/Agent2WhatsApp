@@ -241,8 +241,9 @@ app.post('/inbound',async(req,res)=>{
     ||(quoted&&/\b(reverse|repeat|return|same|again|new|book|add)\b/i.test(p.text));
   if(!existing&&!trigger)return res.json({ignored:true});
 
-  const candidates=await candidatesFor(p.text,quoted);
-  const parsed=await interpret(p.text,existing?.data||null,quoted,candidates,p.mediaData?{data:p.mediaData,mimetype:p.mediaType}:null);
+  const startingNewOrder=/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text);
+  const candidates=startingNewOrder?[]:await candidatesFor(p.text,quoted);
+  const parsed=await interpret(p.text,startingNewOrder?null:(existing?.data||null),startingNewOrder?'':quoted,candidates,p.mediaData?{data:p.mediaData,mimetype:p.mediaType}:null);
   if(parsed.intent==='unrelated')return res.json({ignored:true});
   if(parsed.intent==='cancel'){
    clearDraft(author); await send('Manual order draft cancelled.'); return res.json({cancelled:true});
@@ -252,14 +253,14 @@ app.post('/inbound',async(req,res)=>{
    return res.json({waiting:true,clarification:true});
   }
 
-  let base=existing?.data||{};
+  let base=startingNewOrder?{}:(existing?.data||{});
   if(Number.isInteger(parsed.historyIndex)&&parsed.historyIndex>=0&&parsed.historyIndex<candidates.length){
    const hist={...candidates[parsed.historyIndex]};
    delete hist._score;
    base=parsed.reverseHistory?swapOrder(hist):hist;
    delete base.entryId; delete base.slaRef; delete base.status; delete base.sourceId; delete base.quickbooksInvoiceId; delete base.receivedAt;
   }
-  if(parsed.intent==='new_order'&&existing){db.prepare("UPDATE dispatch_links SET state='superseded' WHERE author=? AND state='draft'").run(author);base={};}
+  if((startingNewOrder||parsed.intent==='new_order')&&existing){db.prepare("UPDATE dispatch_links SET state='superseded' WHERE author=? AND state='draft'").run(author);base={};}
   let data=mergeFields(base,parsed.fields);
   const logistics=dispatchDomain.interpret(p.text,['BTSA','Cheetah Express','DJ Bike Transport','Ross - Speedway Express','UBT','Bike Transport','Armand','Bike in Motion','George','Assets in Motion','Moto Movers'],new Date((p.timestamp||Date.now()/1000)*1000));
   Object.assign(data,logistics);
