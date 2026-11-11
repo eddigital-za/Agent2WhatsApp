@@ -28,6 +28,14 @@ function historicalExampleForPrompt(example) {
   return { customer: sanitize(example.customer), btsaResponse: sanitize(example.btsaResponse) };
 }
 
+function normalizeReply(value) {
+  return String(value || "")
+    .replace(/\[[^\]]+\]\((https?:\/\/[^)]+)\)/g, "$1")
+    .replace(/[—–]/g, " - ")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
 function isNoReplyInstruction(value) {
   const text = String(value || "").toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, " ").trim();
   return /\b(?:do not|don't|dont|not to|never|no)\s+(?:send|reply|respond)\b/.test(text)
@@ -62,7 +70,14 @@ const SALES_PLAYBOOK = `BTSA sales playbook:
 - If the client asks for a price, discount, date, route slot or operational commitment that Duane has not approved, do not send a holding reply. Ask Duane one precise internal question using action=owner_input. Include all legs, dates and constraints he must decide.
 - A short acknowledgement after the conversation has been closed normally needs no reply. A real question or buying signal does.
 - Never say "I'll get back to you", "hang tight", "I'll check", or "I'll confirm soon" merely to produce a response. Either qualify, answer from verified facts, move to booking, ask Duane for a specific decision, or do not reply.
-- Write in Duane's first person: I, me, I'll, ask me. Keep it concise, natural and commercially useful.`;
+- Write in Duane's first person: I, me, I'll, ask me. Keep it concise, natural and commercially useful.
+- When the client has supplied enough information and Duane has approved the rate, use an assumptive close. Give the next step directly instead of asking "are you ready to proceed?" or ending with passive "let me know" filler.
+- After stating an approved rate, reinforce the value: hassle-free door-to-door delivery and full comprehensive insurance for the bike and declared extras.
+- If a real BTSA booking link is supplied, make booking the easy next step using "please complete the booking form below". Put the raw URL on its own line. Never invent a domain, timestamp or placeholder link.
+- Do not promise exact collection or delivery dates or times unless Duane explicitly approves them. Use a realistic window, allow routing flexibility and commit to the client's actual deadline where approved.
+- Standard BTSA transport is on an open van and trailer, not an enclosed vehicle. If asked, reassure the client naturally.
+- Start by acknowledging what the client actually said. Avoid empty small talk such as "hope you're well". Use short WhatsApp paragraphs and never use em dashes.
+- Duane's approval instructions are binding. Preserve every non-conflicting fact and correction through later revisions, especially approved prices, routes, timing limits, inclusions and closing direction. Never revert to a website estimate or an older draft.`;
 
 const EXAMPLE_RULES = `Historical BTSA examples:
 - Use the retrieved examples to understand Duane's tone, sales judgement, objection handling and closing style.
@@ -106,8 +121,8 @@ function installSalesReasoner(app, { apiKey, model, exampleRetriever = createDef
       ].join("\n");
       const historicalExamples = exampleRetriever.retrieve(retrievalQuery, 3).map(historicalExampleForPrompt);
       const out = await structured(apiKey, model, "btsa_sales_draft_v1", customerSchema, SALES_SYSTEM,
-        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching lead inquiries (website estimates are background only):\n${JSON.stringify(p.leadInquiries || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nNew client messages in this turn (handle together):\n${JSON.stringify(p.newMessages || [])}\n\nCombined client turn:\n${String(p.message || "")}\n\nRetrieved historical examples (tone and sales logic only; never copy historical facts):\n${JSON.stringify(historicalExamples)}`);
-      res.json(out);
+        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching lead inquiries (website estimates are background only):\n${JSON.stringify(p.leadInquiries || [])}\n\nOwner preferences learned from Duane:\n${JSON.stringify(p.ownerPreferences || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nNew client messages in this turn (handle together):\n${JSON.stringify(p.newMessages || [])}\n\nCombined client turn:\n${String(p.message || "")}\n\nRetrieved historical examples (tone and sales logic only; never copy historical facts):\n${JSON.stringify(historicalExamples)}`);
+      res.json({ ...out, proposedReply: normalizeReply(out.proposedReply) });
     } catch (e) { console.error("Sales customer reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
 
@@ -130,7 +145,7 @@ function installSalesReasoner(app, { apiKey, model, exampleRetriever = createDef
       const system = `${SALES_SYSTEM}\nDraft a short, natural next-day WhatsApp follow-up after Duane sent the client a BTSA booking/SLA link and the client has not replied. Set action=reply, salesMove=close and ownerQuestion="". Do not repeat the quote, invent availability, add pressure or ask the full qualification questions again. Check whether they had a chance to complete it and offer help. Use the client's name only when supplied.`;
       const out = await structured(apiKey, model, "btsa_sla_followup_v1", customerSchema, system,
         `Lead facts:\n${JSON.stringify(p.lead || {})}\n\nSLA message sent:\n${String(p.slaMessage || "")}\n\nConversation since link:\n${JSON.stringify(p.history || [])}`);
-      res.json(out);
+      res.json({ ...out, proposedReply: normalizeReply(out.proposedReply) });
     } catch (e) { console.error("Sales follow-up reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
 
@@ -146,7 +161,7 @@ function installSalesReasoner(app, { apiKey, model, exampleRetriever = createDef
       const system = `${SALES_SYSTEM}\n${stageInstruction}\nSet action=reply, salesMove=close and ownerQuestion="". This is a draft for Sales Approvals and must not be treated as permission to send.`;
       const out = await structured(apiKey, model, `btsa_${stage}_lead_sequence_v1`, customerSchema, system,
         `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching website inquiries:\n${JSON.stringify(p.leadInquiries || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nFirst touch sent: ${p.firstTouchSentAt || ""}\n24-hour follow-up sent: ${p.followupSentAt || ""}`);
-      res.json(out);
+      res.json({ ...out, proposedReply: normalizeReply(out.proposedReply) });
     } catch (e) { console.error("Sales sequence reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
 
@@ -159,10 +174,17 @@ function installSalesReasoner(app, { apiKey, model, exampleRetriever = createDef
       const instruction = [p.instruction, transcript].filter(Boolean).join("\n").trim();
       if (!instruction) return res.json({ intent: "clarify", finalReply: "", response: "I couldn't hear or read an instruction. Please try again." });
       if (isNoReplyInstruction(instruction)) return res.json({ intent: "cancel", finalReply: "", response: "Understood. I won't reply.", transcript });
-      const system = `${SALES_SYSTEM}\nYou now interpret Duane's internal approval instruction. Be conversational and tolerate shorthand, speech-to-text errors, fragments and normal language. Choose intent=cancel whenever Duane says not to reply, send or respond. Only choose intent=send when Duane clearly authorises sending now (for example send it, go ahead, yes send, tell them X). If he asks for a change without clearly authorising dispatch, choose revise and return the revised client reply. If he is discussing strategy, choose discuss. If ambiguous, choose clarify. Never treat casual agreement or unrelated group chat as approval. finalReply must contain only what the client should receive.`;
+      const approvalQuery = [
+        String(p.customerMessage || ""),
+        String(p.proposedReply || ""),
+        instruction,
+        JSON.stringify(p.context || {}),
+      ].join("\n");
+      const historicalExamples = exampleRetriever.retrieve(approvalQuery, 4).map(historicalExampleForPrompt);
+      const system = `${SALES_SYSTEM}\nYou now interpret Duane's internal approval instruction. Be conversational and tolerate shorthand, speech-to-text errors, fragments and normal language. Choose intent=cancel whenever Duane says not to reply, send or respond. Only choose intent=send when Duane clearly authorises sending now (for example send it, go ahead, yes send, tell them X). If he asks for a change without clearly authorising dispatch, choose revise and return the revised client reply. If he is discussing strategy, choose discuss. If ambiguous, choose clarify. Never treat casual agreement or unrelated group chat as approval. finalReply must contain only what the client should receive.\n\nThe previous owner instructions are cumulative and binding. The latest instruction overrides an earlier instruction only when they directly conflict. Preserve approved prices, route facts, timing limits, service inclusions and closing direction through every revision. Duane's approved price and correction override any website estimate and the old proposed draft. Write one complete coherent client reply, not a fragment or a patch. If a generated booking link is supplied, use that exact raw URL when the sales move calls for booking. Never invent or alter a booking link.`;
       const out = await structured(apiKey, model, "btsa_sales_approval_v1", approvalSchema, system,
-        `Case: ${p.caseRef || ""}\nCase context:\n${JSON.stringify(p.context || {})}\n\nClient said: ${p.customerMessage || ""}\nCurrent proposed reply: ${p.proposedReply || ""}\nDuane's instruction: ${instruction}`);
-      res.json({ ...out, transcript });
+        `Case: ${p.caseRef || ""}\nCase context:\n${JSON.stringify(p.context || {})}\n\nOwner preferences learned from Duane:\n${JSON.stringify(p.context?.ownerPreferences || [])}\n\nPrevious owner instructions (cumulative):\n${JSON.stringify(p.context?.ownerInstructionHistory || [])}\n\nGenerated booking link, if approved facts are sufficient:\n${String(p.context?.generatedBookingLink || "")}\n\nClient said: ${p.customerMessage || ""}\nCurrent proposed reply: ${p.proposedReply || ""}\nDuane's latest instruction: ${instruction}\n\nRetrieved historical examples (tone and sales logic only; never copy historical facts):\n${JSON.stringify(historicalExamples)}`);
+      res.json({ ...out, finalReply: normalizeReply(out.finalReply), transcript });
     } catch (e) { console.error("Sales approval reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
   return { get exampleCount() { return exampleRetriever.examples?.length || 0; } };
