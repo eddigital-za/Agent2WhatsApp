@@ -1056,13 +1056,15 @@ function sheetOrders(rows){
   const orders=new Map(), missing=[];
   for(let i=1;i<rows.length;i++){
     const a=rows[i], source=String(a[37]||'').trim();
-    if(!/^[0-9a-f]{16}$/i.test(source)) continue;
+    if(!/^[0-9a-f]{16}$/i.test(source) && !/^REC-1111-(VW|KTM)$/i.test(source)) continue;
     const route=String(a[4]||'').trim(), clientName=String(a[5]||'').trim();
     if(!route || route==='""' || !clientName || /test/i.test(route)) continue;
     const raw=String(a[0]||'').trim();
     const manualRef=String(a[39]||'').trim().toUpperCase();
     let entryId=null, externalId='';
-    if(/^M-\d{4,}$/.test(manualRef)){
+    if(/^REC-1111-(VW|KTM)$/i.test(manualRef)){
+      externalId=manualRef;
+    }else if(/^M-\d{4,}$/.test(manualRef)){
       externalId=manualRef;
     }else if(/^[1-9]\d*$/.test(raw)){
       entryId=Number(raw);
