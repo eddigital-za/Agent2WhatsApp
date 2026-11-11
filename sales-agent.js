@@ -120,7 +120,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     ["context.use-approved-quote", /\b(?:already quoted|already gave you|including price|confirmed rate|correct rate)\b/i, "Use the latest rate Duane approved for the current case. Never revert to a website estimate or an older draft price."],
   ];
   function ownerPreferences() {
-    return db.prepare("SELECT instruction FROM sales_owner_preferences ORDER BY rule_key").all().map(row => row.instruction);
+    return db.prepare("SELECT instruction FROM sales_owner_preferences ORDER BY updated_at, rule_key").all().map(row => row.instruction);
   }
   function learnOwnerPreferences(instruction) {
     const text = String(instruction || "");
@@ -131,6 +131,15 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         .run(key, rule, now());
     }
     return ownerPreferences();
+  }
+  function saveReusableLesson(lesson, approvalWords) {
+    const rule = typeof lesson === "string" ? lesson.replace(/\s+/g, " ").trim() : "";
+    if (!rule || rule.length > 220 || /\d|https?:|@/.test(rule) || !approvalWords || isNoReplyInstruction(approvalWords)) return;
+    db.prepare(`INSERT INTO sales_owner_preferences(rule_key,instruction,updated_at) VALUES(?,?,?)
+      ON CONFLICT(rule_key) DO UPDATE SET updated_at=excluded.updated_at`)
+      .run("coaching:" + rule.toLowerCase(), rule, now());
+    db.exec(`DELETE FROM sales_owner_preferences WHERE rule_key LIKE 'coaching:%' AND rule_key NOT IN
+      (SELECT rule_key FROM sales_owner_preferences WHERE rule_key LIKE 'coaching:%' ORDER BY updated_at DESC, rule_key DESC LIMIT 12)`);
   }
   function instructionHistory(row) {
     try {
@@ -163,19 +172,43 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (match) add(match[1], match[2]);
     }
     const unique = [...new Set(values)];
-    return unique.length === 1 ? unique[0] : null;
+    return unique.length === 1 ? unique[0] : unique.length ? 0 : null;
   }
   function generatedBookingLink(context, instructions) {
     const values = Array.isArray(instructions) ? instructions : [instructions];
     if (values.some(value => /\b(?:do not|don't|dont|no)\s+(?:include|add|send|use)?\s*(?:a\s+)?(?:booking|sla|quote)?\s*link\b/i.test(String(value || "")))) return "";
     let price = null;
-    for (let i = values.length - 1; i >= 0 && !price; i--) price = priceFromInstruction(values[i]);
+    for (let i = values.length - 1; i >= 0 && price === null; i--) {
+      const text = String(values[i] || "");
+      price = priceFromInstruction(text);
+      if (/\b(?:don't|dont|do not|not approved|hold off|wrong rate|price is wrong|ignore the (?:rate|quote)|can we|could we|what if)\b/i.test(text)
+          && (price !== null || /\b(?:rate|price|quote)\b/i.test(text))) return "";
+    }
     const lead = context?.lead || {};
     const pickup = String(lead.pickup || "").trim();
     const dropoff = String(lead.dropoff || "").trim();
     if (!price || !pickup || !dropoff) return "";
     const route = `${pickup} to ${dropoff}`;
     return `https://biketransport.co.za/booking-form/?ts=${Math.floor(Date.now() / 1000)}&route=${encodeURIComponent(route)}&price=${price}`;
+  }
+  function priorBookingInstructions(lead, phone) {
+    if (!lead?.id || !lead.pickup || !lead.dropoff) return {};
+    const row = db.prepare(`SELECT instruction_history_json,context_json,decided_at,created_at FROM sales_approvals
+      WHERE lead_id=? AND phone=? AND state='sent' AND followup_id IS NULL AND sequence_id IS NULL AND instruction_history_json IS NOT NULL
+      ORDER BY id DESC LIMIT 1`).get(lead.id, phone);
+    if (!row) return {};
+    try {
+      const previousContext = JSON.parse(row.context_json || "{}");
+      const previous = previousContext.lead;
+      if (previous?.pickup !== lead.pickup || previous?.dropoff !== lead.dropoff ||
+          previous?.bike_make !== lead.bike_make || previous?.bike_model !== lead.bike_model) return {};
+      const current = instructionHistory(row);
+      const recordedAt = Date.parse(row.decided_at || row.created_at);
+      const quotedHere = current.some(text => priceFromInstruction(text) !== null);
+      const quotedAt = quotedHere ? recordedAt : previousContext.bookingQuotedAt;
+      if (!Number.isFinite(quotedAt) || Date.now() - quotedAt >= 24 * 3600000) return {};
+      return { instructions: [...(previousContext.bookingInstructions || []), ...current].slice(-20), quotedAt };
+    } catch (_) { return {}; }
   }
   function supersedePreCohortApprovals() {
     const start = cohortStart();
@@ -351,6 +384,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
           ? leadContext(queued.phone, lead)
           : { current: { id: lead.id, phone: queued.phone, context_status: "isolated test enquiry; saved form details intentionally excluded" }, inquiries: [] };
         const conversation = history(queued.phone);
+        const booking = priorBookingInstructions(context.current, queued.phone);
+        const bookingInstructions = booking.instructions || [];
+        const generatedLink = generatedBookingLink({ lead: context.current }, bookingInstructions);
         const out = await reason("/sales/customer", {
           lead: context.current,
           leadInquiries: context.inquiries,
@@ -358,6 +394,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
           newMessages,
           history: conversation,
           ownerPreferences: ownerPreferences(),
+          generatedBookingLink: generatedLink || undefined,
         });
         const active = db.prepare("SELECT state,last_message_at FROM sales_conversation_queue WHERE phone=?").get(queued.phone);
         if (!active || active.state !== "processing" || active.last_message_at !== queued.last_message_at) continue;
@@ -374,7 +411,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         const ref = caseRef();
         db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=?,decision_text='Newer client turn' WHERE phone=? AND state='pending'")
           .run(now(), queued.phone);
-        const contextJson = JSON.stringify({ lead: context.current, leadInquiries: context.inquiries, history: conversation, newMessages, salesMove: out.salesMove });
+        const contextJson = JSON.stringify({ lead: context.current, leadInquiries: context.inquiries, history: conversation, newMessages, salesMove: out.salesMove, bookingInstructions, bookingQuotedAt: booking.quotedAt });
         const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,context_json,created_at) VALUES(?,?,?,?,?,?,?)")
           .run(ref, lead.id, queued.phone, customerText, String(out.proposedReply || ""), contextJson, now());
         const bike = [context.current.bike_make, context.current.bike_model].filter(Boolean).join(" ");
@@ -688,7 +725,8 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const preferences = learnOwnerPreferences(instruction);
     const priorInstructions = instructionHistory(row);
     const baseContext = row.context_json ? JSON.parse(row.context_json) : {};
-    const bookingLink = generatedBookingLink(baseContext, [...priorInstructions, instruction]);
+    const inheritedBooking = Date.now() - baseContext.bookingQuotedAt < 24 * 3600000 ? baseContext.bookingInstructions : [];
+    const bookingLink = generatedBookingLink(baseContext, [...(inheritedBooking || []), ...priorInstructions, instruction]);
     const out = await reason("/sales/approval", {
       caseRef: row.case_ref, customerMessage: row.customer_text, proposedReply: row.proposed_reply,
       instruction, audio, context: {
@@ -701,6 +739,8 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     });
     const approvalWords = [instruction, out.transcript].filter(Boolean).join("\n");
     appendInstruction(row, approvalWords);
+    if (out.transcript) learnOwnerPreferences(out.transcript);
+    if (out.intent !== "send" && out.intent !== "cancel") saveReusableLesson(out.reusableLesson, approvalWords);
     if (row.state === "delivery_unknown") {
       // Reconcile the observed card, but require a separate send instruction.
       const recovered = db.prepare("UPDATE sales_approvals SET state='pending' WHERE id=? AND state='delivery_unknown'").run(row.id);

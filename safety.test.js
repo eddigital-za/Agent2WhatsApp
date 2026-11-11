@@ -327,6 +327,15 @@ test("consecutive client messages create one approval for the whole sales turn",
   assert.equal(cards.length,1);assert.match(cards[0],/Client \(2 messages\)/);
   assert.match(cards[0],/I need from you/);assert.match(cards[0],/return rate/);
   assert.equal(db.prepare("SELECT COUNT(*) n FROM sales_approvals").get().n,1);
+  assert.equal(payloads[0].generatedBookingLink, undefined, "calculator estimates cannot generate a booking link");
+  db.prepare("UPDATE sales_approvals SET state='sent', instruction_history_json=?").run(JSON.stringify(["Approved price R4,250"]));
+  global.fetch=async(_url,opts)=>{payloads.push(JSON.parse(opts.body));return {ok:true,json:async()=>({action:"reply",salesMove:"close",proposedReply:"Please complete the booking form.",category:"booking"})};};
+  await agent.onCustomer({fromMe:false,body:"That works. How do I book?",id:{_serialized:"false_book"},timestamp:stamp},db.prepare("SELECT * FROM leads WHERE id=1").get(),"760000000");
+  assert.equal(await agent.processInboundConversations(),1);
+  const link = new URL(payloads[1].generatedBookingLink);
+  assert.equal(link.searchParams.get("price"), "4250");
+  assert.equal(link.searchParams.get("route"), "Johannesburg to Cape Town");
+
  } finally {global.fetch=savedFetch;db.close();}
 });
 test("Day 3 and Day 7 website follow-ups require approval and do not duplicate",async()=>{
@@ -465,20 +474,21 @@ test("approval corrections persist and a real BTSA booking link is generated fro
  global.fetch=async(_url,options)=>{
   const p=JSON.parse(options.body);payloads.push(p);
   const link=p.context.generatedBookingLink || "";
-  return {ok:true,json:async()=>({intent:"revise",finalReply:`I completely understand. Door-to-door transport with comprehensive insurance is R1,250.\n\n${link}`,response:""})};
+  return {ok:true,json:async()=>({reusableLesson: p.instruction.includes("trade-off") ? "When price is the sticking point, explain the trade-off before discussing a concession." : "",intent:"revise",finalReply:`I completely understand. Door-to-door transport with comprehensive insurance is R1,250.\n\n${link}`,response:""})};
  };
  try {
   const base={from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,hasQuotedMsg:true,getQuotedMessage:async()=>({body:"Understood. Revised reply for *SA-LEARN*:"}),timestamp:Math.floor(Date.now()/1000)};
-  await agent.onApproval({...base,id:{_serialized:"learn-1"},body:"R1,250, use an assumptive close, include door to door and insurance, and generate a booking link"});
+  await agent.onApproval({...base,id:{_serialized:"learn-1"},body:"R1,250, use an assumptive close, include door to door and insurance, and explain the trade-off before discussing a concession"});
   assert.equal(sent,0);
   assert.match(payloads[0].context.generatedBookingLink,/^https:\/\/biketransport\.co\.za\/booking-form\/\?ts=\d+&route=Durban%20North%20to%20Pietermaritzburg&price=1250$/);
   assert.ok(payloads[0].context.ownerPreferences.some(x=>/assumptive close/i.test(x)));
   assert.ok(payloads[0].context.ownerPreferences.some(x=>/door-to-door/i.test(x)));
   await agent.onApproval({...base,id:{_serialized:"learn-2"},body:"Make it warmer"});
-  assert.deepEqual(payloads[1].context.ownerInstructionHistory,["R1,250, use an assumptive close, include door to door and insurance, and generate a booking link"]);
+  assert.deepEqual(payloads[1].context.ownerInstructionHistory,["R1,250, use an assumptive close, include door to door and insurance, and explain the trade-off before discussing a concession"]);
   assert.match(payloads[1].context.generatedBookingLink,/price=1250$/);
+  assert.ok(payloads[1].context.ownerPreferences.some(x=>x.includes("sticking point")));
   assert.deepEqual(JSON.parse(db.prepare("SELECT instruction_history_json FROM sales_approvals WHERE case_ref='SA-LEARN'").get().instruction_history_json),[
-   "R1,250, use an assumptive close, include door to door and insurance, and generate a booking link",
+   "R1,250, use an assumptive close, include door to door and insurance, and explain the trade-off before discussing a concession",
    "Make it warmer"
   ]);
  } finally {global.fetch=savedFetch;db.close();}
