@@ -223,6 +223,10 @@ app.post('/inbound',async(req,res)=>{
   p.text=String(p.text||'');
   const author=String(p.author||p.phone||'group-controller');
   const existing=getDraft(author);
+  if (existing && /^\s*(?:show|display|view|repeat|summari[sz]e)\s+(?:me\s+)?(?:the\s+|my\s+)?(?:current\s+)?draft\s*[?.!]*\s*$/i.test(p.text)) {
+   await send(`${summary(existing.data)}\n\nDraft only. No booking has been saved.`);
+   return res.json({ok:true,draftShown:true});
+  }
   if(p.albumError||Array.isArray(p.albumPhotos)){if(await dispatchBridge.forward(p))return res.json({recorded:true});return res.status(503).json({error:'Dispatch is not connected'});}
   if(p.mediaData&&!existing&&!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text)){if(await dispatchBridge.forward(p))return res.json({recorded:true});}
   if(/\b(invoice|imvoice|invoiced|quickbooks|payment|paid|statement|receipt)\b/i.test(p.text)&&!(/\b(delivered|complete|completed|collected|in transit)\b/i.test(p.text)&&/\b(?:SLA?[ -]?\d+|M-?\d+)\b/i.test(p.text))&&!/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text))return res.json({ignored:true,reason:'finance_intent'});
