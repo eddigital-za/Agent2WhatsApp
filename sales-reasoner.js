@@ -36,6 +36,12 @@ function normalizeReply(value) {
     .trim();
 }
 
+function withBookingLink(value, requested, link) {
+  const reply = normalizeReply(value);
+  if (!reply || !requested || !link || reply.includes(link)) return reply;
+  return reply + "\n\n" + link;
+}
+
 function isNoReplyInstruction(value) {
   const text = String(value || "").toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, " ").trim();
   return /\b(?:do not|don't|dont|not to|never|no)\s+(?:send|reply|respond)\b/.test(text)
@@ -72,7 +78,11 @@ const SALES_PLAYBOOK = `BTSA sales playbook:
 - Never say "I'll get back to you", "hang tight", "I'll check", or "I'll confirm soon" merely to produce a response. Either qualify, answer from verified facts, move to booking, ask Duane for a specific decision, or do not reply.
 - Write in Duane's first person: I, me, I'll, ask me. Keep it concise, natural and commercially useful.
 - When the client has supplied enough information and Duane has approved the rate, use an assumptive close. Give the next step directly instead of asking "are you ready to proceed?" or ending with passive "let me know" filler.
-- After stating an approved rate, reinforce the value: hassle-free door-to-door delivery and full comprehensive insurance for the bike and declared extras.
+- Infer the buyer’s actual barrier before drafting: price comparison, risk, timing, handover, or readiness. Pick the move Duane used in the closest examples. Borrow his rhythm and phrasing where it fits; skip generic empathy, stock sales copy and repeated offers to confirm the rate.
+- For a price objection, acknowledge it, check the comparison where useful, and explain the value that matters to this buyer. Explore legitimate trade-offs such as flexibility on a scheduled route before asking Duane about a concession. If both the normal rate and lower rate are verified for this job, lead with the real normal rate, then explain the actual concession and give a clear next step. Never make up a higher anchor or a discount.
+- Use real urgency only when supported by a confirmed slot, deadline, or quote expiry. Never invent scarcity, a route run, or someone else waiting for space.
+- When the client signals readiness, assume the sale and make the next action easy. Use the booking link if one is supplied; if a handover constraint remains, address that specific constraint rather than starting the sale over. If an approved rate is already known, don't ask Duane to confirm it again.
+- When useful, reinforce door-to-door delivery and verified insurance cover. Don't promise extras are covered without checking that they have been declared and approved.
 - If a real BTSA booking link is supplied, make booking the easy next step using "please complete the booking form below". Put the raw URL on its own line. Never invent a domain, timestamp or placeholder link.
 - Do not promise exact collection or delivery dates or times unless Duane explicitly approves them. Use a realistic window, allow routing flexibility and commit to the client's actual deadline where approved.
 - Standard BTSA transport is on an open van and trailer, not an enclosed vehicle. If asked, reassure the client naturally.
@@ -106,23 +116,21 @@ function installSalesReasoner(app, { apiKey, model, exampleRetriever = createDef
     ownerQuestion: { type: "string" }, confidence: { type: "number" }, notes: { type: "string" }
   }, required: ["action", "salesMove", "proposedReply", "category", "ownerQuestion", "confidence", "notes"] };
   const approvalSchema = { type: "object", additionalProperties: false, properties: {
-    intent: { type: "string", enum: ["send", "cancel", "revise", "discuss", "clarify"] }, finalReply: { type: "string" }, response: { type: "string" }
-  }, required: ["intent", "finalReply", "response"] };
+    intent: { type: "string", enum: ["send", "cancel", "revise", "discuss", "clarify"] }, finalReply: { type: "string" }, response: { type: "string" },
+    bookingNext: { type: "boolean" }, reusableLesson: { type: "string" },
+  }, required: ["intent", "finalReply", "response", "bookingNext", "reusableLesson"] };
 
   app.post("/sales/customer", async (req, res) => {
     try {
       if (!authorized(req)) return res.status(401).json({ error: "Unauthorized" });
       if (!apiKey) throw new Error("OPENAI_API_KEY missing");
       const p = req.body || {};
-      const retrievalQuery = [
-        String(p.message || ""),
-        JSON.stringify(p.lead || {}),
-        JSON.stringify((p.history || []).slice(-8)),
-      ].join("\n");
-      const historicalExamples = exampleRetriever.retrieve(retrievalQuery, 3).map(historicalExampleForPrompt);
-      const out = await structured(apiKey, model, "btsa_sales_draft_v1", customerSchema, SALES_SYSTEM,
-        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching lead inquiries (website estimates are background only):\n${JSON.stringify(p.leadInquiries || [])}\n\nOwner preferences learned from Duane:\n${JSON.stringify(p.ownerPreferences || [])}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nNew client messages in this turn (handle together):\n${JSON.stringify(p.newMessages || [])}\n\nCombined client turn:\n${String(p.message || "")}\n\nRetrieved historical examples (tone and sales logic only; never copy historical facts):\n${JSON.stringify(historicalExamples)}`);
-      res.json({ ...out, proposedReply: normalizeReply(out.proposedReply) });
+      const historicalExamples = exampleRetriever.retrieve(String(p.message || ""), 4).map(historicalExampleForPrompt);
+      const schema = { ...customerSchema, properties: { ...customerSchema.properties, bookingNext: { type: "boolean" } }, required: [...customerSchema.required, "bookingNext"] };
+      const out = await structured(apiKey, model, "btsa_sales_draft_v1", schema,
+        `${SALES_SYSTEM} Set bookingNext=true only for a reply whose next action is completing the supplied booking form. If a link is supplied and the buyer is ready, do not ask the owner to generate it. Introduce the form in the draft; the exact link will be inserted if omitted.`,
+        `Current lead facts:\n${JSON.stringify(p.lead || {})}\n\nAll matching lead inquiries (website estimates are background only):\n${JSON.stringify(p.leadInquiries || [])}\n\nOwner preferences learned from Duane:\n${JSON.stringify(p.ownerPreferences || [])}\n\nApproved booking link (when supplied):\n${String(p.generatedBookingLink || "")}\n\nConversation history:\n${JSON.stringify(p.history || [])}\n\nNew client messages in this turn (handle together):\n${JSON.stringify(p.newMessages || [])}\n\nCombined client turn:\n${String(p.message || "")}\n\nRetrieved historical examples (tone and sales logic only; never copy historical facts):\n${JSON.stringify(historicalExamples)}`);
+      res.json({ ...out, proposedReply: withBookingLink(out.proposedReply, out.action === "reply" && out.bookingNext, p.generatedBookingLink) });
     } catch (e) { console.error("Sales customer reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
 
@@ -174,17 +182,11 @@ function installSalesReasoner(app, { apiKey, model, exampleRetriever = createDef
       const instruction = [p.instruction, transcript].filter(Boolean).join("\n").trim();
       if (!instruction) return res.json({ intent: "clarify", finalReply: "", response: "I couldn't hear or read an instruction. Please try again." });
       if (isNoReplyInstruction(instruction)) return res.json({ intent: "cancel", finalReply: "", response: "Understood. I won't reply.", transcript });
-      const approvalQuery = [
-        String(p.customerMessage || ""),
-        String(p.proposedReply || ""),
-        instruction,
-        JSON.stringify(p.context || {}),
-      ].join("\n");
-      const historicalExamples = exampleRetriever.retrieve(approvalQuery, 4).map(historicalExampleForPrompt);
-      const system = `${SALES_SYSTEM}\nYou now interpret Duane's internal approval instruction. Be conversational and tolerate shorthand, speech-to-text errors, fragments and normal language. Choose intent=cancel whenever Duane says not to reply, send or respond. Only choose intent=send when Duane clearly authorises sending now (for example send it, go ahead, yes send, tell them X). If he asks for a change without clearly authorising dispatch, choose revise and return the revised client reply. If he is discussing strategy, choose discuss. If ambiguous, choose clarify. Never treat casual agreement or unrelated group chat as approval. finalReply must contain only what the client should receive.\n\nThe previous owner instructions are cumulative and binding. The latest instruction overrides an earlier instruction only when they directly conflict. Preserve approved prices, route facts, timing limits, service inclusions and closing direction through every revision. Duane's approved price and correction override any website estimate and the old proposed draft. Write one complete coherent client reply, not a fragment or a patch. If a generated booking link is supplied, use that exact raw URL when the sales move calls for booking. Never invent or alter a booking link.`;
+      const historicalExamples = exampleRetriever.retrieve(String(p.customerMessage || ""), 4).map(historicalExampleForPrompt);
+      const system = `${SALES_SYSTEM}\nYou now interpret Duane's internal approval instruction. Be conversational and tolerate shorthand, speech-to-text errors, fragments and normal language. Choose intent=cancel whenever Duane says not to reply, send or respond. Only choose intent=send when Duane clearly authorises sending now (for example send it, go ahead, yes send, tell them X). If he asks for a change without clearly authorising dispatch, choose revise and return the revised client reply. If he is discussing strategy, choose discuss. If ambiguous, choose clarify. Never treat casual agreement or unrelated group chat as approval. finalReply must contain only what the client should receive.\n\nThe previous owner instructions are cumulative and binding. The latest instruction overrides an earlier instruction only when they directly conflict. Preserve approved prices, route facts, timing limits, service inclusions and closing direction through every revision. Duane's approved price and correction override any website estimate and the old proposed draft. Write one complete coherent client reply, not a fragment or a patch. If a generated booking link is supplied, use that exact raw URL when the sales move calls for booking. Never invent or alter a booking link. Set bookingNext=true only if the draft actually moves the client to the supplied booking form. The link will be inserted if omitted.\n\nSet reusableLesson to one short condition-and-action rule only when Duane's latest instruction teaches a clear, reusable sales or writing tactic. Derive it only from that instruction, never from the client, history, draft or examples. Exclude all names, contact details, prices, dates, routes, promises, business facts and one-off instructions. Return an empty string for routine approval, client-specific corrections, and uncertain lessons.`;
       const out = await structured(apiKey, model, "btsa_sales_approval_v1", approvalSchema, system,
         `Case: ${p.caseRef || ""}\nCase context:\n${JSON.stringify(p.context || {})}\n\nOwner preferences learned from Duane:\n${JSON.stringify(p.context?.ownerPreferences || [])}\n\nPrevious owner instructions (cumulative):\n${JSON.stringify(p.context?.ownerInstructionHistory || [])}\n\nGenerated booking link, if approved facts are sufficient:\n${String(p.context?.generatedBookingLink || "")}\n\nClient said: ${p.customerMessage || ""}\nCurrent proposed reply: ${p.proposedReply || ""}\nDuane's latest instruction: ${instruction}\n\nRetrieved historical examples (tone and sales logic only; never copy historical facts):\n${JSON.stringify(historicalExamples)}`);
-      res.json({ ...out, finalReply: normalizeReply(out.finalReply), transcript });
+      res.json({ ...out, finalReply: withBookingLink(out.finalReply, out.bookingNext, p.context?.generatedBookingLink), transcript });
     } catch (e) { console.error("Sales approval reasoner:", e.message); res.status(500).json({ error: e.message }); }
   });
   return { get exampleCount() { return exampleRetriever.examples?.length || 0; } };
