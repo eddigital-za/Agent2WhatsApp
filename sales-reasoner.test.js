@@ -77,7 +77,9 @@ test("approval revisions retain corrections, use the generated booking link and 
       ok: true,
       json: async () => ({ output_text: JSON.stringify({
         intent: "revise",
-        finalReply: "The approved rate is R4,250 — please complete the booking form below:\n\n[Book here](https://biketransport.co.za/booking-form/?ts=123&route=Pretoria%20to%20Cape%20Town&price=4250)",
+        finalReply: "The approved rate is R4,250 — please complete the booking form below:",
+        bookingNext: true,
+        reusableLesson: "",
         response: "Updated with the approved rate and booking step.",
       }) }),
     };
