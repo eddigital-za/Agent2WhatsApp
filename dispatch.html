@@ -77,12 +77,12 @@
  <form id="orderForm">
   <div id="orderQuickFields" class="order-grid"></div>
   <small id="orderDateHint">New dates are confirmed. Use More details to mark a date tentative.</small>
+  <details id="orderHandovers" class="order-panel">
+   <summary id="handoverSummary">Add handover</summary>
+   <div id="legs"></div>
+  </details>
   <div class="order-save"><button id="saveOrder" class="primary">Save order</button><button id="retrySync" type="button" hidden>Retry sheet sync</button><button id="promote" type="button" hidden>Record partial order in sheet</button></div>
   <p class="result" id="orderResult" role="status"></p>
-  <details id="orderHandovers" class="order-panel">
-   <summary>Handovers &amp; transport legs</summary>
-   <div id="legs"></div><button type="button" id="addLeg">+ Add handover or leg</button>
-  </details>
   <details id="orderMore" class="order-panel">
    <summary>More details</summary>
    <div id="orderFields" class="order-grid"></div>
@@ -313,10 +313,46 @@ function readOrderFields(){
  }
  return patch;
 }
-function renderLegs(){$('legs').replaceChildren();legDraft.forEach((leg,i)=>{const box=node('fieldset');box.style.cssText='border:1px solid #e3e8eb;border-radius:7px;margin:12px 0;padding:12px';box.append(node('legend','Leg '+(i+1)));const grid=node('div'),handoverControls={};grid.style.cssText='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px';for(const [field,label,type] of [['from','From'],['to','To / handover location'],['handoverDate','Handover date','date'],['handoverTime','Handover time','time'],['handoverConfidence','Handover date status','select'],['contractor','Contractor'],['status','Status','select'],['plannedAt','Planned date/time','datetime-local'],['actualAt','Actual date/time','datetime-local'],['note','Notes']]){const l=node('label',label),input=node(type==='select'?'select':'input');input.style.cssText='display:block;width:100%';if(type==='select')for(const s of field==='handoverConfidence'?['confirmed','expected']:['Planned','Collected','At depot','In Transit','Handed over','Delivered','Cancelled']){const opt=node('option',s);opt.value=s;input.append(opt);}else input.type=type||'text';const [date='',time='']=(leg.handoverAt||'').split('T');input.value=field==='handoverDate'?date:field==='handoverTime'?time:leg[field]||(field==='status'?'Planned':field==='handoverConfidence'?'confirmed':'');if(field==='handoverDate'||field==='handoverTime'){
- handoverControls[field]=input;
- input.onchange=()=>{const day=handoverControls.handoverDate.value,clock=handoverControls.handoverTime.value;leg.handoverAt=day?day+(clock?'T'+clock:''):'';};
- }else input.onchange=()=>leg[field]=input.value;l.append(input);grid.append(l);}const remove=node('button','Remove leg');remove.type='button';remove.onclick=()=>{legDraft.splice(i,1);renderLegs();};box.append(grid,remove);$('legs').append(box);});}
+function renderLegs(){
+ const container=$('legs');
+ container.replaceChildren();
+ const dated=legDraft.filter(leg=>leg.handoverAt&&leg.status!=='Cancelled');
+ const active=legDraft.filter(leg=>!['Handed over','Delivered','Cancelled'].includes(leg.status));
+ const stops=dated.length?dated:[active.length===1?active[0]:{status:'Planned'}];
+ const showSummary=()=>{
+  const dates=legDraft.filter(leg=>leg.handoverAt&&leg.status!=='Cancelled').map(leg=>leg.handoverAt.split('T')[0]);
+  $('handoverSummary').textContent=dates.length?'Handover · '+dates.join(', '):'Add handover';
+ };
+ for(const leg of stops){
+  const group=node('div',undefined,'order-grid');
+  const dateLabel=node('label','Handover date'),date=node('input');
+  date.type='date';
+  date.value=(leg.handoverAt||'').split('T')[0];
+  const depotLabel=node('label','Depot (optional)'),depot=node('input');
+  depot.type='text';depot.maxLength=300;depot.value=leg.to||'';
+  dateLabel.append(date);depotLabel.append(depot);group.append(dateLabel,depotLabel);
+  const saveStop=()=>{
+   const alreadyRecorded=legDraft.includes(leg);
+   if(!alreadyRecorded&&!date.value)return;
+   const time=(leg.handoverAt||'').split('T')[1];
+   leg.handoverAt=date.value?(date.value+(time?'T'+time:'')):'';
+   leg.to=depot.value;
+   if(!alreadyRecorded)legDraft.push(leg);
+   showSummary();
+  };
+  date.onchange=saveStop;
+  depot.onchange=()=>{if(date.value)saveStop();};
+  if(leg.handoverAt){
+   const doneLabel=node('label'),done=node('input');
+   done.type='checkbox';done.checked=['Handed over','Delivered'].includes(leg.status);
+   done.disabled=leg.status==='Delivered';
+   done.onchange=()=>{leg.status=done.checked?'Handed over':'Planned';};
+   doneLabel.append(done,document.createTextNode(' Handed over'));group.append(doneLabel);
+  }
+  container.append(group);
+ }
+ showSummary();
+}
 function photoUpload(ref){
  const form=node('form'),stage=node('select'),files=node('input'),submit=node('button','Attach photos'),feedback=node('p','','sub');
  const prompt=node('option','Choose pickup or drop-off');prompt.value='';stage.append(prompt);stage.required=true;
@@ -347,7 +383,7 @@ orderDialog.onclick=event=>{
 orderDialog.addEventListener('close',()=>{
  pressedOrderBackdrop=false;
  $('orderScroll').scrollTop=0;
-});$('orderDialog').addEventListener('cancel',e=>{if(busy)e.preventDefault();});$('addLeg').onclick=()=>{legDraft.push({status:'Planned'});renderLegs();};
+});$('orderDialog').addEventListener('cancel',e=>{if(busy)e.preventDefault();});
 $('orderForm').onsubmit=async e=>{e.preventDefault();if(busy)return;const values=readOrderFields();const patch=detail?Object.fromEntries(Object.entries(values).filter(([key,value])=>JSON.stringify(value)!==JSON.stringify(orderBaseline[key]))):values;if(detail&&!Object.keys(patch).length){orderDialog.close();return;}busy=true;$('saveOrder').disabled=true;$('orderResult').textContent='Recording order and checking sheet save…';try{const result=detail?await api('/dispatch/order/'+encodeURIComponent(detail.externalId),{version:detail.version,changes:patch}):await api('/dispatch/manual',{requestKey:manualKey,order:patch});detail=result;busy=false;if(result.syncState==='synced'){orderDialog.close();await load({recorded:true});$('notice').textContent='Order saved and verified. '+$('notice').textContent;return;}await load({recorded:true});await openOrder(result.externalId);$('orderResult').textContent='Order recorded safely. Sheet sync needs attention: '+result.syncError;}catch(error){$('orderResult').textContent=error.message;}finally{busy=false;$('saveOrder').disabled=false;}};
 $('retrySync').onclick=async()=>{try{await api('/dispatch/retry/'+detail.externalId,{});await openOrder(detail.externalId);await load({recorded:true});}catch(e){$('orderResult').textContent=e.message;}};
 for(const [id,choice] of [['useRecorded','recorded'],['useSheet','sheet']])$(id).onclick=async()=>{try{await api('/dispatch/reconcile/'+detail.externalId,{version:detail.version,choice,reopen:$('reopen').checked});await openOrder(detail.externalId);await load({recorded:true});}catch(e){$('orderResult').textContent=e.message;}};

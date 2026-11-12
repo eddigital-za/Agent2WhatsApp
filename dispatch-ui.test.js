@@ -52,6 +52,16 @@ assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orde
  await row.children[1].children[0].onclick();
  assert.equal($('orderDialog').open,true);
  assert.equal($('orderHeading').textContent,orders[0].bike);
+ const handoverGroup=$('legs').children[0];
+ const handoverDate=handoverGroup.children[0].children[0];
+ const handoverDepot=handoverGroup.children[1].children[0];
+ assert.equal(JSON.parse(vm.runInContext('JSON.stringify(readOrderFields())',context)).legs.length,0);
+ handoverDepot.value='Durban depot';handoverDepot.onchange();
+ handoverDate.value='2026-11-27';handoverDate.onchange();
+ const handoverPatch=JSON.parse(vm.runInContext('JSON.stringify(readOrderFields())',context));
+ assert.deepEqual(handoverPatch.legs,[{status:'Planned',handoverAt:'2026-11-27',to:'Durban depot'}]);
+ assert.match($('handoverSummary').textContent,/2026-11-27/);
+ await row.children[1].children[0].onclick();
  const dialog=$('orderDialog');
  dialog.getBoundingClientRect=()=>({left:10,right:100,top:10,bottom:100});
  const inside={target:dialog,clientX:50,clientY:50},outside={target:dialog,clientX:5,clientY:5};
