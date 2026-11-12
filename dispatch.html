@@ -97,9 +97,9 @@ function buildOrderFields(order){
  const primary=detail?['status']:['bike','clientName','route','status'];
  for(const field of primary){
   const [name,label,type]=fields.find(([key])=>key===field);
-  const field=inputField(name,label,type,order[name]);
-  if(detail&&name==='status')field.style.gridColumn='1/-1';
-  quick.append(field);
+  const control=inputField(name,label,type,order[name]);
+  if(detail&&name==='status')control.style.gridColumn='1/-1';
+  quick.append(control);
  }
  for(const [stage,label] of [['collection','Pickup'],['delivery','Drop-off']]){
   const eta=order[stage];

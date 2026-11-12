@@ -9,7 +9,7 @@ Object.defineProperty(Element.prototype,'id',{set(id){elements.set(id,this)}});
 const elements=new Map(),$=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id)};
 let calls=[],fail='';
 const orders=[{externalId:'SLA-501',clientName:'Example A',bike:'Bike A',route:'JHB to DBN',status:'Pending',contractor:'',version:1},{externalId:'SLA-502',clientName:'Example B',bike:'Bike B',route:'CPT to JHB',status:'In Transit',contractor:'BTSA, Moto Movers'},{externalId:'M-0001',clientName:'Example C',bike:'Bike C',route:'JHB to DBN',status:'Delivered',contractor:'BTSA'}];
-const context=vm.createContext({console,Set,Map,Date,structuredClone,crypto:require('node:crypto'),document:{getElementById:$,createElement:tag=>new Element(tag),createTextNode:text=>text},fetch:async(url,options)=>{const body=JSON.parse(options.body);calls.push({url,...body});const ref=decodeURIComponent(url.split('/').pop());return {ok:ref!==fail,json:async()=>ref===fail?{error:'Sheet changed since loaded'}:{externalId:ref,status:body.changes.status||'Pending',contractor:body.changes.contractor||'',version:2,syncState:'synced'}};}});
+const context=vm.createContext({console,Set,Map,Date,structuredClone,crypto:require('node:crypto'),document:{getElementById:$,createElement:tag=>new Element(tag),createTextNode:text=>text},fetch:async(url,options)=>{if(!options.body){const ref=decodeURIComponent(url.split('/').pop());return {ok:true,json:async()=>({order:orders.find(order=>order.externalId===ref)})};}const body=JSON.parse(options.body);calls.push({url,...body});const ref=decodeURIComponent(url.split('/').pop());return {ok:ref!==fail,json:async()=>ref===fail?{error:'Sheet changed since loaded'}:{externalId:ref,status:body.changes.status||'Pending',contractor:body.changes.contractor||'',version:2,syncState:'synced'}};}});
 vm.runInContext(fs.readFileSync('dispatch.html','utf8').match(/<script>([\s\S]*)<\/script>/)[1],context);
 context.fixture={orders,statuses:['Pending','In Transit','Delivered'],contractors:['BTSA','Moto Movers']};$('group').value='status';
 vm.runInContext('data=fixture;render()',context);
@@ -37,6 +37,11 @@ assert.equal(vm.runInContext("JSON.stringify(changesFor(data.orders[1],'','add',
 assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orders[1],'','clear',[]).contractors)",context)),[]);
 assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orders[1],'','replace',['BTSA']).contractors)",context)),['BTSA']);
 (async()=>{
+ const row=$('jobs').children.find(item=>item.className==='job'&&item.children[1].children[0].textContent===orders[0].bike);
+ await row.children[1].children[0].onclick();
+ assert.equal($('orderDialog').open,true);
+ assert.equal($('orderHeading').textContent,orders[0].bike);
+ $('closeOrder').onclick();
  $('editStatus').value='Delivered';$('assignment').value='unchanged';fail='SLA-502';await $('editForm').onsubmit({preventDefault(){}});
  assert.equal(calls.length,2);assert.equal(calls[0].url,'/dispatch/order/SLA-501');assert.equal(calls[0].changes.status,'Delivered');assert.equal(calls[0].changes.contractor,undefined);
  assert.equal(vm.runInContext("selected.has('SLA-501')",context),false);assert.equal(vm.runInContext("selected.has('SLA-502')",context),true);
