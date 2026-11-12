@@ -5,6 +5,7 @@ class Element{
  append(...children){this.children.push(...children)}replaceChildren(...children){this.children=children;this.textContent=''}setAttribute(k,v){this[k]=v}
  querySelectorAll(selector){let items=[];for(const c of this.children){if(c instanceof Element){if(selector==='input:checked'&&c.tag==='input'&&c.checked)items.push(c);items.push(...c.querySelectorAll(selector));}}return items;}
 }
+Object.defineProperty(Element.prototype,'id',{set(id){elements.set(id,this)}});
 const elements=new Map(),$=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id)};
 let calls=[],fail='';
 const orders=[{externalId:'SLA-501',clientName:'Example A',bike:'Bike A',route:'JHB to DBN',status:'Pending',contractor:'',version:1},{externalId:'SLA-502',clientName:'Example B',bike:'Bike B',route:'CPT to JHB',status:'In Transit',contractor:'BTSA, Moto Movers'},{externalId:'M-0001',clientName:'Example C',bike:'Bike C',route:'JHB to DBN',status:'Delivered',contractor:'BTSA'}];
@@ -12,6 +13,21 @@ const context=vm.createContext({console,Set,Map,Date,structuredClone,crypto:requ
 vm.runInContext(fs.readFileSync('dispatch.html','utf8').match(/<script>([\s\S]*)<\/script>/)[1],context);
 context.fixture={orders,statuses:['Pending','In Transit','Delivered'],contractors:['BTSA','Moto Movers']};$('group').value='status';
 vm.runInContext('data=fixture;render()',context);
+vm.runInContext("detail=fixture.orders[0];buildOrderFields(detail);orderBaseline=structuredClone(readOrderFields())",context);
+assert.deepEqual($('orderQuickFields').children.slice(0,3).map(label=>label.textContent),['Status','Pickup date','Drop-off date']);
+assert.equal($('orderQuickFields').children.length,4);
+assert.ok($('orderFields').children.some(label=>label.textContent==='Customer email'));
+$('field-collectionDate').value='2026-11-13';
+$('field-collectionDate').onchange();
+const picker=$('contractorPicker'),choices=picker.children[1].children;
+for(const label of choices){const check=label.children[0];check.checked=true;check.onchange();}
+const before=JSON.parse(vm.runInContext('JSON.stringify(orderBaseline)',context));
+const after=JSON.parse(vm.runInContext('JSON.stringify(readOrderFields())',context));
+assert.deepEqual(Object.keys(after).filter(key=>JSON.stringify(after[key])!==JSON.stringify(before[key])),['contractor','collection']);
+assert.equal(after.collection.confidence,'confirmed');
+assert.equal(after.contractor,'BTSA, Moto Movers');
+vm.runInContext("detail=null;buildOrderFields({status:'Pending'})",context);
+assert.deepEqual($('orderQuickFields').children.slice(0,3).map(label=>label.textContent),['Motorcycle / goods','Customer / booking name','Route']);
 assert.match($('intro').textContent,/2 orders/);assert.equal($('stats').children[0].children[1].textContent,'2');
 vm.runInContext("setView('contractor','Moto Movers')",context);assert.match($('intro').textContent,/1 orders/);
 vm.runInContext("setView('closed')",context);assert.match($('intro').textContent,/1 orders/);
