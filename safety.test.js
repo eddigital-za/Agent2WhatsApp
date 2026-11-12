@@ -524,3 +524,48 @@ test("honouring a motorcycle quote for a quad keeps the comparison separate and 
   assert.equal(sent,0);
  } finally {global.fetch=savedFetch;db.close();}
 });
+
+test("route pilot prepares only eligible drafts, prevents duplicate cards and rechecks orders before send", async () => {
+ const keys=["SALES_ENABLED","SALES_CONVERSATION_ENABLED","SALES_TEST_MODE","SALES_LEAD_COHORT_START","SALES_ROUTE_PILOT_ENABLED"];
+ const saved=Object.fromEntries(keys.map(k=>[k,process.env[k]]));
+ Object.assign(process.env,{SALES_ENABLED:"true",SALES_CONVERSATION_ENABLED:"true",SALES_TEST_MODE:"false",SALES_LEAD_COHORT_START:new Date(Date.now()-86400000).toISOString(),SALES_ROUTE_PILOT_ENABLED:"true"});
+ const db=new DatabaseSync(":memory:"), cards=[];
+ let sent=0;
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient:{info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sent++;}},approvalClient:{info:{},sendMessage:async(_to,text)=>{cards.push(text);}},approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:x=>"27"+norm(x).slice(-9),localPhone:x=>norm(x).slice(-9),logEvent:()=>{}});
+ db.exec("CREATE TABLE leads(id INTEGER PRIMARY KEY,phone TEXT,name TEXT,pickup TEXT,dropoff TEXT,bike_make TEXT,bike_model TEXT,received_at TEXT,submitted_at TEXT,replied_at TEXT,duplicate_suppressed_at TEXT)");
+ const received=new Date(Date.now()-600000).toISOString(), stamp=new Date().toISOString();
+ const add=db.prepare("INSERT INTO leads VALUES(?,?,?,?,?,?,?,?,?,?,NULL)");
+ for (const [id,phone,pickup,dropoff] of [[1,"760000001","Johannesburg","Durban"],[2,"760000002","Johannesburg","Durban"],[3,"760000003","Durban","Johannesburg"]]) {
+  add.run(id,phone,"Test",pickup,dropoff,"BMW","GS",received,received,stamp);
+  db.prepare("INSERT INTO sales_messages(created_at,phone,direction,body,message_id) VALUES(?,?,'customer','Not in a rush',?)").run(stamp,phone,phone);
+  if (id!==2) db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,state,context_json,instruction_history_json,created_at,decided_at) VALUES(?,?,?,?,?,'sent',?,?,?,?)")
+   .run("SA-PRIOR-"+id,id,phone,"quote","Approved",JSON.stringify({lead:{pickup,dropoff,bike_make:"BMW",bike_model:"GS"}}),JSON.stringify(["Approved rate R2,500"]),stamp,stamp);
+ }
+ const owner=(id,body,quote)=>({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:id},body,hasQuotedMsg:Boolean(quote),getQuotedMessage:async()=>({body:quote}),timestamp:Math.floor(Date.now()/1000)});
+ const date=new Date(Date.now()+4*86400000).toISOString().slice(0,10);
+ try {
+  const command="Route offer: JHB to DBN | week of "+date;
+  await agent.onApproval(owner("route-draft",command));
+  assert.match(cards[0],/putting together a Johannesburg to Durban run/);
+  assert.match(cards[0],/price=2500/);
+  assert.match(cards[1],/1 draft\(s\) prepared, 1 flexible lead/);
+  assert.equal(sent,0);
+  await agent.onApproval(owner("route-dupe",command));
+  assert.match(cards[2],/No duplicate drafts/);
+  await agent.onApproval(owner("route-unquoted","send it"));
+  assert.match(cards[3],/Reply directly/);
+  agent.onOrderConfirmed({slaRef:"SLA-90001",phone:"27760000001",name:"Test"});
+  await agent.onApproval(owner("route-stale","send it",cards[0]));
+  assert.match(cards[4],/no longer current/);
+  assert.equal(sent,0);
+  await agent.onApproval(owner("route-reverse","Route offer: DBN to JHB | week of "+date));
+  assert.match(cards[5],/Durban to Johannesburg/);
+  await agent.onApproval(owner("route-valid","send it",cards[5]));
+  await agent.onApproval(owner("route-valid","send it",cards[5]));
+  assert.equal(sent,1);
+ } finally {
+  for (const k of keys) if (saved[k]===undefined) delete process.env[k]; else process.env[k]=saved[k];
+  db.close();
+ }
+});

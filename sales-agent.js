@@ -16,6 +16,10 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       decided_at TEXT, decision_text TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_sales_approvals_state ON sales_approvals(state, created_at);
+    CREATE TABLE IF NOT EXISTS sales_route_offers(
+      offer_key TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS sales_owner_preferences(
       rule_key TEXT PRIMARY KEY,
       instruction TEXT NOT NULL,
@@ -683,6 +687,76 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return processed;
   }
 
+  function routeCity(value) {
+    const city = String(value || "").trim().toLowerCase();
+    return ({ jhb: "johannesburg", joburg: "johannesburg", dbn: "durban" })[city] || city;
+  }
+  function hasOrderSince(phone, receivedAt) {
+    return Boolean(db.prepare("SELECT 1 FROM sales_order_confirmations WHERE phone=? AND created_at>=? LIMIT 1")
+      .get(phone, receivedAt));
+  }
+  async function draftRouteOffer(instruction) {
+    if (process.env.SALES_ROUTE_PILOT_ENABLED !== "true" || process.env.SALES_TEST_MODE !== "false" || !conversationReady() || cohortStart() === null) {
+      await group("Route pilot is off. No drafts were created.");
+      return;
+    }
+    const match = instruction.match(/^route offer:\s*([a-z ]+)\s+to\s+([a-z ]+)\s*\|\s*week of (\d{4}-\d{2}-\d{2})\s*$/i);
+    const pickup = routeCity(match?.[1]);
+    const dropoff = routeCity(match?.[2]);
+    const week = match?.[3];
+    const start = Date.parse(week + "T00:00:00+02:00");
+    if (!match || !Number.isFinite(start) || new Date(start + 7200000).toISOString().slice(0, 10) !== week ||
+        start <= Date.now() || start > Date.now() + 21 * 86400000 ||
+        [pickup, dropoff].sort().join(":") !== "durban:johannesburg") {
+      await group("Use: Route offer: Johannesburg to Durban | week of YYYY-MM-DD. Use a future week within 21 days. This pilot covers Johannesburg and Durban in either direction.");
+      return;
+    }
+    const key = [pickup, dropoff, week].join("|");
+    if (!db.prepare("INSERT OR IGNORE INTO sales_route_offers(offer_key,created_at) VALUES(?,?)").run(key, now()).changes) {
+      await group("I already processed that direction and week. No duplicate drafts created.");
+      return;
+    }
+    const cutoff = new Date(Math.max(cohortStart(), Date.now() - 14 * 86400000)).toISOString();
+    const leads = db.prepare(`SELECT l.* FROM leads l WHERE l.received_at>=? AND l.replied_at>=?
+      AND l.duplicate_suppressed_at IS NULL AND NOT EXISTS (SELECT 1 FROM leads newer
+        WHERE newer.phone=l.phone AND newer.id>l.id)
+      ORDER BY l.replied_at DESC LIMIT 100`).all(cutoff, cutoff);
+    const label = new Intl.DateTimeFormat("en-ZA", { day: "numeric", month: "long", timeZone: "Africa/Johannesburg" }).format(start);
+    let drafted = 0, withoutRate = 0;
+    for (const lead of leads) {
+      if (routeCity(lead.pickup) !== pickup || routeCity(lead.dropoff) !== dropoff ||
+          hasOrderSince(lead.phone, lead.received_at) ||
+          db.prepare("SELECT 1 FROM sales_approvals WHERE phone=? AND (state IN ('pending','delivery_unknown','sending','send_unknown') OR (created_at>=? AND json_extract(context_json,'$.routeOffer') IS NOT NULL)) LIMIT 1").get(lead.phone, new Date(Date.now() - 7 * 86400000).toISOString()) ||
+          db.prepare("SELECT 1 FROM sales_sla_followups WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested') LIMIT 1").get(lead.phone)) continue;
+      const conversation = history(lead.phone);
+      const replies = conversation.filter(m => m.direction === "customer" && m.created_at >= lead.received_at);
+      const latest = replies.at(-1);
+      if (!latest || !/^(?:i(?:['’]m| am) )?(?:flexible(?: on dates)?|(?:i(?:['’]m| am) )?not in a (?:rush|hurry)|no (?:rush|hurry)|any day(?: works)?)[.! ]*$/i.test(latest.body.trim())) continue;
+      if (conversation.some(m => /\b(?:stop|unsubscribe|already sorted|came right|no longer interested|don['’]t contact)\b/i.test(m.body) && m.direction === "customer")) continue;
+      const current = leadContext(lead.phone, lead).current;
+      const booking = priorBookingInstructions(current, lead.phone);
+      const link = generatedBookingLink({ lead: current }, booking.instructions || []);
+      if (!link) { withoutRate++; continue; }
+      if (drafted >= 3) continue;
+      const ref = caseRef();
+      const route = [lead.pickup, lead.dropoff].join(" to ");
+      const price = Number(new URL(link).searchParams.get("price")).toLocaleString("en-ZA");
+      const draft = `Howzit, I’m putting together a ${route} run for the week of ${label}. Your quote is R${price}. If you’re still looking to move it, you can fill in the booking form here. I’ll confirm the collection day separately.\n\n${link}`;
+      const lastMessageId = db.prepare("SELECT MAX(id) AS id FROM sales_messages WHERE phone=?").get(lead.phone).id;
+      const routeOffer = { receivedAt: lead.received_at, lastMessageId, validUntil: Math.min(start, booking.quotedAt + 24 * 3600000) };
+      const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,context_json,created_at) VALUES(?,?,?,?,?,?,?)")
+        .run(ref, lead.id, lead.phone, latest.body, draft, JSON.stringify({lead: current, routeOffer}), now());
+      drafted++;
+      try {
+        const id = await group(`*${ref} — Route offer — ${lead.name || "website lead"}*\n\n${draft}\n\nReply directly to this card with “send it” or “don’t send”.`);
+        db.prepare("UPDATE sales_approvals SET group_message_id=? WHERE id=?").run(id, Number(result.lastInsertRowid));
+      } catch (_) {
+        db.prepare("UPDATE sales_approvals SET state='delivery_unknown' WHERE id=?").run(Number(result.lastInsertRowid));
+      }
+    }
+    await group(`Route pilot: ${drafted} draft(s) prepared, ${withoutRate} flexible lead(s) skipped without a current approved rate. Nothing was sent to customers.`);
+  }
+
   async function onApproval(message) {
     if (!ready() || message._viaSharedBridge !== true || message.from !== approvalGroup() || message.fromMe) return false;
     const owner = String(customerClient.info?.wid?.user || "");
@@ -701,6 +775,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     }
     if (!isOwner) { console.log("Sales approval ignored: owner identity not verified"); return false; }
     if (!claim(message, "approval")) return false;
+    const routeInstruction = String(message.body || "").trim();
+    if (!message.hasQuotedMsg && /^route offer:/i.test(routeInstruction)) {
+      await draftRouteOffer(routeInstruction);
+      return true;
+    }
     supersedePreCohortApprovals();
     const row = await findPending(message);
     if (!row) {
@@ -744,6 +823,32 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (row.sequence_id) db.prepare("UPDATE sales_lead_sequence SET state='cancelled_owner',updated_at=? WHERE id=? AND state='approval_requested'").run(now(), row.sequence_id);
       await group(`Understood. I won't reply to ${row.case_ref}.`);
       logEvent({ leadId: row.lead_id, phone: row.phone, type: "sales_reply_cancelled", key: `sales-cancelled-${row.case_ref}`, details: { ref: row.case_ref } });
+      return true;
+    }
+    const routeOffer = JSON.parse(row.context_json || "{}")?.routeOffer;
+    if (routeOffer) {
+      if (!message.hasQuotedMsg && !String(message.body || "").trim().startsWith(row.case_ref + " ")) {
+        await group("Reply directly to the route card to approve it. Nothing was sent.");
+        return true;
+      }
+      if (!/^(?:SA-[A-Z0-9-]+\s+)?send it[.!]?$/i.test(instruction)) {
+        await group("Route pilot cards can be approved with “send it” or cancelled with “don’t send”. Nothing was sent.");
+        return true;
+      }
+      const lastMessageId = db.prepare("SELECT MAX(id) AS id FROM sales_messages WHERE phone=?").get(row.phone).id;
+      const newerLead = db.prepare("SELECT 1 FROM leads WHERE phone=? AND id>? LIMIT 1").get(row.phone, row.lead_id);
+      if (process.env.SALES_ROUTE_PILOT_ENABLED !== "true" || process.env.SALES_TEST_MODE !== "false" ||
+          Date.now() >= routeOffer.validUntil || newerLead || lastMessageId !== routeOffer.lastMessageId || hasOrderSince(row.phone, routeOffer.receivedAt)) {
+        db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=? WHERE id=? AND state IN ('pending','delivery_unknown')").run(now(), row.id);
+        await group("This route draft is no longer current. Nothing was sent.");
+        return true;
+      }
+      const lock = db.prepare("UPDATE sales_approvals SET state='sending',decided_at=? WHERE id=? AND state IN ('pending','delivery_unknown')").run(now(), row.id);
+      if (lock.changes !== 1) return true;
+      const sent = await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`, row.proposed_reply);
+      remember(row.phone, "agent", row.proposed_reply, sent?.id?._serialized);
+      db.prepare("UPDATE sales_approvals SET state='sent' WHERE id=?").run(row.id);
+      await group(`Sent to ${row.case_ref}.`);
       return true;
     }
     const preferences = learnOwnerPreferences(instruction);
