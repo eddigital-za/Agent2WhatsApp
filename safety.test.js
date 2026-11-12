@@ -524,3 +524,33 @@ test("honouring a motorcycle quote for a quad keeps the comparison separate and 
   assert.equal(sent,0);
  } finally {global.fetch=savedFetch;db.close();}
 });
+
+test("ID-only WhatsApp replies keep concurrent deals separate and stale quote cards cannot send", async () => {
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:"),cards=[],sent=[],requests=[];
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient:{info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async(to,body)=>{sent.push({to,body});}},approvalClient:{info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:"true_123@g.us_stanza"+cards.length}};}},approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ const insert=db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,created_at) VALUES(?,?,?,?,?)");
+ insert.run("SA-A","27760000000","A","Initial A R2,000",new Date().toISOString());
+ insert.run("SA-B","27760000001","B","Initial B R3,000",new Date().toISOString());
+ const owner=(id,body,quote)=>({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:id},body,hasQuotedMsg:true,getQuotedMessage:async()=>quote,timestamp:Math.floor(Date.now()/1000)});
+ const orig=global.fetch;
+ global.fetch=async(_url,opts)=>{
+  const p=JSON.parse(opts.body);requests.push(p.caseRef);
+  const out=p.instruction==="send it"?{intent:"send",finalReply:"Model rewrite R9,999"}:{intent:"revise",finalReply:p.instruction};
+  return {ok:true,json:async()=>out};
+ };
+ try {
+  await agent.onApproval(owner("deal-a1","Offer R2,500",{body:"*SA-A*"}));
+  await agent.onApproval(owner("deal-b1","Offer R3,500",{body:"*SA-B*"}));
+  await agent.onApproval(owner("deal-a2","Offer R2,700",{id:{_serialized:"stanza1"}}));
+  await agent.onApproval(owner("deal-conflict","send it",{id:{_serialized:"stanza2"},body:"*SA-A*"}));
+  assert.equal(sent.length,0);
+  await agent.onApproval(owner("deal-stale","send it",{id:{_serialized:"stanza1"}}));
+  assert.match(cards.at(-1),/older. Nothing was sent/);
+  assert.equal(sent.length,0);
+  await agent.onApproval(owner("deal-send","send it",{id:{_serialized:"stanza2"}}));
+  assert.deepEqual(requests,["SA-A","SA-B","SA-A","SA-A","SA-B"]);
+  assert.deepEqual(sent,[{to:"27760000001@c.us",body:"Offer R3,500"}]);
+ } finally {global.fetch=orig;db.close();}
+});

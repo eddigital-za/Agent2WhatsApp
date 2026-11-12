@@ -16,6 +16,13 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       decided_at TEXT, decision_text TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_sales_approvals_state ON sales_approvals(state, created_at);
+    CREATE TABLE IF NOT EXISTS sales_approval_cards(
+      message_id TEXT PRIMARY KEY,
+      stanza TEXT NOT NULL,
+      approval_id INTEGER NOT NULL,
+      shown_draft TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_sales_approval_cards_stanza ON sales_approval_cards(stanza);
     CREATE TABLE IF NOT EXISTS sales_owner_preferences(
       rule_key TEXT PRIMARY KEY,
       instruction TEXT NOT NULL,
@@ -308,28 +315,51 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const sent = await approvalClient.sendMessage(approvalGroup(), text);
     return sent?.id?._serialized || null;
   }
+  async function caseCard(row, text, shownDraft = null) {
+    const id = await group(text);
+    if (id) db.prepare("INSERT OR IGNORE INTO sales_approval_cards(message_id,stanza,approval_id,shown_draft) VALUES(?,?,?,?)")
+      .run(id, id.split("_").pop(), row.id, shownDraft);
+    return id;
+  }
   async function findPending(message) {
-    let quotedId = "";
-    let quotedText = "";
+    let quotedId = "", quotedText = "";
     if (message.hasQuotedMsg) {
-      try { const q = await message.getQuotedMessage(); quotedId = q?.id?._serialized || ""; quotedText = q?.body || ""; } catch (_) {}
+      try {
+        const quote = await message.getQuotedMessage();
+        quotedId = quote?.id?._serialized || "";
+        quotedText = String(quote?.body || "").trim();
+      } catch (_) {}
     }
-    const ref = quotedText.match(/^(?:Understood\. Revised reply for |Current draft for |I haven't sent anything for |I’m not certain you meant to send anything for )?\*?(SA-[A-Z0-9-]+)\b/)?.[1]
-      || String(message.body || "").match(/^\s*(SA-[A-Z0-9-]+)\b/)?.[1];
-    if (ref) {
-      const row = db.prepare("SELECT * FROM sales_approvals WHERE case_ref=? AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=sales_approvals.phone AND newer.id>sales_approvals.id)").get(ref);
-      if (row?.state === "pending") return row;
-      // A direct quote proves the card reached WhatsApp even if its send acknowledgement failed.
-      if (row?.state === "delivery_unknown" && quotedText.startsWith(`*${ref} `) && !row.followup_id && !row.sequence_id) return row;
-      return null;
-    }
+    const quotedRef = quotedText.match(/^(?:Understood\. Revised reply for |Current draft for |I haven['’]t sent anything for |I[’']m not certain you meant to send anything for )?\*?(SA-[A-Z0-9-]+)\b/)?.[1];
+    const typedRef = String(message.body || "").match(/^\s*(SA-[A-Z0-9-]+)\b/)?.[1];
+    let linked;
     if (quotedId) {
       const stanza = quotedId.split("_").pop();
-      const rows = db.prepare("SELECT * FROM sales_approvals WHERE state='pending' AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=sales_approvals.phone AND newer.id>sales_approvals.id) AND (group_message_id=? OR substr(group_message_id, -length(?)-1)='_' || ?) LIMIT 2").all(quotedId, stanza, stanza);
-      return rows.length === 1 ? rows[0] : null;
+      linked = db.prepare("SELECT approval_id AS id,shown_draft FROM sales_approval_cards WHERE message_id=?").get(quotedId);
+      if (!linked) {
+        const matches = db.prepare(`SELECT DISTINCT approval_id AS id,shown_draft FROM sales_approval_cards WHERE stanza=?
+          UNION SELECT id,NULL FROM sales_approvals WHERE group_message_id=? OR substr(group_message_id, -length(?)-1)='_' || ?
+          LIMIT 3`).all(stanza, quotedId, stanza, stanza);
+        // Initial cards also have a legacy ID on the approval row.
+        const ids = new Set(matches.map(m => m.id));
+        if (ids.size > 1 || new Set(matches.filter(m => m.shown_draft !== null).map(m => m.shown_draft)).size > 1) return null;
+        linked = matches.find(m => m.shown_draft !== null) || matches[0];
+      }
+    }
+    const latest = "NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=sales_approvals.phone AND newer.id>sales_approvals.id)";
+    const fromId = linked && db.prepare(`SELECT * FROM sales_approvals WHERE id=? AND ${latest}`).get(linked.id);
+    if (linked && !fromId) return null;
+    if (quotedRef && typedRef && quotedRef !== typedRef) return null;
+    if (fromId && [quotedRef, typedRef].some(ref => ref && ref !== fromId.case_ref)) return null;
+    const ref = quotedRef || typedRef;
+    if (fromId || ref) {
+      const row = fromId || db.prepare(`SELECT * FROM sales_approvals WHERE case_ref=? AND ${latest}`).get(ref);
+      if (row?.state === "pending") return { ...row, shownDraft: linked?.shown_draft };
+      if (row?.state === "delivery_unknown" && quotedText.startsWith(`*${row.case_ref} `) && !row.followup_id && !row.sequence_id) return row;
+      return null;
     }
     if (message.hasQuotedMsg) return null;
-    const rows = db.prepare("SELECT a.* FROM sales_approvals a WHERE a.state='pending' AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=a.phone AND newer.id>a.id) ORDER BY a.id DESC LIMIT 2").all();
+    const rows = db.prepare(`SELECT * FROM sales_approvals WHERE state='pending' AND ${latest} ORDER BY id DESC LIMIT 2`).all();
     return rows.length === 1 ? rows[0] : null;
   }
 
@@ -447,7 +477,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
           : `*My suggested reply:*\n${out.proposedReply}`;
         const card = `*${ref} — ${label}*\n\n*Client (${newMessages.length} message${newMessages.length === 1 ? "" : "s"}):*\n${customerText}\n\n*Sales move:* ${move}\n\n${recommendation}\n\nReply naturally or send a voice note. I will wait for your approval before sending anything.`;
         let groupId;
-        try { groupId = await group(card); }
+        try { groupId = await caseCard({id: Number(result.lastInsertRowid)}, card, out.proposedReply || null); }
         catch (error) {
           db.prepare("UPDATE sales_approvals SET state='delivery_unknown',decided_at=?,decision_text='Approval card delivery unknown' WHERE id=? AND state='pending'")
             .run(now(), Number(result.lastInsertRowid));
@@ -524,7 +554,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         const card = `*${ref} — SLA follow-up due — ${lead?.name || `Lead …${row.phone.slice(-4)}`}*\n\nYou sent the booking/SLA link yesterday and the client has not replied.\n\n*My suggested follow-up:*\n${out.proposedReply}\n\nReply naturally or send a voice note. I will wait for your approval before sending.`;
         db.prepare("UPDATE sales_sla_followups SET state='approval_sending',updated_at=? WHERE id=? AND state='processing'").run(now(), row.id);
         let groupId;
-        try { groupId = await group(card); }
+        try { groupId = await caseCard({id: Number(result.lastInsertRowid)}, card, out.proposedReply || null); }
         catch (error) {
           db.prepare("UPDATE sales_sla_followups SET state='approval_unknown',updated_at=? WHERE id=? AND state='approval_sending'").run(now(), row.id);
           throw error;
@@ -601,7 +631,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         const card = `*${ref} — ${title} — ${lead.name || `Lead …${lead.phone.slice(-4)}`}*\n${bike ? `${bike}\n` : ""}${[lead.pickup, lead.dropoff].filter(Boolean).join(" → ")}\n\n*My suggested follow-up:*\n${out.proposedReply}\n\nReply naturally or send a voice note. I will wait for your approval before sending.`;
         db.prepare("UPDATE sales_lead_sequence SET state='approval_sending',updated_at=? WHERE id=? AND state='processing'").run(now(), sequence.id);
         let groupId;
-        try { groupId = await group(card); }
+        try { groupId = await caseCard({id: Number(result.lastInsertRowid)}, card, out.proposedReply || null); }
         catch (error) {
           db.prepare("UPDATE sales_lead_sequence SET state='approval_unknown',updated_at=? WHERE id=? AND state='approval_sending'").run(now(), sequence.id);
           throw error;
@@ -734,7 +764,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const instruction = String(message.body || "").trim();
     const asksToSeeDraft = /\b(?:show|see|view|repeat|resend)\b.{0,20}\b(?:draft|reply|message)\b|\bwhat(?:'s| is) the (?:draft|reply|message)\b/i.test(instruction);
     if (asksToSeeDraft && row.proposed_reply) {
-      await group(`Current draft for *${row.case_ref}*:\n\n${row.proposed_reply}\n\nIf that is right, just say “send it”.`);
+      await caseCard(row, `Current draft for *${row.case_ref}*:\n\n${row.proposed_reply}\n\nIf that is right, just say “send it”.`, row.proposed_reply);
       return true;
     }
     if (isNoReplyInstruction(instruction)) {
@@ -758,7 +788,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       appendInstruction(row, instruction);
       const lead = baseContext.lead || {};
       const missing = lead.pickup && lead.dropoff ? "one final customer rate" : "the exact collection and delivery route";
-      await group(`I haven’t sent anything for ${row.case_ref}. I need ${missing} to prepare the booking link.`);
+      await caseCard(row, `I haven’t sent anything for ${row.case_ref}. I need ${missing} to prepare the booking link.`);
       return true;
     }
     const out = await reason("/sales/approval", {
@@ -782,15 +812,22 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (out.intent === "send") out.intent = "revise";
     }
     if (!row.proposed_reply && out.intent === "send") out.intent = "revise";
-    if (out.finalReply && hasPlaceholderLink(out.finalReply)) {
-      await group(`I haven't sent anything for ${row.case_ref}. The draft contains a placeholder link. Send me the real BTSA booking link, or tell me to leave the link out.`);
-      return true;
-    }
     if (forceBookingClose && out.intent !== "cancel" && out.finalReply) {
       out.finalReply = bookingClose(out.finalReply, bookingLink);
       out.intent = "revise";
     }
     const sendAuthorized = explicitlyAuthorizesSend(approvalWords);
+    if (out.intent === "send" && sendAuthorized && row.shownDraft != null && row.shownDraft !== row.proposed_reply) {
+      await caseCard(row, `Current draft for *${row.case_ref}*:\n\n${row.proposed_reply}\n\nThe card you replied to was older. Nothing was sent. Reply to this draft with “send it” to approve it.`, row.proposed_reply);
+      return true;
+    }
+    if (out.intent === "send" && /^(?:SA-[A-Z0-9-]+\s+)?(?:send it|go ahead|yes,? send)[.!]?$/i.test(approvalWords.trim())) {
+      out.finalReply = row.proposed_reply;
+    }
+    if (out.finalReply && hasPlaceholderLink(out.finalReply)) {
+      await caseCard(row, `I haven't sent anything for ${row.case_ref}. The draft contains a placeholder link. Send me the real BTSA booking link, or tell me to leave the link out.`);
+      return true;
+    }
     if (out.intent === "send" && !sendAuthorized && out.finalReply && out.finalReply.trim() !== row.proposed_reply.trim()) {
       // The model sometimes labels wording feedback as "send". Preserve the revision,
       // but keep the separate explicit-send gate closed.
@@ -805,7 +842,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       logEvent({ leadId: row.lead_id, phone: row.phone, type: "sales_reply_cancelled", key: `sales-cancelled-${row.case_ref}`, details: { ref: row.case_ref } });
     } else if (out.intent === "send" && out.finalReply && sendAuthorized) {
       // Atomic send-once lock; uncertain sends stay locked for manual reconciliation.
-      const locked = db.prepare("UPDATE sales_approvals SET state='sending',decided_at=? WHERE id=? AND state='pending'").run(now(), row.id);
+      const locked = db.prepare("UPDATE sales_approvals SET state='sending',decided_at=? WHERE id=? AND state='pending' AND proposed_reply=? AND NOT EXISTS (SELECT 1 FROM sales_approvals newer WHERE newer.phone=sales_approvals.phone AND newer.id>sales_approvals.id)").run(now(), row.id, row.proposed_reply);
       if (locked.changes !== 1) return true;
       const sent = await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`, out.finalReply);
       remember(row.phone, "agent", out.finalReply, sent?.id?._serialized);
@@ -815,12 +852,12 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       await group(`Sent to ${row.case_ref}:\n\n${out.finalReply}`);
       logEvent({ leadId: row.lead_id, phone: row.phone, type: "sales_reply_sent", key: `sales-sent-${row.case_ref}`, details: { ref: row.case_ref } });
     } else if (out.intent === "send") {
-      await group(`I haven't sent anything for ${row.case_ref}. I need a clear instruction such as “send it” before any client message can leave.`);
+      await caseCard(row, `I haven't sent anything for ${row.case_ref}. I need a clear instruction such as “send it” before any client message can leave.`);
     } else if (out.intent === "revise" && out.finalReply) {
       db.prepare("UPDATE sales_approvals SET proposed_reply=?,decision_text=? WHERE id=?").run(out.finalReply, instruction || out.transcript || "voice revision", row.id);
-      await group(`Understood. Revised reply for *${row.case_ref}*:\n\n${out.finalReply}\n\nIf that is right, just say “send it”.`);
+      await caseCard(row, `Understood. Revised reply for *${row.case_ref}*:\n\n${out.finalReply}\n\nIf that is right, just say “send it”.`, out.finalReply);
     } else {
-      await group(out.response || `I’m not certain you meant to send anything for ${row.case_ref}. Tell me what you want changed, or say “send it” when ready.`);
+      await caseCard(row, `*${row.case_ref}*\n${out.response || "Tell me what you want changed, or say “send it” when ready."}`);
     }
     return true;
   }
