@@ -597,7 +597,7 @@ async function handleOperationalText(message,mid){
  let parts=dispatchDomain.segments(text);const quoted=await quotedContext(message);const linkedOrder=!parts[0].ref?orderFromQuote(quoted):null;
  if(!parts[0].ref){const short=text.match(/^\s*(\d+)\s+(delivered|complete|completed|collected|in transit|cancelled)\b/i);const ref=short?'SLA-'+Number(short[1]):linkedOrder?.external_id;if(ref)parts=[{ref,text}];}
  if(!parts.some(p=>p.ref))return false;
- for(const part of parts){const current=operations.get(part.ref);if(current&&(/\?/.test(part.text)||/^\s*(?:SL(?:A)?[ -]?\d+|M-?\d+)?\s*[-:]?\s*(?:what|when|which|who|did|can you|could you|please send|please show)\b/i.test(part.text))){await sendGroup(part.ref+' | '+current.bike+'\nStatus: '+current.status+'\nCollection ETA: '+(current.collection?.date||'Unknown')+'\nDelivery ETA: '+(current.delivery?.date||'Unknown'),'query-'+mid+'-'+part.ref);continue;}if(!current){operations.inbox('unknown-'+mid+'-'+part.ref,'scheduling-whatsapp',part.text,part.ref,'Reference not found; sync or match the order before applying.');await sendGroup(part.ref+': reference not found. Saved in dashboard Needs attention.','unknown-'+mid+'-'+part.ref);continue;}
+ for(const part of parts){const current=operations.get(part.ref);if(current&&(/\?/.test(part.text)||/^\s*(?:SL(?:A)?[ -]?\d+|M-?\d+)?\s*[-:]?\s*(?:what|when|which|who|did|can you|could you|please send|please show)\b/i.test(part.text))){await sendGroup(part.ref+' | '+current.bike+'\nStatus: '+current.status+'\nCollection ETA: '+(current.collection?.date||'Unknown')+'\nDelivery ETA: '+(current.delivery?.date||'Unknown')+((current.legs||[]).some(leg=>leg.handoverAt&&leg.status!=='Cancelled')?'\nHandovers: '+current.legs.filter(leg=>leg.handoverAt&&leg.status!=='Cancelled').map(leg=>leg.handoverAt.replace('T',' ')).join(', '):''),'query-'+mid+'-'+part.ref);continue;}if(!current){operations.inbox('unknown-'+mid+'-'+part.ref,'scheduling-whatsapp',part.text,part.ref,'Reference not found; sync or match the order before applying.');await sendGroup(part.ref+': reference not found. Saved in dashboard Needs attention.','unknown-'+mid+'-'+part.ref);continue;}
   try{let patch=dispatchDomain.interpret(part.text,SHEET_CONTRACTORS,new Date((message.timestamp||Date.now()/1000)*1000));
    if(!Object.keys(patch).length&&OPENAI_API_KEY){
     const result=await interpretSchedulingMessage(part.text,quoted.text,part.ref);const plans=(result?.updates||[]).filter(p=>dispatchDomain.canonical(p.external_id)===part.ref&&p.action==='update');
@@ -609,7 +609,7 @@ async function handleOperationalText(message,mid){
     }
    }
    if(!Object.keys(patch).length){operations.inbox(mid+'-'+part.ref,'scheduling-whatsapp',part.text,part.ref,'Could not identify a safe update.');await sendGroup(part.ref+': update needs review in the dashboard.','held-'+mid+'-'+part.ref);continue;}
-   operations.update(part.ref,patch,current.version,'scheduling-whatsapp','wa-'+mid+'-'+part.ref);const saved=await operations.serial(()=>operations.flushOne(part.ref));await sendGroup('✅ '+part.ref+' | '+saved.bike+'\nStatus: '+saved.status+'\n'+(saved.syncState==='synced'?'Sheet save verified.':'Order recorded; sheet sync needs attention.')+(patch.needsLegReview?'\nHandover details retained; review transport legs in dashboard.':''),'ops-confirm-'+mid+'-'+part.ref);
+   operations.update(part.ref,patch,current.version,'scheduling-whatsapp','wa-'+mid+'-'+part.ref);const saved=await operations.serial(()=>operations.flushOne(part.ref));await sendGroup('✅ '+part.ref+' | '+saved.bike+'\nStatus: '+saved.status+'\n'+(saved.syncState==='synced'?'Sheet save verified.':'Order recorded; sheet sync needs attention.')+(patch.handoverPlan?'\nHandover: '+dispatchDomain.customerDate(patch.handoverPlan):patch.needsLegReview?'\nHandover details retained; review transport legs in dashboard.':''),'ops-confirm-'+mid+'-'+part.ref);
   }catch(error){operations.inbox('held-'+mid+'-'+part.ref,'scheduling-whatsapp',part.text,part.ref,error.message);await sendGroup(part.ref+': '+error.message+' Saved for dashboard review.','ops-failed-'+mid+'-'+part.ref);}
  }
  return true;
@@ -1190,7 +1190,11 @@ function formatDispatchBrief(open,today){
   const pendingPickup=open.filter(o=>!collected(o));
   const pickups=pendingPickup.filter(o=>confirmed(o,'collection')===today);
   const drops=open.filter(o=>confirmed(o,'delivery')===today);
+  const handovers=open.flatMap(o=>(o.legs||[]).filter(leg=>leg.handoverAt&&leg.handoverConfidence!=='expected'&&!['Handed over','Delivered','Cancelled'].includes(leg.status)).map(leg=>({o,leg,day:leg.handoverAt.slice(0,10)})));
+  const todayHandovers=handovers.filter(stop=>stop.day===today);
+  const handoverLine=({o,leg})=>[leg.handoverAt.split('T')[1],job(o),clean(leg.to)].filter(Boolean).join(' · ');
   const overdue=[
+    ...handovers.filter(stop=>stop.day<today).map(({o,day})=>[o,'Handover date passed',day]),
     ...open.filter(o=>confirmed(o,'delivery')&&confirmed(o,'delivery')<today).map(o=>[o,'Delivery date passed',o.delivery_at]),
     ...pendingPickup.filter(o=>confirmed(o,'collection')&&confirmed(o,'collection')<today).map(o=>[o,'Pickup date passed',o.collection_at]),
   ];
@@ -1199,11 +1203,12 @@ function formatDispatchBrief(open,today){
   const tomorrowPickups=pendingPickup.filter(o=>confirmed(o,'collection')===tomorrow);
   const tomorrowDrops=open.filter(o=>confirmed(o,'delivery')===tomorrow);
   const count=(n,label)=>n+' '+label+(n===1?'':'s');
-  const lines=['*BTSA DISPATCH · '+dayLabel(noon).toUpperCase()+'*',count(pickups.length,'pickup')+' · '+count(drops.length,'drop-off')+' · '+open.length+' open'];
+  const lines=['*BTSA DISPATCH · '+dayLabel(noon).toUpperCase()+'*',count(pickups.length,'pickup')+' · '+count(drops.length,'drop-off')+(todayHandovers.length?' · '+count(todayHandovers.length,'handover'):'')+' · '+open.length+' open'];
   const section=(title,items)=>{if(items.length)lines.push('',title,...items);};
   section('🟢 *PICK UP TODAY*',pickups.map(o=>line(o,o.collection_at)));
+  section('🟣 *HAND OVER TODAY*',todayHandovers.map(handoverLine));
   section('🔵 *DROP OFF TODAY*',drops.map(o=>line(o,o.delivery_at)));
-  if(!pickups.length&&!drops.length)lines.push('','No confirmed stops today.');
+  if(!pickups.length&&!drops.length&&!todayHandovers.length)lines.push('','No confirmed stops today.');
   section('🔴 *CHASE FIRST*',overdue.map(([o,reason,value])=>job(o)+'\n'+reason+' · '+dayLabel(new Date(value))));
   section('🟠 *ALSO NEEDS ACTION*',[
     missingEta&&(count(missingEta,'bike')+' in transit '+(missingEta===1?'needs':'need')+' a confirmed delivery ETA'),
@@ -1211,6 +1216,7 @@ function formatDispatchBrief(open,today){
   ].filter(Boolean));
   section('📅 *TOMORROW*',[
     ...tomorrowPickups.map(o=>'Pick up · '+line(o,o.collection_at)),
+    ...handovers.filter(stop=>stop.day===tomorrow).map(stop=>'Hand over · '+handoverLine(stop)),
     ...tomorrowDrops.map(o=>'Drop off · '+line(o,o.delivery_at)+(pickups.includes(o)?' · pickup due today':''))
   ]);
   return [...lines,'','Full schedule in BTSA Dispatch.'].join('\n');
@@ -1221,7 +1227,7 @@ async function summary(period,requestedKey=''){
   const key=requestedKey||`${period}-summary-${localDate()}`;
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND (external_id GLOB 'M-[0-9]*' OR (external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380)) ORDER BY contractor COLLATE NOCASE, CAST(substr(external_id,5) AS INTEGER)").all();
-  const text=formatDispatchBrief(open,localDate());
+  const text=formatDispatchBrief(open.map(order=>({...order,legs:operations.get(order.external_id)?.legs||[]})),localDate());
   const sent=await sendGroup(text,key);
   if(!sent.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }

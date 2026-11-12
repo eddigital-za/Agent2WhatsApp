@@ -7,9 +7,9 @@ class Element{
 }
 Object.defineProperty(Element.prototype,'id',{set(id){elements.set(id,this)}});
 const elements=new Map(),$=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id)};
-let calls=[],fail='';
+let calls=[],refreshes=0,fail='';
 const orders=[{externalId:'SLA-501',clientName:'Example A',bike:'Bike A',route:'JHB to DBN',status:'Pending',contractor:'',version:1},{externalId:'SLA-502',clientName:'Example B',bike:'Bike B',route:'CPT to JHB',status:'In Transit',contractor:'BTSA, Moto Movers'},{externalId:'M-0001',clientName:'Example C',bike:'Bike C',route:'JHB to DBN',status:'Delivered',contractor:'BTSA'}];
-const context=vm.createContext({console,Set,Map,Date,structuredClone,crypto:require('node:crypto'),document:{getElementById:$,createElement:tag=>new Element(tag),createTextNode:text=>text},fetch:async(url,options)=>{if(!options.body){const ref=decodeURIComponent(url.split('/').pop());return {ok:true,json:async()=>({order:orders.find(order=>order.externalId===ref)})};}const body=JSON.parse(options.body);calls.push({url,...body});const ref=decodeURIComponent(url.split('/').pop());return {ok:ref!==fail,json:async()=>ref===fail?{error:'Sheet changed since loaded'}:{externalId:ref,status:body.changes.status||'Pending',contractor:body.changes.contractor||'',version:2,syncState:'synced'}};}});
+const context=vm.createContext({console,Set,Map,Date,structuredClone,crypto:require('node:crypto'),document:{getElementById:$,createElement:tag=>new Element(tag),createTextNode:text=>text},fetch:async(url,options)=>{if(url==='/dispatch/workspace?recorded=1'){refreshes++;return {ok:true,json:async()=>context.fixture};}if(!options.body){const ref=decodeURIComponent(url.split('/').pop());return {ok:true,json:async()=>({order:orders.find(order=>order.externalId===ref)})};}const body=JSON.parse(options.body);calls.push({url,...body});const ref=decodeURIComponent(url.split('/').pop());return {ok:ref!==fail,json:async()=>ref===fail?{error:'Sheet changed since loaded'}:{externalId:ref,status:body.changes.status||'Pending',contractor:body.changes.contractor||'',version:2,syncState:'synced'}};}});
 vm.runInContext(fs.readFileSync('dispatch.html','utf8').match(/<script>([\s\S]*)<\/script>/)[1],context);
 context.fixture={orders,statuses:['Pending','In Transit','Delivered'],contractors:['BTSA','Moto Movers']};$('group').value='status';
 vm.runInContext('data=fixture;render()',context);
@@ -69,17 +69,15 @@ assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orde
  assert.equal(dialog.open,true);
  assert.match($('orderResult').textContent,/Sheet changed/);
  fail='';
- const originalLoad=vm.runInContext('load',context);
- vm.runInContext('load=async()=>{}',context);
  await $('orderForm').onsubmit({preventDefault(){}});
  assert.equal(dialog.open,false);
- context.originalLoad=originalLoad;
- vm.runInContext('load=originalLoad',context);
+ assert.equal(refreshes,1);
  calls=[];
 
  $('closeOrder').onclick();
  orders[0].collection={date:'2026-11-16',confidence:'expected'};
  orders[0].delivery={date:'2026-11-18',time:'09:30',confidence:'confirmed'};
+ orders[0].legs=[{handoverAt:'2026-11-17T12:00',handoverConfidence:'expected',status:'Planned',to:'Depot A'},{plannedAt:'2026-11-19',status:'Planned'}];
  vm.runInContext("calendarMonth='2026-11-01';setView('calendar')",context);
  assert.equal($('calendar').hidden,false);
  assert.equal($('workarea').hidden,true);
@@ -92,7 +90,9 @@ assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orde
  assert.match(days[15].children[1].children[0].textContent,/Tentative/);
  assert.equal(days[17].children[1].className,'calendar-event calendar-dropoff');
  assert.match(days[17].children[1].children[0].textContent,/09:30/);
- assert.ok(days[16].classes.has('no-events'));
+ assert.equal(days[16].children[1].className,'calendar-event calendar-handover');
+ assert.match(days[16].children[1].children[0].textContent,/12:00 · Depot A · Tentative/);
+ assert.ok(days[18].classes.has('no-events'));
  await days[17].children[1].onclick();
  assert.equal($('orderDialog').open,true);
  assert.equal($('orderHeading').textContent,orders[0].bike);

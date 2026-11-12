@@ -18,7 +18,7 @@ function when(text,base=new Date()){
  const confidence=/\b(approximately|approx|expected|estimated|estimate|maybe|tentative|provisional|week of|later today)\b/.test(t)?'expected':'confirmed';
  return {date:day,time:time?time[1].padStart(2,'0')+':'+time[2]:'',precision,window:precision==='window'?(t.match(/morning|afternoon|evening/)||[])[0]:'',confidence};
 }
-function stageText(text,stage){const words=stage==='collection'?'collect(?:ion|ed)?|pick[ -]?up|fetch':'deliver(?:y|ed)?|drop[ -]?off';const all='collect(?:ion|ed)?|pick[ -]?up|fetch|deliver(?:y|ed)?|drop[ -]?off|handover|hand[ -]?over';return String(text).match(new RegExp('\\b(?:'+words+')\\b[\\s\\S]*?(?=\\b(?:'+all+')\\b|$)','i'))?.[0]||'';}
+function stageText(text,stage){const words=stage==='handover'?'hand[ -]?over':stage==='collection'?'collect(?:ion|ed)?|pick[ -]?up|fetch':'deliver(?:y|ed)?|drop[ -]?off';const all='collect(?:ion|ed)?|pick[ -]?up|fetch|deliver(?:y|ed)?|drop[ -]?off|handover|hand[ -]?over';return String(text).match(new RegExp('\\b(?:'+words+')\\b[\\s\\S]*?(?=\\b(?:'+all+')\\b|$)','i'))?.[0]||'';}
 function contractorNames(text,available){const t=String(text||'').toLowerCase().replace(/cheeta\b/g,'cheetah').replace(/dj bike towing/g,'dj bike transport');return available.filter(name=>{const values=[name.toLowerCase(),name.toLowerCase().split(' - ').pop()];if(name==='Cheetah Express')values.push('cheetah');return values.some(v=>new RegExp('\\b'+v.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b','i').test(t));});}
 function interpret(text,available,base=new Date()){
  const t=String(text||'');const out={};const c=stageText(t,'collection'),d=stageText(t,'delivery');const collection=when(c,base),delivery=when(d,base);
@@ -27,8 +27,11 @@ function interpret(text,available,base=new Date()){
  else if(/\b(cancelled|canceled|cancel)\b/i.test(t))out.status='Cancelled';else if(/\bin[ -]?transit\b/i.test(t))out.status='In Transit';else if(/\bcollected\b/i.test(t))out.status='Collected';else if(/\bpaused\b/i.test(t))out.status='Paused';
  if(out.status==='Delivered')out.actualDelivery=when(d,base)||{date:localDay(base),time:'',precision:'day',confidence:'confirmed'};
  if(/\bcollected\b/i.test(c))out.actualCollection=collection||{date:localDay(base),time:'',precision:'day',confidence:'confirmed'};
+ const handover=stageText(t,'handover');
+ const plan=/^hand[ -]?over\s+(?:(?:scheduled|planned)\s+)?(?:for|on)\b/i.test(handover)&&when(handover,base);
+ if(plan&&plan.precision!=='week')out.handoverPlan=plan;
  const names=contractorNames(t,available);if(names.length)out.contractor=names.join(', ');
- if(/\b(depot|handover|hand[ -]?over|taken delivery|\bleg\b)\b/i.test(t)){out.legNote=t;out.needsLegReview=true;}
+ if(/\b(depot|handover|hand[ -]?over|taken delivery|\bleg\b)\b/i.test(t)){out.legNote=t;if(!out.handoverPlan)out.needsLegReview=true;}
  return out;
 }
 function reviewDue(deliveredAt,replyAt,now,config){if(!config?.reviewText||!config?.reviewLink||!config?.eveningCutoff||!config?.morningTime)return null;const trigger=replyAt?new Date(replyAt):new Date(new Date(deliveredAt).getTime()+30*60000);let day=localDay(trigger);const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Johannesburg',hour:'2-digit',minute:'2-digit',hour12:false}).format(trigger);if(parts>=config.eveningCutoff)day=addDay(day,1);if(parts>=config.eveningCutoff||parts<config.morningTime)return new Date(day+'T'+config.morningTime+':00+02:00').toISOString();return trigger.toISOString();}

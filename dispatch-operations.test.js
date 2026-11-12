@@ -14,6 +14,17 @@ const r=(ref,status='Pending')=>{const row=Array(40).fill('');row[0]=ref;row[1]=
  assert.throws(()=>ops.update(manual.externalId,{note:'stale'},0),/Order changed/);offline=false;appendUncertain=true;await ops.flushOne(manual.externalId);assert.equal(appends,1);appendUncertain=false;await ops.flushOne(manual.externalId);assert.equal(appends,1);assert.equal(ops.get(manual.externalId).syncState,'synced');assert.equal(rows[1][3],'');assert.equal(rows[1][39],manual.externalId);
  const current=ops.get(manual.externalId);ops.update(current.externalId,{status:'Collected',actualCollection:{date:'2026-11-08',time:'',precision:'day',confidence:'confirmed'}},current.version,'test','collect1');const v=ops.get(current.externalId).version;ops.update(current.externalId,{status:'Collected'},undefined,'test','collect1');assert.equal(ops.get(current.externalId).version,v);assert.equal(ops.details(current.externalId).messages.length,1);assert.equal(ops.details(current.externalId).messages[0].state,'awaiting_approval');
  assert.equal(domain.reviewDue('2026-11-08T18:50:00Z',null,null,{}),null);assert.equal(domain.reviewDue('2026-11-08T18:50:00Z',null,null,{reviewText:'review',reviewLink:'https://example.com',eveningCutoff:'20:00',morningTime:'08:00'}),'2026-11-09T06:00:00.000Z');
+ const handover=domain.interpret('handover for 2026-11-13 at 14:00',[],new Date('2026-11-08T08:00:00Z'));
+ assert.equal(handover.delivery,undefined);
+ assert.equal(handover.needsLegReview,undefined);
+ const booked=ops.update(manual.externalId,handover,undefined,'test','handover1');
+ assert.equal(booked.legs[0].handoverAt,'2026-11-13T14:00');
+ assert.equal(booked.status,'Collected');
+ await ops.refresh();
+ assert.equal(ops.get(manual.externalId).legs[0].handoverAt,'2026-11-13T14:00');
+ assert.throws(()=>ops.update(manual.externalId,{legs:[{handoverAt:'2026-11-13T25:00'}]}),/Invalid handover/);
+ ops.update(manual.externalId,{legs:[{handoverAt:'2026-11-13'},{handoverAt:'2026-11-14'}]});
+ assert.throws(()=>ops.update(manual.externalId,handover),/multiple transport legs/);
  const changed=ops.get(manual.externalId);ops.update(changed.externalId,{collectionAddress:'Example address',rate:'2500'},changed.version);await ops.flushOne(changed.externalId);assert.equal(rows[1][22],'Example address');assert.equal(rows[1][3],'');
  console.log('PASS: real SQLite tests — per-order boundaries, local times/windows, reference aliases, closed-state protection, partial manual capture, durable offline queue, idempotent creation and uncertain append recovery, stale versions, sheet columns, message approval hold, review timing. No live services or orders.');
 })().catch(e=>{console.error(e);process.exitCode=1});
