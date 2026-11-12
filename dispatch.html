@@ -13,6 +13,8 @@
 #orderInfo{margin:6px 0 14px}
 .order-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .order-grid label{min-width:0;font-weight:600}
+.stop-details{grid-column:1/-1;border:1px solid var(--line);border-radius:8px;padding:12px}
+.stop-details h3,.stop-details .stop-address{grid-column:1/-1}
 .order-grid input:not([type=checkbox]),.order-grid select{min-width:0;min-height:46px;border:1px solid #ccd6da;border-radius:8px;background:#fff;color:var(--ink);padding:8px;font-size:16px}
 .order-panel{margin-top:10px;border:1px solid var(--line);border-radius:9px;padding:0 12px;min-width:0}
 .order-panel>summary{cursor:pointer;min-height:46px;padding:12px 0;font-size:15px;font-weight:650;overflow-wrap:anywhere}
@@ -110,12 +112,22 @@ function buildOrderFields(order){
  for(const [stage,label] of [['collection','Pickup'],['delivery','Drop-off']]){
   const eta=order[stage];
   quick.append(inputField(stage+'Date',label+' date','date',eta?.date));
-  advanced.append(
+  const stop=node('section',undefined,'order-grid stop-details');
+  const address=inputField(stage+'Address','Address','text',order[stage+'Address']);
+  address.className='stop-address';
+  const actual='actual'+stage[0].toUpperCase()+stage.slice(1);
+  stop.append(
+   node('h3',label+' details'),
+   inputField(stage+'Contact','Contact','text',order[stage+'Contact']),
+   inputField(stage+'Phone','Phone','tel',order[stage+'Phone']),
+   address,
    inputField(stage+'Time',label+' time','time',eta?.time),
    inputField(stage+'Precision',label+' precision','precision',eta?.precision||'day'),
    inputField(stage+'Window',label+' window (e.g. morning)','text',eta?.window),
-   inputField(stage+'Confidence',label+' confidence','confidence',eta?.confidence||'unknown')
+   inputField(stage+'Confidence',label+' confidence','confidence',eta?.confidence||'unknown'),
+   inputField(actual+'Date','Actual '+label.toLowerCase()+' date','date',order[actual]?.date)
   );
+  advanced.append(stop);
   $('field-'+stage+'Date').onchange=()=>{
    const confidence=$('field-'+stage+'Confidence');
    if(!eta?.date&&confidence.value==='unknown')confidence.value='confirmed';
@@ -148,10 +160,7 @@ function buildOrderFields(order){
  picker.append(title,choices,assignment);
  quick.append(picker);
  for(const [name,label,type] of fields){
-  if(!primary.includes(name)&&name!=='contractor')advanced.append(inputField(name,label,type,order[name]));
- }
- for(const [field,label] of [['actualCollection','Actual collection'],['actualDelivery','Actual delivery']]){
-  advanced.append(inputField(field+'Date',label+' date','date',order[field]?.date));
+  if(!primary.includes(name)&&name!=='contractor'&&!/^(collection|delivery)/.test(name))advanced.append(inputField(name,label,type,order[name]));
  }
 }
 function readOrderFields(){

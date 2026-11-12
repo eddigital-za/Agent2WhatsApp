@@ -17,6 +17,13 @@ vm.runInContext("detail=fixture.orders[0];buildOrderFields(detail);orderBaseline
 assert.deepEqual($('orderQuickFields').children.slice(0,3).map(label=>label.textContent),['Status','Pickup date','Drop-off date']);
 assert.equal($('orderQuickFields').children.length,4);
 assert.ok($('orderFields').children.some(label=>label.textContent==='Customer email'));
+const stops=$('orderFields').children.filter(section=>section.className==='order-grid stop-details');
+assert.deepEqual(stops.map(section=>section.children[0].textContent),['Pickup details','Drop-off details']);
+for(const [index,stage] of ['collection','delivery'].entries()){
+ for(const field of ['Contact','Phone','Address','Time','Confidence']){
+  assert.ok(stops[index].children.some(label=>label.children.includes($('field-'+stage+field))));
+ }
+}
 $('field-collectionDate').value='2026-11-13';
 $('field-collectionDate').onchange();
 const picker=$('contractorPicker'),choices=picker.children[1].children;
