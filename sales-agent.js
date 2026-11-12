@@ -206,14 +206,34 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const route = `${pickup} to ${dropoff}`;
     return `https://biketransport.co.za/booking-form/?ts=${Math.floor(Date.now() / 1000)}&route=${encodeURIComponent(route)}&price=${price}`;
   }
+  function shownWebsiteEstimate(lead, messages) {
+    if (!lead?.pickup || !lead.dropoff || !/^\d+(?:\.\d+)?$/.test(String(lead.website_estimate || ""))) return null;
+    const amount = Number(lead.website_estimate);
+    if (amount < 100 || amount > 100000) return null;
+    const normalize = value => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const route = normalize(`Route: ${lead.pickup} → ${lead.dropoff} with an estimate of R${lead.website_estimate}`);
+    for (const item of [...(messages || [])].reverse()) {
+      if (!["duane", "agent"].includes(item.direction) || !/\bR\s*\d/i.test(item.body)) continue;
+      // Never bypass a newer rate, different route, or an estimate the buyer didn't see.
+      return /already got an estimate from our website/i.test(item.body) &&
+        item.body.split("\n").some(line => normalize(line.split("|")[0]) === route) ? amount : null;
+    }
+    return null;
+  }
+  function confirmsShownRate(instruction) {
+    return /^(?:the |use the |honou?r the )?(?:rate|price|quote) (?:was |is |has been )?already (?:quoted|given|sent)[.!]?$/i.test(instruction.trim());
+  }
+  function readyToBook(text) {
+    return /\b(?:process|steps?|how)\b[\s\S]{0,36}\b(?:finali[sz]e|book|proceed|go ahead)\b|\b(?:ready to book|how do i book)\b/i.test(text);
+  }
   function requestsBookingLink(value) {
     const text = String(value || "");
     return /\b(?:booking|sla)\s+(?:link|form)\b/i.test(text) &&
-      /\b(?:close|add|include|generate|use|send|give|provide|put|create|need|with)\b/i.test(text) &&
+      /\b(?:close|add|include|generate|use|send|give|provide|put|create|complete|need|with)\b/i.test(text) &&
       !/\b(?:don['’]?t|do not|no|without|omit|remove|leave out)\b[^.!?]{0,45}\b(?:booking|sla)\s+(?:link|form)\b/i.test(text);
   }
   function bookingClose(draft, link) {
-    const text = String(draft || "").replace(/https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:booking-form|timestamp)\/?[^\s]*/gi, "").trim();
+    const text = String(draft || "").replace(/^\s*\{(?:booking |sla )?link\}\s*$/gim, "").replace(/https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:booking-form|timestamp)\/?[^\s]*/gi, "").trim();
     const body = text.split(/\n{2,}/).map(paragraph =>
       paragraph.split(/(?<=[.!?])\s+/).filter(sentence =>
         !(/\b(?:access (?:details|constraints)|specific dates|collection dates|preferred dates|dates (?:you|for collection))\b/i.test(sentence) &&
@@ -327,7 +347,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       try {
         const quote = await message.getQuotedMessage();
         quotedId = quote?.id?._serialized || "";
-        quotedText = String(quote?.body || "").trim();
+        quotedText = String(quote?.body || "").replace(/[\u200b-\u200f\u2060\ufeff]/g, "").trim();
       } catch (_) {}
     }
     const quotedRef = quotedText.match(/^(?:Understood\. Revised reply for |Current draft for |I haven['’]t sent anything for |I[’']m not certain you meant to send anything for )?\*?(SA-[A-Z0-9-]+)\b/)?.[1];
@@ -355,7 +375,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     if (fromId || ref) {
       const row = fromId || db.prepare(`SELECT * FROM sales_approvals WHERE case_ref=? AND ${latest}`).get(ref);
       if (row?.state === "pending") return { ...row, shownDraft: linked?.shown_draft };
-      if (row?.state === "delivery_unknown" && quotedText.startsWith(`*${row.case_ref} `) && !row.followup_id && !row.sequence_id) return row;
+      if (row?.state === "delivery_unknown" && (quotedText.startsWith(`*${row.case_ref} `) || (quotedRef === row.case_ref && /^I haven['’]t sent anything for /i.test(quotedText))) && !row.followup_id && !row.sequence_id) return row;
       return null;
     }
     if (message.hasQuotedMsg) return null;
@@ -452,6 +472,16 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         });
         const active = db.prepare("SELECT state,last_message_at FROM sales_conversation_queue WHERE phone=?").get(queued.phone);
         if (!active || active.state !== "processing" || active.last_message_at !== queued.last_message_at) continue;
+        const current = context.current;
+        let askedShownRate = null;
+        if (readyToBook(customerText) && current.pickup && current.dropoff && !generatedLink && out.action === "reply" && out.salesMove === "qualify") {
+          const shown = shownWebsiteEstimate(current, conversation);
+          askedShownRate = shown;
+          out.action = "owner_input";
+          out.salesMove = "close";
+          out.proposedReply = "";
+          out.ownerQuestion = shown ? `They’re ready to book. Use the R${shown.toLocaleString("en-ZA")} already shown in WhatsApp for the booking link?` : "They’re ready to book. What final rate should I use for the booking link?";
+        }
         if (out.action === "no_reply") {
           db.prepare("UPDATE sales_conversation_queue SET state='completed',updated_at=? WHERE phone=? AND state='processing' AND last_message_at=?")
             .run(now(), queued.phone, queued.last_message_at);
@@ -465,7 +495,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         const ref = caseRef();
         db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=?,decision_text='Newer client turn' WHERE phone=? AND state='pending'")
           .run(now(), queued.phone);
-        const contextJson = JSON.stringify({ lead: context.current, leadInquiries: context.inquiries, history: conversation, newMessages, salesMove: out.salesMove, bookingInstructions, bookingQuotedAt: booking.quotedAt });
+        const contextJson = JSON.stringify({ lead: context.current, leadInquiries: context.inquiries, history: conversation, newMessages, salesMove: out.salesMove, askedShownRate, bookingInstructions, bookingQuotedAt: booking.quotedAt });
         const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,context_json,created_at) VALUES(?,?,?,?,?,?,?)")
           .run(ref, lead.id, queued.phone, customerText, String(out.proposedReply || ""), contextJson, now());
         const bike = [context.current.bike_make, context.current.bike_model].filter(Boolean).join(" ");
@@ -780,12 +810,21 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const priorInstructions = instructionHistory(row);
     const baseContext = row.context_json ? JSON.parse(row.context_json) : {};
     const inheritedBooking = Date.now() - baseContext.bookingQuotedAt < 24 * 3600000 ? baseContext.bookingInstructions : [];
-    const bookingLink = generatedBookingLink(baseContext, [...(inheritedBooking || []), ...priorInstructions, instruction]);
+    const shownEstimate = shownWebsiteEstimate(baseContext.lead, baseContext.history);
+    const confirmsRate = confirmsShownRate(instruction) || (message.hasQuotedMsg && !row.proposed_reply &&
+      shownEstimate && shownEstimate === baseContext.askedShownRate && /^(?:yes|correct|use it)[.!]?$/i.test(instruction));
+    const shown = confirmsRate && [...(inheritedBooking || []), ...priorInstructions].every(value => priceFromInstruction(value) === null) ? shownEstimate : null;
+    const effectiveInstruction = shown ? `${instruction}\nUse the previously shown rate as the final rate for this deal: R${shown}.` : instruction;
+    const bookingLink = generatedBookingLink(baseContext, [...(inheritedBooking || []), ...priorInstructions, effectiveInstruction]);
     const forceBookingClose = !row.followup_id && !row.sequence_id &&
-      (requestsBookingLink(instruction) || /\bassumptive\s+clos/i.test(instruction) ||
+      (confirmsRate || requestsBookingLink(instruction) || /\bassumptive\s+clos/i.test(instruction) ||
         (honoursQuotedRate(instruction) && /\b(?:have|got) (?:space|availability|a slot)\b/i.test(instruction))) && Boolean(bookingLink);
     if (!row.followup_id && !row.sequence_id && requestsBookingLink(instruction) && !bookingLink) {
       appendInstruction(row, instruction);
+      if (row.state === "delivery_unknown") {
+        // The owner quoted the original card: it was delivered even though the bridge did not acknowledge it.
+        db.prepare("UPDATE sales_approvals SET state='pending' WHERE id=? AND state='delivery_unknown'").run(row.id);
+      }
       const lead = baseContext.lead || {};
       const missing = lead.pickup && lead.dropoff ? "one final customer rate" : "the exact collection and delivery route";
       await caseCard(row, `I haven’t sent anything for ${row.case_ref}. I need ${missing} to prepare the booking link.`);
@@ -793,7 +832,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     }
     const out = await reason("/sales/approval", {
       caseRef: row.case_ref, customerMessage: row.customer_text, proposedReply: row.proposed_reply,
-      instruction, audio, context: {
+      instruction: effectiveInstruction, audio, context: {
         ...baseContext,
         ownerPreferences: preferences,
         ownerInstructionHistory: priorInstructions,
@@ -802,7 +841,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       }
     });
     const approvalWords = [instruction, out.transcript].filter(Boolean).join("\n");
-    appendInstruction(row, approvalWords);
+    appendInstruction(row, shown ? effectiveInstruction : approvalWords);
     if (out.transcript) learnOwnerPreferences(out.transcript);
     if (out.intent !== "send" && out.intent !== "cancel") saveReusableLesson(out.reusableLesson, approvalWords);
     if (row.state === "delivery_unknown") {

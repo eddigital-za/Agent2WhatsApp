@@ -554,3 +554,28 @@ test("ID-only WhatsApp replies keep concurrent deals separate and stale quote ca
   assert.deepEqual(sent,[{to:"27760000001@c.us",body:"Offer R3,500"}]);
  } finally {global.fetch=orig;db.close();}
 });
+
+test("a reply to a delivered rate question recovers the case and uses only the owner-confirmed shown estimate", async () => {
+ process.env.SALES_ENABLED="true";
+ const db=new DatabaseSync(":memory:"),cards=[],calls=[];
+ let sends=0,failAck=true;
+ const norm=x=>String(x||"").replace(/\D/g,"");
+ const agent=installSalesAgent({db,customerClient:{info:{wid:{user:"27720000000",_serialized:"27720000000@c.us"}},sendMessage:async()=>{sends++;}},approvalClient:{info:{},sendMessage:async(_to,text)=>{cards.push(text);if(failAck)throw Error("Shared bridge HTTP 500");return {id:{_serialized:"revision"}};}},approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:norm,logEvent:()=>{}});
+ const current={lead:{pickup:"Johannesburg",dropoff:"Cape Town",website_estimate:"3500"},history:[{direction:"duane",body:"I see you already got an estimate from our website\nRoute: Johannesburg → Cape Town with an estimate of R3500 | 10-14+ Days"}]};
+ db.prepare("INSERT INTO sales_approvals(case_ref,phone,customer_text,proposed_reply,context_json,state,created_at) VALUES(?,?,?,?,?,'delivery_unknown',?)").run("SA-BUDGET","27760000000","Have purchased bike. Please advise re process to finalize transport","Any specific dates?",JSON.stringify(current),new Date().toISOString());
+ const owner=(id,body,quote)=>({from:"123@g.us",author:"27720000000@c.us",_viaSharedBridge:true,fromMe:false,id:{_serialized:id},body,hasQuotedMsg:true,getQuotedMessage:async()=>({body:quote}),timestamp:Math.floor(Date.now()/1000)});
+ const original=global.fetch;
+ global.fetch=async(_url,opts)=>{calls.push(JSON.parse(opts.body));return {ok:true,json:async()=>({intent:"revise",finalReply:"Great news! Please complete the booking form below.\n\n{link}"})};};
+ try {
+  await assert.rejects(agent.onApproval(owner("budget-request","Use an assumptive close. Please complete the booking form below.","*SA-BUDGET — Test*")),/HTTP 500/);
+  assert.match(cards[0],/need one final customer rate/);
+  assert.equal(calls.length,0);
+  failAck=false;
+  await agent.onApproval(owner("budget-rate","The rate was already quoted",cards[0]));
+  assert.equal(calls.length,1);
+  assert.equal(new URL(calls[0].context.generatedBookingLink).searchParams.get("price"),"3500");
+  assert.match(cards[1],/booking-form\/\?[^\s]+price=3500/);
+  assert.doesNotMatch(cards[1],/\{link\}/);
+  assert.equal(sends,0);
+ } finally {global.fetch=original;db.close();}
+});
