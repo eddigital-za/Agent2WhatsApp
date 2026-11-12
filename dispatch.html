@@ -36,7 +36,9 @@
 }
 .calendar-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:14px}
 .calendar-bar h2{flex:1 1 180px;font-size:19px}
-.calendar-filter{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.calendar-filter{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px}
+.calendar-filter button{min-height:44px}
+.calendar-filter button[aria-pressed=true]{background:#e1f3ee;border-color:var(--teal);color:#174a45;font-weight:650}
 .calendar-legend{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .calendar-legend span{font-weight:650;padding:3px 8px;border-radius:5px}
 .calendar-month{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
@@ -57,15 +59,12 @@
 <main><div class="heading"><div><div class="eyebrow">Dispatch workspace</div><h1 id="title">Calendar</h1><p class="sub" id="subtitle"></p></div><div class="actions"><button id="menu" class="mobile-nav" aria-expanded="false">Channels</button><button id="mobileCalendar" class="mobile-nav" type="button">Calendar</button><button id="newOrder" class="primary">+ New order</button><button id="refresh">↻ Refresh</button><button id="lock">Log out</button></div></div><p id="notice" class="notice" role="status"></p><div class="content"><div class="stats" id="stats"></div><div id="orderTools" class="tools"><input id="search" type="search" aria-label="Search orders" placeholder="Search SLA, customer, bike or route…"><label>Group by <select id="group"><option value="status">Status</option><option value="contractor">Contractor</option><option value="route">Route</option><option value="none">No grouping</option></select></label></div><p id="intro"></p><div class="workarea" id="workarea"><div class="list"><div class="listhead"><input id="selectAll" type="checkbox" aria-label="Select all visible orders"><span id="listCount"></span><button id="clear">Clear selection</button></div><div id="jobs"></div></div><section id="editor" class="editor" hidden aria-label="Edit selected orders"><header><h2 id="editorTitle"></h2><p class="sub" id="editorRefs"></p></header><form id="editForm"><label class="field" for="editStatus">Status</label><select id="editStatus"></select><label class="field" for="assignment">Contractor assignments</label><select id="assignment"><option value="unchanged">Keep existing assignments</option><option value="add">Add selected contractors</option><option value="replace">Replace with selected contractors</option><option value="clear">Clear assignments</option></select><fieldset id="choiceField" hidden><legend>Select one or more contractors</legend><div class="choices" id="choices"></div></fieldset><p id="editHelp" class="sub" style="margin-top:12px"></p><button class="primary" id="apply">Apply changes</button><p id="result" class="result" role="status"></p></form></section></div>
 <section id="calendar" hidden aria-label="Order calendar">
  <div class="calendar-bar"><h2 id="calendarRange" aria-live="polite"></h2><label for="calendarPeriod">View <select id="calendarPeriod"><option value="month" selected>Month</option><option value="week">Week</option></select></label><button id="calendarPrev" type="button" aria-label="Previous month">‹ Month</button><button id="calendarToday" type="button">Today</button><button id="calendarNext" type="button" aria-label="Next month">Month ›</button></div>
- <label class="calendar-filter" for="calendarStatus">Show
-  <select id="calendarStatus">
-   <option value="active" selected>New &amp; in transit</option>
-   <option value="all">All</option>
-   <option value="new">New</option>
-   <option value="transit">In transit</option>
-   <option value="delivered">Delivered</option>
-  </select>
- </label>
+ <div class="calendar-filter" role="group" aria-label="Order status">
+  <button id="calendarAll" type="button" aria-pressed="false">All</button>
+  <button id="calendarNew" type="button" aria-pressed="true">New</button>
+  <button id="calendarTransit" type="button" aria-pressed="true">In transit</button>
+  <button id="calendarDelivered" type="button" aria-pressed="false">Delivered</button>
+ </div>
  <div class="calendar-legend"><span class="calendar-pickup">Pickup</span><span class="calendar-handover">Handover</span><span class="calendar-dropoff">Drop-off</span></div>
  <p id="calendarEmpty" class="sub" hidden>No dated stops this month.</p>
  <div id="calendarDays" class="calendar-month"></div>
@@ -149,15 +148,17 @@ function calendarPeriodStart(day){
  return shiftCalendarDay(day,-((weekday+6)%7));
 }
 const calendarStatuses={
- active:['New Order','Pending','Collected','In Transit'],
  new:['New Order','Pending'],
  transit:['Collected','In Transit'],
  delivered:['Delivered']
 };
-function calendarEvents(orders,start,end,filter='active'){
+const calendarFilterButtons={new:'calendarNew',transit:'calendarTransit',delivered:'calendarDelivered'};
+const calendarFilters=new Set(['new','transit']);
+const allCalendarFilters=()=>calendarFilters.size===Object.keys(calendarFilterButtons).length;
+function calendarEvents(orders,start,end){
  const events=[];
  for(const order of orders){
-  if(filter==='all'?['Cancelled','Duplicate'].includes(order.status):!calendarStatuses[filter].includes(order.status))continue;
+  if(allCalendarFilters()?['Cancelled','Duplicate'].includes(order.status):![...calendarFilters].some(filter=>calendarStatuses[filter].includes(order.status)))continue;
   for(const [field,kind,label] of [['collection','pickup','Pickup'],['delivery','dropoff','Drop-off']]){
    const eta=order[field];
    if(!eta?.date||eta.date<start||eta.date>end)continue;
@@ -184,8 +185,10 @@ function renderCalendar(){
  $('calendarNext').textContent=week?'Week ›':'Month ›';
  $('calendarPrev').setAttribute('aria-label','Previous '+calendarPeriod);
  $('calendarNext').setAttribute('aria-label','Next '+calendarPeriod);
- const days=$('calendarDays'),events=calendarEvents(data.orders,start,end,$('calendarStatus').value||'active');
- $('calendarEmpty').textContent=$('calendarStatus').value==='all'?'No dated stops in this view.':'No dated stops match this filter.';
+ const days=$('calendarDays'),events=calendarEvents(data.orders,start,end);
+ $('calendarAll').setAttribute('aria-pressed',String(allCalendarFilters()));
+ for(const [filter,id] of Object.entries(calendarFilterButtons))$(id).setAttribute('aria-pressed',String(calendarFilters.has(filter)));
+ $('calendarEmpty').textContent=allCalendarFilters()?'No dated stops in this view.':'No dated stops match these filters.';
  $('calendarEmpty').hidden=events.length>0;
  days.replaceChildren();
  for(const weekday of ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']){
@@ -211,7 +214,17 @@ function renderCalendar(){
   days.append(day);
  }
 }
-$('calendarStatus').onchange=renderCalendar;
+$('calendarAll').onclick=()=>{
+ for(const filter of Object.keys(calendarFilterButtons))calendarFilters.add(filter);
+ renderCalendar();
+};
+for(const [filter,id] of Object.entries(calendarFilterButtons)){
+ $(id).onclick=()=>{
+  if(calendarFilters.has(filter))calendarFilters.delete(filter);
+  else calendarFilters.add(filter);
+  renderCalendar();
+ };
+}
 $('calendarPeriod').onchange=()=>{calendarPeriod=$('calendarPeriod').value;renderCalendar();};
 for(const [id,offset] of [['calendarPrev',-1],['calendarNext',1],['calendarToday',0]]){
  $(id).onclick=()=>{
