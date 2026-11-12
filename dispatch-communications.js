@@ -33,6 +33,7 @@ function installCommunications({app,auth,db,operations,sendCustomer,prepareCusto
  function hours(c,at=now()){if(!c.eveningCutoff||!c.morningTime)return false;const time=new Intl.DateTimeFormat('en-GB',{timeZone:'Africa/Johannesburg',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(at));return time>=c.morningTime&&time<c.eveningCutoff;}
  const sequence=['Collection scheduled','Collected','Delivery update','Delivered','Review request'];
  function blocked(o,m){
+ if(m.kind==='Review request'&&o?.returnTrip&&!['Delivered','Cancelled'].includes(o.returnTrip.status))return 'The return trip is still open.';
  if(m.kind==='Review request'&&o&&!db.prepare('SELECT 1 FROM dispatch_deliveries WHERE ref=?').get(o.externalId))return 'The delivery message and photos have not been sent.';
  if(!sequence.includes(m.kind))return 'This update is outside the customer message sequence.';
  if(m.kind==='Delivery update'&&o&&(!collectionComplete(o)||db.prepare("SELECT 1 FROM dispatch_messages WHERE ref=? AND kind='Collected' AND state IN ('awaiting_approval','sending','uncertain')").get(o.externalId)))return 'The collection update must be completed before the delivery schedule is sent.';
@@ -94,7 +95,10 @@ if(!o||o.duplicateOf||o.status==='Cancelled'||o.status==='Duplicate')return 'Ord
  }
  async function tick(){const c=config(),withinHours=hours(c);
  if(withinHours){
-for(const d of db.prepare("SELECT * FROM dispatch_deliveries WHERE review_state IN ('waiting','ready')").all()){const o=operations.get(d.ref);if(!o||o.complaintOpen||o.status!=='Delivered')continue;const due=reviewDue(d.sent_at,d.reply_at,now(),c);if(!due||due>now())continue;const id='review-'+d.id;const content=customerGreeting(o)+c.reviewText.replace(/^(?:hi|hello)[!,]\s*/i,'')+'\n'+c.reviewLink;db.prepare('INSERT OR IGNORE INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id,d.ref,'Review request','awaiting_approval',content,now(),'Delivery message and photos sent; review timing satisfied.');db.prepare("UPDATE dispatch_deliveries SET review_state='queued' WHERE id=?").run(d.id);}
+for(const d of db.prepare("SELECT * FROM dispatch_deliveries WHERE review_state IN ('waiting','ready')").all()){const o=operations.get(d.ref);if(!o||o.complaintOpen||o.status!=='Delivered')continue;const trip=o.returnTrip;
+ if(trip&&!['Delivered','Cancelled'].includes(trip.status))continue;
+ const returnCompleted=trip?.status==='Delivered'&&trip.completedAt>d.sent_at?trip.completedAt:null;
+ const due=reviewDue(returnCompleted||d.sent_at,returnCompleted?null:d.reply_at,now(),c);if(!due||due>now())continue;const id='review-'+d.id;const content=customerGreeting(o)+c.reviewText.replace(/^(?:hi|hello)[!,]\s*/i,'')+'\n'+c.reviewLink;db.prepare('INSERT OR IGNORE INTO dispatch_messages VALUES(?,?,?,?,?,?,?)').run(id,d.ref,'Review request','awaiting_approval',content,now(),'Delivery message and photos sent; review timing satisfied.');db.prepare("UPDATE dispatch_deliveries SET review_state='queued' WHERE id=?").run(d.id);}
  }
   // Customer automation is opt-in; before configuration, every message stays a draft.
   if(c.autoSend!==true){
