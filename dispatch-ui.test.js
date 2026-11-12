@@ -13,6 +13,10 @@ const context=vm.createContext({console,Set,Map,Date,structuredClone,crypto:requ
 vm.runInContext(fs.readFileSync('dispatch.html','utf8').match(/<script>([\s\S]*)<\/script>/)[1],context);
 context.fixture={orders,statuses:['Pending','In Transit','Delivered'],contractors:['BTSA','Moto Movers']};$('group').value='status';
 vm.runInContext('data=fixture;render()',context);
+assert.equal($('title').textContent,'Calendar');
+assert.equal($('calendar').hidden,false);
+assert.equal($('workarea').hidden,true);
+vm.runInContext("setView('open')",context);
 vm.runInContext("detail=fixture.orders[0];buildOrderFields(detail);orderBaseline=structuredClone(readOrderFields())",context);
 assert.deepEqual($('orderQuickFields').children.slice(0,3).map(label=>label.textContent),['Status','Pickup date','Drop-off date']);
 assert.equal($('orderQuickFields').children.length,4);
