@@ -38,24 +38,26 @@
 .calendar-bar h2{flex:1 1 180px;font-size:19px}
 .calendar-legend{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .calendar-legend span{font-weight:650;padding:3px 8px;border-radius:5px}
-.calendar-week{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+.calendar-month{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
 .calendar-day{min-width:0;border:1px solid var(--line);border-radius:8px;padding:8px;min-height:115px}
 .calendar-day h3{font-size:14px;margin-bottom:6px}
+.calendar-weekday{padding:4px 8px;font-size:13px;font-weight:650;color:var(--muted)}
 .calendar-day.today{border-color:var(--teal)}
 .calendar-event{display:block;width:100%;min-height:44px;text-align:left;margin-top:6px;padding:6px 8px;overflow-wrap:anywhere;border:1px solid transparent}
 .calendar-event small{display:block;color:inherit}
 .calendar-pickup,.calendar-pickup:hover{background:#e4f4ec;color:#176043}
 .calendar-dropoff,.calendar-dropoff:hover{background:#e6f0ff;color:#24518c}
-@media(max-width:1100px){.calendar-week{grid-template-columns:1fr}.calendar-day{min-height:0}}
+@media(max-width:1100px){.calendar-month{grid-template-columns:1fr}.calendar-day{min-height:0}.calendar-weekday,.calendar-padding,.calendar-day.no-events{display:none}}
 </style>
 <div class="top"><div class="brand">BTSA <span style="font-weight:400;opacity:.65">/ dispatch</span></div><span>Operations workspace</span></div>
 <form id="login"><div class="eyebrow">Bike Transport South Africa</div><h1>Welcome to Dispatch</h1><p class="sub">Your orders, contractors and next moves in one place.</p><label for="key">Dispatch access key</label><input id="key" type="password" autocomplete="off" required><button class="primary">Open workspace</button><small>Use your existing INTAKE_API_KEY. You stay logged in on this device until you log out or clear browser data.</small><p id="loginError" class="result" role="status"></p></form>
 <div id="board" class="layout" hidden><aside><div class="workspace"><strong>BTSA Operations</strong><small>Dispatch & contractor desk</small></div><h3>Workspace</h3><nav id="views" aria-label="Order views"></nav><h3>Status channels</h3><nav id="statuses" aria-label="Status channels"></nav><h3>Contractors · open jobs</h3><nav id="contractors" aria-label="Contractor channels"></nav></aside>
 <main><div class="heading"><div><div class="eyebrow">Dispatch workspace</div><h1 id="title">Overview</h1><p class="sub" id="subtitle"></p></div><div class="actions"><button id="menu" class="mobile-nav" aria-expanded="false">Channels</button><button id="mobileCalendar" class="mobile-nav" type="button">Calendar</button><button id="newOrder" class="primary">+ New order</button><button id="refresh">↻ Refresh</button><button id="lock">Log out</button></div></div><p id="notice" class="notice" role="status"></p><div class="content"><div class="stats" id="stats"></div><div id="orderTools" class="tools"><input id="search" type="search" aria-label="Search orders" placeholder="Search SLA, customer, bike or route…"><label>Group by <select id="group"><option value="status">Status</option><option value="contractor">Contractor</option><option value="route">Route</option><option value="none">No grouping</option></select></label></div><p id="intro"></p><div class="workarea" id="workarea"><div class="list"><div class="listhead"><input id="selectAll" type="checkbox" aria-label="Select all visible orders"><span id="listCount"></span><button id="clear">Clear selection</button></div><div id="jobs"></div></div><section id="editor" class="editor" hidden aria-label="Edit selected orders"><header><h2 id="editorTitle"></h2><p class="sub" id="editorRefs"></p></header><form id="editForm"><label class="field" for="editStatus">Status</label><select id="editStatus"></select><label class="field" for="assignment">Contractor assignments</label><select id="assignment"><option value="unchanged">Keep existing assignments</option><option value="add">Add selected contractors</option><option value="replace">Replace with selected contractors</option><option value="clear">Clear assignments</option></select><fieldset id="choiceField" hidden><legend>Select one or more contractors</legend><div class="choices" id="choices"></div></fieldset><p id="editHelp" class="sub" style="margin-top:12px"></p><button class="primary" id="apply">Apply changes</button><p id="result" class="result" role="status"></p></form></section></div>
 <section id="calendar" hidden aria-label="Order calendar">
- <div class="calendar-bar"><h2 id="calendarRange" aria-live="polite"></h2><button id="calendarPrev" type="button" aria-label="Previous week">‹ Week</button><button id="calendarToday" type="button">Today</button><button id="calendarNext" type="button" aria-label="Next week">Week ›</button></div>
+ <div class="calendar-bar"><h2 id="calendarRange" aria-live="polite"></h2><button id="calendarPrev" type="button" aria-label="Previous month">‹ Month</button><button id="calendarToday" type="button">Today</button><button id="calendarNext" type="button" aria-label="Next month">Month ›</button></div>
  <div class="calendar-legend"><span class="calendar-pickup">Pickup</span><span class="calendar-dropoff">Drop-off</span></div>
- <div id="calendarDays" class="calendar-week"></div>
+ <p id="calendarEmpty" class="sub" hidden>No dated stops this month.</p>
+ <div id="calendarDays" class="calendar-month"></div>
 </section></div></main></div>
 <dialog id="orderDialog" aria-labelledby="orderHeading">
  <header class="order-dialog-header"><h2 id="orderHeading">New manual order</h2><button id="closeOrder" type="button">Close</button></header>
@@ -105,16 +107,18 @@ function renderNav(){const open=data.orders.filter(o=>!closed(o));$('views').rep
 }
 function render(){renderNav();const calendar=view.kind==='calendar';$('calendar').hidden=!calendar;$('mobileCalendar').textContent=calendar?'Orders':'Calendar';for(const element of [$('stats'),$('orderTools'),$('intro'),$('workarea')])if(element)element.hidden=calendar;if(calendar){$('title').textContent='Calendar';$('subtitle').textContent='Pickups and drop-offs by date';renderCalendar();return;}const titles={collections:'Collections today',upcoming:'Upcoming collections',overdue:'Overdue collections',deliveries:'Deliveries today',attention:'Needs attention',manual:'Manual orders',open:'Overview',unassigned:'Unassigned orders',closed:'Closed orders',all:'All orders',awaiting:'Awaiting collection',transit:'On the move',status:'# '+view.value,contractor:view.value};$('title').textContent=titles[view.kind];$('subtitle').textContent=view.kind==='contractor'?'Open jobs assigned to this contractor':'A live view of your transport orders';renderList();renderEditor();}
 $('mobileCalendar').onclick=()=>setView(view.kind==='calendar'?'open':'calendar');
-let calendarWeek='';
+let calendarMonth='';
 function shiftCalendarDay(day,offset){
  const date=new Date(day+'T00:00:00Z');
  date.setUTCDate(date.getUTCDate()+offset);
  return date.toISOString().slice(0,10);
 }
-function weekStart(day){
- const weekday=new Date(day+'T00:00:00Z').getUTCDay();
- return shiftCalendarDay(day,-((weekday+6)%7));
+function shiftCalendarMonth(month,offset){
+ const date=new Date(month+'T00:00:00Z');
+ date.setUTCMonth(date.getUTCMonth()+offset);
+ return date.toISOString().slice(0,10);
 }
+const currentCalendarMonth=()=>todayZA().slice(0,7)+'-01';
 function calendarEvents(orders,start,end){
  const events=[];
  for(const order of orders){
@@ -128,13 +132,20 @@ function calendarEvents(orders,start,end){
  return events.sort((a,b)=>a.eta.date.localeCompare(b.eta.date)||(a.eta.time||'99:99').localeCompare(b.eta.time||'99:99'));
 }
 function renderCalendar(){
- const today=todayZA(),start=calendarWeek||weekStart(today),end=shiftCalendarDay(start,6);
+ const today=todayZA(),start=calendarMonth||currentCalendarMonth();
+ const end=shiftCalendarDay(shiftCalendarMonth(start,1),-1);
  const format=(day,options)=>new Intl.DateTimeFormat('en-ZA',{timeZone:'UTC',...options}).format(new Date(day+'T00:00:00Z'));
  const dateOptions={day:'numeric',month:'short'};
- $('calendarRange').textContent=format(start,dateOptions)+' – '+format(end,{...dateOptions,year:'numeric'});
+ $('calendarRange').textContent=format(start,{month:'long',year:'numeric'});
  const days=$('calendarDays'),events=calendarEvents(data.orders,start,end);
+ $('calendarEmpty').hidden=events.length>0;
  days.replaceChildren();
- for(let offset=0;offset<7;offset++){
+ for(const weekday of ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']){
+  days.append(node('div',weekday,'calendar-weekday'));
+ }
+ const leading=(new Date(start+'T00:00:00Z').getUTCDay()+6)%7;
+ for(let offset=0;offset<leading;offset++)days.append(node('div',undefined,'calendar-padding'));
+ for(let offset=0;offset<Number(end.slice(-2));offset++){
   const date=shiftCalendarDay(start,offset);
   const day=node('section',undefined,'calendar-day');
   day.classList.toggle('today',date===today);
@@ -148,13 +159,13 @@ function renderCalendar(){
    event.onclick=()=>openOrder(order.externalId);
    day.append(event);
   }
-  if(day.children.length===1)day.append(node('small','No stops'));
+  day.classList.toggle('no-events',day.children.length===1);
   days.append(day);
  }
 }
-for(const [id,offset] of [['calendarPrev',-7],['calendarNext',7],['calendarToday',0]]){
+for(const [id,offset] of [['calendarPrev',-1],['calendarNext',1],['calendarToday',0]]){
  $(id).onclick=()=>{
-  calendarWeek=offset?shiftCalendarDay(calendarWeek||weekStart(todayZA()),offset):weekStart(todayZA());
+  calendarMonth=offset?shiftCalendarMonth(calendarMonth||currentCalendarMonth(),offset):currentCalendarMonth();
   renderCalendar();
  };
 }
