@@ -1154,6 +1154,18 @@ async function syncSlaSheet(){
     if(rows.length<2)throw new Error('SLA sheet returned no data rows');
     const items=sheetOrders(rows), migration=applySheetOrders(items);
     operations.reconcile(rows.slice(1));
+    // Recover dates from the original Orders message for this verified sheet row.
+    const beetle=operations.get('M-1003');
+    const recoveryKey='recover-m1003-schedule-20261115';
+    if(!db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(recoveryKey)&&beetle?.syncState==='synced'&&beetle.status==='New Order'&&
+       /^vw beetle$/i.test(beetle.bike)&&/^durban to randburg$/i.test(beetle.route)&&
+       (!beetle.collection?.date||!beetle.delivery?.date)){
+      const collection=beetle.collection?.date?beetle.collection:dispatchDomain.when('2026-11-16');
+      const delivery=beetle.delivery?.date?beetle.delivery:dispatchDomain.when('2026-11-17');
+      operations.save({...beetle,collection,delivery});
+      db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(recoveryKey,nowIso());
+      console.log('M-1003 missing schedule dates restored and verified in Dispatch:',operations.get('M-1003')?.collection?.date,operations.get('M-1003')?.delivery?.date);
+    }
     const open=db.prepare("SELECT external_id FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND external_id NOT LIKE 'LEGACY-%' AND (external_id GLOB 'M-[0-9]*' OR external_id NOT GLOB 'SLA-[0-9]*' OR CAST(substr(external_id,5) AS INTEGER)>=380) ORDER BY external_id").all().map(o=>o.external_id);
     lastSheetSync={ok:true,at:nowIso(),rows:items.length,upserts:items.length,...migration,openIds:open,error:null};
     console.log('SLA sheet sync complete',lastSheetSync);
