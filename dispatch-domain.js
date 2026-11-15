@@ -21,7 +21,12 @@ function when(text,base=new Date()){
 function stageText(text,stage){const words=stage==='collection'?'collect(?:ion|ed)?|pick[ -]?up|fetch':'deliver(?:y|ed)?|drop[ -]?off';const all='collect(?:ion|ed)?|pick[ -]?up|fetch|deliver(?:y|ed)?|drop[ -]?off|handover|hand[ -]?over';return String(text).match(new RegExp('\\b(?:'+words+')\\b[\\s\\S]*?(?=\\b(?:'+all+')\\b|$)','i'))?.[0]||'';}
 function contractorNames(text,available){const t=String(text||'').toLowerCase().replace(/cheeta\b/g,'cheetah').replace(/dj bike towing/g,'dj bike transport');return available.filter(name=>{const values=[name.toLowerCase(),name.toLowerCase().split(' - ').pop()];if(name==='Cheetah Express')values.push('cheetah');return values.some(v=>new RegExp('\\b'+v.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b','i').test(t));});}
 function interpret(text,available,base=new Date()){
- const t=String(text||'');const out={};const c=stageText(t,'collection'),d=stageText(t,'delivery');const collection=when(c,base),delivery=when(d,base);
+ const t=String(text||'');const out={};const c=stageText(t,'collection'),d=stageText(t,'delivery');const explicitDate=stage=>{
+  const clause=t.match(new RegExp('\\b(?:'+stage+')\\s+date\\s*:?\\s*([^\\n;]+)','i'))?.[1];
+  return clause?when(clause.split(/\b(?:collection|delivery|pickup|drop[ -]?off|handover)\b/i)[0],base):null;
+ };
+ const collection=explicitDate('collection|pick[ -]?up')||when(c,base);
+ const delivery=explicitDate('delivery|drop[ -]?off')||when(d,base);
  if(collection)out.collection=collection;if(delivery)out.delivery=delivery;
  if(/\b(delivered|complete|completed|done)\b/i.test(t)&&!(/\b(?:handover|handed over|depot|taken delivery)\b/i.test(t)&&!/^\s*(?:SL(?:A)?[ -]?\d+|M-?\d+)?\s*[-:]?\s*(?:delivered|complete)/i.test(t)))out.status='Delivered';
  else if(/\b(cancelled|canceled|cancel)\b/i.test(t))out.status='Cancelled';else if(/\bin[ -]?transit\b/i.test(t))out.status='In Transit';else if(/\bcollected\b/i.test(t))out.status='Collected';else if(/\bpaused\b/i.test(t))out.status='Paused';
