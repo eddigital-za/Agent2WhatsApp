@@ -1157,12 +1157,12 @@ async function syncSlaSheet(){
     // Recover dates from the original Orders message for this verified sheet row.
     const beetle=operations.get('M-1003');
     const recoveryKey='recover-m1003-schedule-20261115';
-    if(!db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(recoveryKey)&&beetle?.syncState==='synced'&&beetle.status==='New Order'&&
-       /^vw beetle$/i.test(beetle.bike)&&/^durban to randburg$/i.test(beetle.route)&&
+    if(!db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(recoveryKey)&&beetle&&rows.slice(1).filter(row=>operations.fromRow(row).externalId==='M-1003').length===1&&
+       /beetle/i.test(beetle.bike)&&/gurpreet\s+kindra/i.test(beetle.clientName)&&
        (!beetle.collection?.date||!beetle.delivery?.date)){
       const collection=beetle.collection?.date?beetle.collection:dispatchDomain.when('2026-11-16');
       const delivery=beetle.delivery?.date?beetle.delivery:dispatchDomain.when('2026-11-17');
-      operations.save({...beetle,collection,delivery});
+      operations.save({...beetle,collection,delivery},beetle.syncState,beetle.syncError);
       db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(recoveryKey,nowIso());
       console.log('M-1003 missing schedule dates restored and verified in Dispatch:',operations.get('M-1003')?.collection?.date,operations.get('M-1003')?.delivery?.date);
     }
