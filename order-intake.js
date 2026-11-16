@@ -263,7 +263,7 @@ app.post('/inbound',async(req,res)=>{
   if(parsed.intent==='cancel'){
    clearDraft(author); await send('Manual order draft cancelled.'); return res.json({cancelled:true});
   }
-  if(parsed.needsClarification){
+  if(parsed.needsClarification && candidates.length>1 && !existing && !startingNewOrder){
    await send(parsed.clarification||'I found more than one possible previous order. Which customer/order should I use?');
    return res.json({waiting:true,clarification:true});
   }
