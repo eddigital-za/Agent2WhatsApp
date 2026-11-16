@@ -277,6 +277,15 @@ app.post('/inbound',async(req,res)=>{
   }
   if((startingNewOrder||parsed.intent==='new_order')&&existing){db.prepare("UPDATE dispatch_links SET state='superseded' WHERE author=? AND state='draft'").run(author);base={};}
   let data=mergeFields(base,parsed.fields);
+  // Explicit phone labels are authoritative, not subject to AI field classification.
+  // Supports SA local and +27 numbers with spaces; never changes unrelated fields.
+  const labelledPhones=[...p.text.matchAll(/\b(collection(?:\s+contact)?|delivery(?:\s+contact)?|customer(?:\s+contact)?)\s+(?:phone|number|cell|mobile)\s*(?:number)?\s*(?:is|:|-)?\s*(\+?27[\s-]?(?:\d[\s-]?){9}|0(?:\d[\s-]?){9})/gi)];
+  for(const match of labelledPhones){
+   const label=match[1].toLowerCase();
+   const digits=match[2].replace(/[^\d+]/g,'');
+   if(!/^(?:0\d{9}|\+?27\d{9})$/.test(digits))continue;
+   data[label.startsWith('collection')?'collectionPhone':label.startsWith('delivery')?'deliveryPhone':'phone']=digits;
+  }
   const logistics=dispatchDomain.interpret(p.text,['BTSA','Cheetah Express','DJ Bike Transport','Ross - Speedway Express','UBT','Bike Transport','Armand','Bike in Motion','George','Assets in Motion','Moto Movers'],new Date((p.timestamp||Date.now()/1000)*1000));
   Object.assign(data,logistics);
 
