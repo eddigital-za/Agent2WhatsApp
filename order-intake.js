@@ -246,7 +246,7 @@ app.post('/inbound',async(req,res)=>{
     if(/^(?:0\d{9}|\+?27\d{9})$/.test(digits)){
      const d={...existing.data},lower=p.text.toLowerCase();
      const field=/delivery|dropoff/.test(lower)?'deliveryPhone':/customer/.test(lower)?'phone':/collection|pickup/.test(lower)?'collectionPhone':!d.collectionPhone?'collectionPhone':!d.deliveryPhone?'deliveryPhone':null;
-     if(field){d[field]=digits;saveDraft(author,d);await dispatchBridge.recordDraft(author,d,p.messageId);await send(summary(d)+'\n\nPhone updated. Reply SAVE to record the order.');return res.json({phoneUpdated:field});}
+     if(field){d[field]=digits;saveDraft(author,d,'awaiting_optional_phone');await dispatchBridge.recordDraft(author,d,p.messageId);await send(summary(d)+'\n\nPhone updated. Reply SAVE to record the order.');return res.json({phoneUpdated:field});}
     }
    }
   }
