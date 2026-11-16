@@ -65,8 +65,8 @@ function allocateSlaRef(){
 function missing(d){
  const req=[
   ['rate','rate'],['fullName','customer name'],['make','bike make'],['model','bike model'],
-  ['collectionContact','collection contact'],['collectionPhone','collection phone'],['collectionAddress1','collection address'],
-  ['deliveryContact','delivery contact'],['deliveryPhone','delivery phone'],['deliveryAddress1','delivery address']
+  ['collectionContact','collection contact'],['collectionAddress1','collection address'],
+  ['deliveryContact','delivery contact'],['deliveryAddress1','delivery address']
  ];
  return req.filter(([k])=>!String(d[k]||'').trim()).map(([,label])=>label);
 }
@@ -238,6 +238,22 @@ app.post('/inbound',async(req,res)=>{
    return res.json({approvalRecorded:true,order:key,committed:false});
   }
   const existing=getDraft(author);
+  // A phone-only follow-up is an update to the current draft, not a new order.
+  if(existing && !/^\s*(?:new|manual|new manual)\s+order\b/i.test(p.text)){
+   const match=p.text.match(/(?:\+?27[\s-]?(?:\d[\s-]?){9}|0(?:\d[\s-]?){9})/);
+   if(match && /\b(?:collection|delivery|customer|contact|phone|cell|mobile|number|pickup|dropoff)\b/i.test(p.text)){
+    const digits=match[0].replace(/[^\d+]/g,'');
+    if(/^(?:0\d{9}|\+?27\d{9})$/.test(digits)){
+     const d={...existing.data},lower=p.text.toLowerCase();
+     const field=/delivery|dropoff/.test(lower)?'deliveryPhone':/customer/.test(lower)?'phone':/collection|pickup/.test(lower)?'collectionPhone':!d.collectionPhone?'collectionPhone':!d.deliveryPhone?'deliveryPhone':null;
+     if(field){d[field]=digits;saveDraft(author,d);await dispatchBridge.recordDraft(author,d,p.messageId);await send(summary(d)+'\n\nPhone updated. Reply SAVE to record the order.');return res.json({phoneUpdated:field});}
+    }
+   }
+  }
+  if(existing && existing.state==='awaiting_optional_phone' && /^\s*(?:save|save it|save anyway|yes save|yes save it|proceed|process it)\s*[.!]?\s*$/i.test(p.text)){
+   const out=await commit(author,existing.data,p.messageId);return res.json({committed:true,...out});
+  }
+
   if (existing && /^\s*(?:show|display|view|repeat|summari[sz]e)\s+(?:me\s+)?(?:the\s+|my\s+)?(?:current\s+)?draft\s*[?.!]*\s*$/i.test(p.text)) {
    await send(`${summary(existing.data)}\n\nDraft only. No booking has been saved.`);
    return res.json({ok:true,draftShown:true});
@@ -297,6 +313,12 @@ app.post('/inbound',async(req,res)=>{
   }
   if(parsed.intent==='confirm'){
    if(miss.length){saveDraft(author,data);await dispatchBridge.recordDraft(author,data,p.messageId);await send(`I still need: ${miss.join(', ')}.`);return res.json({waiting:true,missing:miss});}
+   const optional=['collectionPhone','deliveryPhone'].filter(k=>!data[k]);
+   if(optional.length&&!/\b(?:anyway|without|skip)\b/i.test(p.text)){
+    saveDraft(author,data,'awaiting_optional_phone');await dispatchBridge.recordDraft(author,data,p.messageId);
+    await send('Missing optional: '+optional.join(', ')+'. Save without phone? Reply SAVE to proceed or send the number.');
+    return res.json({waiting:true,optional});
+   }
    const out=await commit(author,data,p.messageId);return res.json({committed:true,...out});
   }
 
