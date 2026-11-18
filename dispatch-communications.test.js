@@ -11,6 +11,15 @@ async function delivered(s){const o=await s.ops.createAndSync({bike:'Test bike',
  s=setup();d=await delivered(s);s.configure();s.setFail(true);await assert.rejects(()=>s.comm.send(d.msg.id),/uncertain/);assert.equal(s.db.prepare('SELECT state FROM dispatch_messages WHERE id=?').get(d.msg.id).state,'uncertain');await assert.rejects(()=>s.comm.send(d.msg.id),/outcome/);assert.equal(s.sends(),1);assert.equal(s.db.prepare('SELECT COUNT(*) n FROM dispatch_deliveries').get().n,0);
  s=setup();d=await delivered(s);s.configure();s.setTime('2026-11-08T17:50:00.000Z');await s.comm.send(d.msg.id);s.setTime('2026-11-08T18:25:00.000Z');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,0);s.setTime('2026-11-09T06:00:00.000Z');await s.comm.tick();assert.equal(s.db.prepare("SELECT COUNT(*) n FROM dispatch_messages WHERE kind='Review request'").get().n,1);
  const replacement=setup(undefined,true);replacement.db.prepare('INSERT INTO dispatch_approval_quotes VALUES(?,?)').run('old-quote','old-cbr');assert.match(await replacement.comm.approveReply(['old-quote'],'Approved.'),/held/);assert.equal(replacement.comm.approvalAction('Approved'),'approve');assert.equal(replacement.sends(),0);const updated=replacement.db.prepare('SELECT text FROM dispatch_messages WHERE id=?').get('old-cbr-first-name');assert.match(updated.text,/^Hi Johny!.*Honda CBR/);assert.doesNotMatch(updated.text,/—/);
+ let attempts=0;
+ const uncertain=setup(async()=>{attempts++;throw Error('Shared bridge HTTP 500');});
+ const retryOrder=await uncertain.ops.createAndSync({bike:'Test bike',clientName:'Test Client',phone:'0821234567',status:'Pending'},'preview-retry-test');
+ uncertain.ops.update(retryOrder.externalId,{collection:{date:'2026-11-09',confidence:'confirmed'}});
+ uncertain.ops.save(uncertain.ops.get(retryOrder.externalId),'synced');
+ await Promise.all([uncertain.comm.tick(),uncertain.comm.tick()]);
+ await uncertain.comm.tick();
+ assert.equal(attempts,1);
+ assert.equal(uncertain.ops.details(retryOrder.externalId).messages[0].state,'awaiting_approval');
  const prompts=[];s=setup(async(text,key)=>{prompts.push({text,key});return {messageId:'true_12345@g.us_STANZA'+prompts.length+'_operator@lid'};});
  const scheduled=await s.ops.createAndSync({bike:'Test bike',clientName:'JOHNY Example',phone:'0821234567',status:'Pending'},'test-schedule-order');
  const dates={collection:{date:'2026-11-09',confidence:'confirmed',precision:'day'},delivery:{date:'2026-11-10',confidence:'confirmed',precision:'day'}};

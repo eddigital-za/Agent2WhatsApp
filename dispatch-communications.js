@@ -3,6 +3,7 @@ const crypto=require('node:crypto'),{localDay,reviewDue,closed,collectionComplet
 const phone=v=>{let s=String(v||'').replace(/\D/g,'');if(/^0\d{9}$/.test(s))s='27'+s.slice(1);return /^\d{9,15}$/.test(s)?s:null;};
 function installCommunications({app,auth,db,operations,sendCustomer,prepareCustomerSend,sendApproval,now=()=>new Date().toISOString()}){
  db.exec(`CREATE TABLE IF NOT EXISTS dispatch_deliveries(id TEXT PRIMARY KEY,message_id TEXT NOT NULL UNIQUE,ref TEXT NOT NULL,phone TEXT NOT NULL,sent_at TEXT NOT NULL,parts TEXT NOT NULL,reply_at TEXT,review_state TEXT NOT NULL DEFAULT 'waiting',error TEXT);
+ CREATE TABLE IF NOT EXISTS dispatch_preview_attempts(message_id TEXT PRIMARY KEY);
  CREATE TABLE IF NOT EXISTS dispatch_approval_quotes(quote TEXT PRIMARY KEY,message_id TEXT NOT NULL UNIQUE);
  CREATE TABLE IF NOT EXISTS dispatch_send_parts(message_id TEXT NOT NULL,part INTEGER NOT NULL,whatsapp_id TEXT NOT NULL,sent_at TEXT NOT NULL,PRIMARY KEY(message_id,part));`);
  db.prepare("UPDATE dispatch_messages SET state='uncertain',reason='Send was interrupted. Reconcile before retrying.' WHERE state='sending'").run();
@@ -16,6 +17,12 @@ function installCommunications({app,auth,db,operations,sendCustomer,prepareCusto
  }
  let sending=false;
  const approvalStart=now();
+ const incidentKey='sla509-preview-hold-20261118';
+ if(!db.prepare('SELECT 1 FROM dispatch_events WHERE event_key=?').get(incidentKey)){
+  const held=db.prepare("UPDATE dispatch_messages SET state='held',reason='Held after duplicate WhatsApp previews' WHERE ref='SLA-509' AND kind='Delivery update' AND state='awaiting_approval' AND text LIKE '%20 November%'").run();
+  operations.emit('SLA-509','system','duplicate_preview_incident_held',{count:Number(held.changes)},incidentKey);
+  console.log('SLA-509 duplicate preview drafts held:',held.changes);
+ }
  // Replace the requested draft only if its original text is still awaiting approval.
  // Keep the original record so a reply to the old preview cannot send it.
  if(config().autoSend!==true){
@@ -102,13 +109,20 @@ for(const d of db.prepare("SELECT * FROM dispatch_deliveries WHERE review_state 
  }
   // Customer automation is opt-in; before configuration, every message stays a draft.
   if(c.autoSend!==true){
-   if(sendApproval)for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' AND created_at>=? AND id NOT IN (SELECT message_id FROM dispatch_approval_quotes) ORDER BY created_at").all(approvalStart)){
+   if(sendApproval)for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' AND created_at>=? AND id NOT IN (SELECT message_id FROM dispatch_approval_quotes) AND id NOT IN (SELECT message_id FROM dispatch_preview_attempts) ORDER BY created_at").all(approvalStart)){
     const o=operations.get(m.ref);if(blocked(o,m)||o.syncState!=='synced')continue;
     const stage=m.kind==='Collected'?'collection':m.kind==='Delivered'?'delivery':null;
     const photoCount=stage?operations.details(o.externalId).proofs.filter(p=>p.stage===stage&&p.status==='confirmed').length:0;
     if(stage&&photoCount!==1)continue;
-    const result=await sendApproval(approvalPreview(o,m,photoCount),'dispatch-approval-'+m.id);
-    if(result.messageId)db.prepare('INSERT OR IGNORE INTO dispatch_approval_quotes VALUES(?,?)').run(result.messageId,m.id);
+    // A bridge error can arrive after WhatsApp accepted the message.
+    const claim=db.prepare('INSERT OR IGNORE INTO dispatch_preview_attempts VALUES(?)').run(m.id);
+    if(!claim.changes)continue;
+    try{
+     const result=await sendApproval(approvalPreview(o,m,photoCount),'dispatch-approval-'+m.id);
+     if(result.messageId)db.prepare('INSERT OR IGNORE INTO dispatch_approval_quotes VALUES(?,?)').run(result.messageId,m.id);
+    }catch(error){
+     console.error('Approval preview outcome uncertain; use Dispatch to review:',m.ref,error.message);
+    }
    }return;
   }if(!withinHours)return;for(const m of db.prepare("SELECT * FROM dispatch_messages WHERE state='awaiting_approval' ORDER BY created_at LIMIT 10").all()){const o=operations.get(m.ref);if(m.created_at<(c.autoEnabledAt||now())||blocked(o,m))continue;try{await send(m.id);}catch(e){if(e.status!==409)console.error('Customer message held:',e.message);}}
  }
