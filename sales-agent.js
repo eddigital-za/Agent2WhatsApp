@@ -729,10 +729,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       const locked = db.prepare("UPDATE sales_order_confirmations SET state='sending',updated_at=? WHERE id=? AND state='pending'").run(now(), row.id);
       if (locked.changes !== 1) continue;
       try {
-        const sent = await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`, row.message_text);
+        const message = `📍 *Automated booking update from BTSA*\n\n${row.message_text}`;
+        const sent = await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`, message);
         db.prepare("UPDATE sales_order_confirmations SET state='sent',updated_at=?,message_id=? WHERE id=? AND state='sending'")
           .run(now(), sent?.id?._serialized || null, row.id);
-        remember(row.phone, "agent", row.message_text, sent?.id?._serialized);
+        remember(row.phone, "agent", message, sent?.id?._serialized);
         logEvent({ phone: row.phone, type: "sales_order_thank_you_sent", key: `sales-order-thanks-${row.sla_ref}`, details: { slaRef: row.sla_ref } });
         processed++;
       } catch (error) {
