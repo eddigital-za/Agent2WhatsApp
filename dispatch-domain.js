@@ -49,4 +49,9 @@ function customerDate(eta){
  const label=new Intl.DateTimeFormat('en-ZA',{weekday:'long',day:'numeric',month:'long',timeZone:'Africa/Johannesburg'}).format(date);
  return label+(eta.time?' at '+eta.time:eta.window?' ('+eta.window+')':'');
 }
-module.exports={customerGreeting,customerFirstName,collectionComplete,customerDate,STATUSES,closed,canonical,refs,segments,localDay,when,stageText,contractorNames,interpret,reviewDue};
+const automatedUpdateKinds=new Set(['Collection scheduled','Collected','In Transit','Delivery update','Delivered']);
+function customerUpdateText(message){
+ if(!automatedUpdateKinds.has(message.kind))return message.text;
+ return '📍 *Automated booking update from BTSA*\n\n'+message.text+'\n\nAny questions? Just reply here.';
+}
+module.exports={customerUpdateText,customerGreeting,customerFirstName,collectionComplete,customerDate,STATUSES,closed,canonical,refs,segments,localDay,when,stageText,contractorNames,interpret,reviewDue};

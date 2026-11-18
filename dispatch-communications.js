@@ -1,5 +1,5 @@
 'use strict';
-const crypto=require('node:crypto'),{localDay,reviewDue,closed,collectionComplete,customerGreeting,customerDate}=require('./dispatch-domain');
+const crypto=require('node:crypto'),{customerUpdateText,localDay,reviewDue,closed,collectionComplete,customerGreeting,customerDate}=require('./dispatch-domain');
 const phone=v=>{let s=String(v||'').replace(/\D/g,'');if(/^0\d{9}$/.test(s))s='27'+s.slice(1);return /^\d{9,15}$/.test(s)?s:null;};
 function installCommunications({app,auth,db,operations,sendCustomer,prepareCustomerSend,sendApproval,now=()=>new Date().toISOString()}){
  db.exec(`CREATE TABLE IF NOT EXISTS dispatch_deliveries(id TEXT PRIMARY KEY,message_id TEXT NOT NULL UNIQUE,ref TEXT NOT NULL,phone TEXT NOT NULL,sent_at TEXT NOT NULL,parts TEXT NOT NULL,reply_at TEXT,review_state TEXT NOT NULL DEFAULT 'waiting',error TEXT);
@@ -49,15 +49,16 @@ if(!o||o.duplicateOf||o.status==='Cancelled'||o.status==='Duplicate')return 'Ord
   if(stage&&proofs.length!==1)throw Object.assign(Error(proofs.length?'This update has multiple photos. Customer updates currently support one selected photo.':'Attach and confirm one '+stage+' photo before sending this update.'),{status:409});
   sending=true;
   let prepared;
-  try{prepared=await prepareCustomerSend?.({text:m.text,proof:proofs[0]});}
+  const text=customerUpdateText(m);
+  try{prepared=await prepareCustomerSend?.({text,proof:proofs[0]});}
   catch(e){sending=false;throw e;}
   db.prepare("UPDATE dispatch_messages SET state='sending',reason='Sending; outcome will be recorded.' WHERE id=?").run(id);
-  try{const parts=await sendCustomer({phone:phone(o.phone),text:m.text,proofs,prepared,verifiedTextId,onPart:(part,waId)=>{if(verifiedTextId&&part===0&&db.prepare('SELECT 1 FROM dispatch_send_parts WHERE message_id=? AND part=0 AND whatsapp_id=?').get(id,verifiedTextId))return;db.prepare('INSERT INTO dispatch_send_parts VALUES(?,?,?,?)').run(id,part,String(waId||''),now());}});const at=now();db.prepare("UPDATE dispatch_messages SET state='sent',reason=? WHERE id=?").run('Sent '+at,id);operations.emit(o.externalId,'customer-whatsapp','customer_message_sent',{messageId:id,kind:m.kind,parts});if(m.kind==='Collected')try{operations.queueDeliverySchedule(o);}catch(e){console.error('Delivery schedule draft could not be prepared:',e.message);}if(m.kind==='Delivered')db.prepare('INSERT OR IGNORE INTO dispatch_deliveries(id,message_id,ref,phone,sent_at,parts) VALUES(?,?,?,?,?,?)').run(crypto.randomUUID(),id,o.externalId,phone(o.phone),at,JSON.stringify(parts));return {sent:true};
+  try{const parts=await sendCustomer({phone:phone(o.phone),text,proofs,prepared,verifiedTextId,onPart:(part,waId)=>{if(verifiedTextId&&part===0&&db.prepare('SELECT 1 FROM dispatch_send_parts WHERE message_id=? AND part=0 AND whatsapp_id=?').get(id,verifiedTextId))return;db.prepare('INSERT INTO dispatch_send_parts VALUES(?,?,?,?)').run(id,part,String(waId||''),now());}});const at=now();db.prepare("UPDATE dispatch_messages SET state='sent',reason=? WHERE id=?").run('Sent '+at,id);operations.emit(o.externalId,'customer-whatsapp','customer_message_sent',{messageId:id,kind:m.kind,parts});if(m.kind==='Collected')try{operations.queueDeliverySchedule(o);}catch(e){console.error('Delivery schedule draft could not be prepared:',e.message);}if(m.kind==='Delivered')db.prepare('INSERT OR IGNORE INTO dispatch_deliveries(id,message_id,ref,phone,sent_at,parts) VALUES(?,?,?,?,?,?)').run(crypto.randomUUID(),id,o.externalId,phone(o.phone),at,JSON.stringify(parts));return {sent:true};
   }catch(e){db.prepare("UPDATE dispatch_messages SET state='uncertain',reason=? WHERE id=?").run('Send outcome needs reconciliation: '+e.message,id);operations.issue(o.externalId,'Customer message outcome needs reconciliation. Do not resend automatically.','message-'+id);throw e;}finally{sending=false;}
  }
  function noteReply(number,body,eventKey){const normalized=phone(number);if(!normalized)return;const deliveries=db.prepare("SELECT * FROM dispatch_deliveries WHERE phone=? AND review_state IN ('waiting','ready','queued') ORDER BY sent_at DESC").all(normalized);for(const d of deliveries){const at=now();const negative=/\b(damag\w*|scratch\w*|broken|problem|issue|complain\w*|missing|stop|unsubscribe|do not contact|not received|not delivered|unhappy|wrong|late)\b/i.test(body);const positive=/^(?:(?:thank(?:s| you)|thanks so much|thank you so much|great|perfect|awesome|all good|received|got it|much appreciated|lekker|shot|cheers|ok|okay|yes)[\s!.,🙏👍🏼✅😊🙂❤❤️]*)+$/i.test(String(body||'').trim());const state=negative?'complaint':positive&&deliveries.length===1?'ready':'reply_review';db.prepare('UPDATE dispatch_deliveries SET reply_at=?,review_state=? WHERE id=?').run(at,state,d.id);operations.emit(d.ref,'customer-whatsapp','customer_replied',{text:String(body||'').slice(0,4000),reviewState:state},eventKey+'-'+d.id);if(state!=='ready'){db.prepare("UPDATE dispatch_messages SET state='held',reason='Customer reply needs review' WHERE id=? AND state='awaiting_approval'").run('review-'+d.id);operations.issue(d.ref,negative?'Customer delivery concern: review request held.':'Customer reply needs review before asking for a review.','reply-'+d.id);const o=operations.get(d.ref);if(o)operations.save({...o,complaintOpen:negative||o.complaintOpen},o.syncState);}}}
  function approvalAction(body){const action=String(body||'').trim().toLowerCase().replace(/[.!]+$/,'');return action==='approved'?'approve':action==='held'?'hold':action;}
- function approvalPreview(o,m,photoCount){return 'Ready for your review: '+o.bike+' ('+o.externalId+')\n'+m.kind+(photoCount?' with '+photoCount+' '+(photoCount===1?'photo':'photos'):'')+'\n\nHere’s what the customer will get:\n'+m.text+'\n\nReply APPROVE to send '+(photoCount?'the message with the photo':'the message')+', or HOLD to pause it.';}
+ function approvalPreview(o,m,photoCount,text=customerUpdateText(m)){return 'Ready for your review: '+o.bike+' ('+o.externalId+')\n'+m.kind+(photoCount?' with '+photoCount+' '+(photoCount===1?'photo':'photos'):'')+'\n\nHere’s what the customer will get:\n'+text+'\n\nReply APPROVE to send '+(photoCount?'the message with the photo':'the message')+', or HOLD to pause it.';}
  const stanza=value=>String(value||'').match(/^(?:true|false)_[^_]+_([^_]+)/)?.[1]||String(value||'');
  async function approveReply(ids,body,quotedText=''){
 
@@ -76,7 +77,7 @@ if(!o||o.duplicateOf||o.status==='Cancelled'||o.status==='Duplicate')return 'Ord
     const matches=db.prepare('SELECT * FROM dispatch_messages WHERE ref=?').all(ref).filter(m=>{
      const stage=m.kind==='Collected'?'collection':m.kind==='Delivered'?'delivery':null;
      const count=stage?proofs.filter(p=>p.stage===stage&&p.status==='confirmed').length:0;
-     return normalize(approvalPreview(order,m,count))===normalize(quotedText);
+     return [approvalPreview(order,m,count),approvalPreview(order,m,count,m.text)].some(preview=>normalize(preview)===normalize(quotedText));
     });
     if(matches.length===1)key=matches[0].id;
    }
