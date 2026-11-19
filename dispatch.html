@@ -153,7 +153,7 @@ function channel(parent,label,count,kind,value=''){const b=node('button');b.appe
 function renderNav(){const open=data.orders.filter(o=>!bookingClosed(o));$('views').replaceChildren();channel($('views'),'▦  Overview',open.length,'open');channel($('views'),'▦  Calendar',null,'calendar');channel($('views'),'🗓  Plan ahead',data.planning?.jobs.filter(job=>!job.acknowledged&&(job.own||job.mixed)).length||0,'planning');channel($('views'),'◷  Collections today',open.filter(o=>o.collectionToday).length,'collections');channel($('views'),'↗  Upcoming collections',open.filter(o=>!['Collected','In Transit'].includes(o.status)&&!o.actualCollection&&o.collection?.date>todayZA()).length,'upcoming');channel($('views'),'!  Overdue collections',open.filter(o=>o.collectionOverdue).length,'overdue');channel($('views'),'↘  Deliveries today',open.filter(o=>o.deliveryToday).length,'deliveries');channel($('views'),'⚑  Needs attention',open.filter(o=>o.needsAttention||o.followUpDue).length,'attention');const settingsButton=node('button','⚙  Customer messages');settingsButton.onclick=openCommunicationSettings;$('views').append(settingsButton);const reportsButton=node('button','▤  Operations report');reportsButton.onclick=openReport;$('views').append(reportsButton);const inboxButton=node('button','!  Unprocessed messages ('+((data.inbox||[]).length+(data.unmatchedProofs||[]).length)+')');inboxButton.onclick=openInbox;$('views').append(inboxButton);const draftsButton=node('button','↳  WhatsApp drafts');draftsButton.onclick=openDrafts;$('views').append(draftsButton);channel($('views'),'＋  Manual orders',data.orders.filter(o=>o.origin!=='sheet').length,'manual');channel($('views'),'○  Unassigned',open.filter(unassigned).length,'unassigned');channel($('views'),'✓  Closed orders',data.orders.filter(bookingClosed).length,'closed');channel($('views'),'≡  All orders',data.orders.length,'all');$('statuses').replaceChildren();for(const s of data.statuses)channel($('statuses'),'#  '+s,data.orders.filter(o=>o.status===s).length,'status',s);$('contractors').replaceChildren();for(const n of [...new Set([...data.contractors,...open.flatMap(names)])].sort())channel($('contractors'),n,open.filter(o=>names(o).includes(n)).length,'contractor',n);
  const stats=[['Open orders',open.length,'open',''],['Collections today',open.filter(o=>o.collectionToday).length,'collections',''],['Deliveries today',open.filter(o=>o.deliveryToday).length,'deliveries',''],['Overdue collections',open.filter(o=>o.collectionOverdue).length,'overdue',''],['Needs attention',open.filter(o=>o.needsAttention||o.followUpDue).length,'attention','']];$('stats').replaceChildren();for(const [label,count,kind,value] of stats){const b=node('button',undefined,'stat');b.append(node('span',label),node('strong',String(count)));b.classList.toggle('active',view.kind===kind&&view.value===value);b.onclick=()=>setView(kind,value);$('stats').append(b);}
 }
-function render(){renderNav();const planning=view.kind==='planning';$('planAhead').hidden=!planning;const calendar=view.kind==='calendar';$('calendar').hidden=!calendar;$('mobileCalendar').textContent=calendar?'Orders':'Calendar';for(const element of [$('stats'),$('orderTools'),$('intro'),$('workarea')])if(element)element.hidden=calendar||planning;if(planning){$('title').textContent='Plan ahead';$('subtitle').textContent='The next seven days';renderPlanning();return;}if(calendar){$('title').textContent='Calendar';$('subtitle').textContent='Pickups and drop-offs by date';renderCalendar();return;}const titles={collections:'Collections today',upcoming:'Upcoming collections',overdue:'Overdue collections',deliveries:'Deliveries today',attention:'Needs attention',manual:'Manual orders',open:'Overview',unassigned:'Unassigned orders',closed:'Closed orders',all:'All orders',awaiting:'Awaiting collection',transit:'On the move',status:'# '+view.value,contractor:view.value};$('title').textContent=titles[view.kind];$('subtitle').textContent=view.kind==='contractor'?'Open jobs assigned to this contractor':'A live view of your transport orders';renderList();renderEditor();}
+function render(){renderNav();const planning=view.kind==='planning';$('planAhead').hidden=!planning;const calendar=view.kind==='calendar';$('calendar').hidden=!calendar;$('mobileCalendar').textContent=calendar?'Orders':'Calendar';for(const element of [$('stats'),$('orderTools'),$('intro'),$('workarea')])if(element)element.hidden=calendar||planning;if(planning){$('title').textContent='Plan ahead';$('subtitle').textContent='Loads, return loads and mapped stops';renderPlanning();return;}if(calendar){$('title').textContent='Calendar';$('subtitle').textContent='Pickups and drop-offs by date';renderCalendar();return;}const titles={collections:'Collections today',upcoming:'Upcoming collections',overdue:'Overdue collections',deliveries:'Deliveries today',attention:'Needs attention',manual:'Manual orders',open:'Overview',unassigned:'Unassigned orders',closed:'Closed orders',all:'All orders',awaiting:'Awaiting collection',transit:'On the move',status:'# '+view.value,contractor:view.value};$('title').textContent=titles[view.kind];$('subtitle').textContent=view.kind==='contractor'?'Open jobs assigned to this contractor':'A live view of your transport orders';renderList();renderEditor();}
 $('mobileCalendar').onclick=()=>setView(view.kind==='calendar'?'open':'calendar');
 let calendarAnchor='';
 let calendarPeriod='month';
@@ -282,6 +282,42 @@ function renderPlanning(){
   await load({recorded:true});
   if(problem)$('notice').textContent=problem;
  };
+
+ const execution=plan.execution;
+ if(execution){
+  panel.append(node('h2','Suggested BTSA runs'),node('p','Woodhaven → Pomona → Woodhaven. Open a run, check the load, then follow the numbered stops.','sub'));
+  if(!execution.runs.length)panel.append(node('p','No confirmed loads can be combined yet. Review the jobs below for missing dates, vehicle sizes or partner arrangements.'));
+  execution.runs.forEach((run,index)=>{
+   const card=node('section',undefined,'plan-card');
+   card.append(node('p','RUN '+(index+1)+' · '+dateLabel(run.date)+(run.end!==run.date?' to '+dateLabel(run.end):''),'plan-day'),node('h3',run.from+' → '+run.to));
+   card.append(node('strong',[run.cars?run.cars+' car':'',run.bikes?run.bikes+' bike'+(run.bikes===1?'':'s'):''].filter(Boolean).join(' + ')+' · '+run.trailer));
+   if(run.returnIndex!==undefined)card.append(node('p','↩ Return load available: run '+(run.returnIndex+1)+' on '+dateLabel(execution.runs[run.returnIndex].date),'plan-combine'));
+   else if(run.from==='Durban')card.append(node('p','No confirmed return load on a later date yet.','sub'));
+   if(run.outboundIndex!==undefined)card.append(node('p','Pairs with outbound run '+(run.outboundIndex+1)+'. Confirm the turnaround before committing.','plan-combine'));
+   for(const note of run.notes)card.append(node('p',note,'sub'));
+   const list=node('ol');
+   for(const stop of run.sequence){
+    const item=node('li',undefined,'plan-bike');
+    const action=({'Pickup':'LOAD','Drop-off':'OFFLOAD','Handover':'HANDOVER','Start':'START','Finish':'FINISH'})[stop.kind];
+    item.append(node('strong',action+(stop.label?' · '+stop.label:'')),node('p',stop.address,'sub'),node('small',dateLabel(stop.date)+(stop.time?' · '+stop.time:stop.window?' · '+stop.window:'')));
+    if(stop.jobId){const job=plan.jobs.find(j=>j.id===stop.jobId);const edit=node('button','Open order');edit.type='button';edit.onclick=()=>openJob(job);item.append(edit);}
+    list.append(item);
+   }
+   card.append(list);
+   const actions=node('div',undefined,'plan-actions');
+   for(const map of run.maps){const link=node('a',map.label);link.href=map.url;link.target='_blank';link.rel='noopener noreferrer';link.className='button';actions.append(link);}
+   const pending=run.jobs.map(id=>plan.jobs.find(j=>j.id===id)).filter(job=>job&&!job.acknowledged);
+   const confirm=node('button',"I've planned this load");confirm.type='button';confirm.onclick=()=>saveDecision(pending,'planned',confirm);actions.append(confirm);
+   confirm.disabled=!pending.length;if(!pending.length)confirm.textContent='✓ Load planned';
+   card.append(actions);panel.append(card);
+  });
+  if(execution.blocked.length){
+   const details=node('details',undefined,'order-panel');details.append(node('summary','Needs a decision · '+execution.blocked.length));
+   for(const item of execution.blocked){const row=node('div',undefined,'plan-bike');row.append(node('strong',item.label),node('p',item.reason,'plan-problem'));details.append(row);}panel.append(details);
+  }
+  panel.append(node('h2','Job details and reminders'));
+ }
+
  const own=plan.jobs.filter(job=>job.own||job.mixed);
  const buckets=new Map();
  for(const job of own){

@@ -1,5 +1,6 @@
 'use strict';
 const crypto = require('node:crypto');
+const {buildRuns}=require('./dispatch-runs');
 const {localDay, closed, customerFirstName} = require('./dispatch-domain');
 
 function addDays(day, count) {
@@ -25,7 +26,7 @@ function planAhead(orders, decisions=[], instant=new Date().toISOString()) {
  for(const order of orders) {
   if(order.status==='Duplicate')continue;
   const trips=[{...order,trip:1}];
-  if(order.returnTrip)trips.push({...order,...order.returnTrip,collection:order.returnTrip.collection||null,delivery:order.returnTrip.delivery||null,legs:order.returnTrip.legs||[],route:routeParts(order.route).reverse().join(' → '),trip:2});
+  if(order.returnTrip)trips.push({...order,...order.returnTrip,collection:order.returnTrip.collection||null,delivery:order.returnTrip.delivery||null,legs:order.returnTrip.legs||[],collectionAddress:order.returnTrip.collectionAddress||order.deliveryAddress,deliveryAddress:order.returnTrip.deliveryAddress||order.collectionAddress,route:routeParts(order.route).reverse().join(' → '),trip:2});
   for(const trip of trips) {
    const id=order.externalId+':'+trip.trip;
    const previous=saved.get(id);
@@ -59,12 +60,12 @@ function planAhead(orders, decisions=[], instant=new Date().toISOString()) {
    if(mixed)reasons.push(stops.some(stop=>stop.kind==='Handover'&&stop.confidence==='confirmed')?'Confirm which stops BTSA will handle':'Confirm partner handover date');
    if(!own&&!mixed)reasons.push('Partner schedule');
    if(trip.status==='Cancelled')reasons.push('Planned trip cancelled');
-   const signature=crypto.createHash('sha256').update(JSON.stringify({syncState:trip.syncState,status:trip.status,contractor:trip.contractor,route:trip.route,stops,collectionContact:trip.collectionContact,deliveryContact:trip.deliveryContact})).digest('hex');
+   const signature=crypto.createHash('sha256').update(JSON.stringify({syncState:trip.syncState,status:trip.status,contractor:trip.contractor,route:trip.route,bike:trip.bike,quantity:trip.quantity,stops,collectionContact:trip.collectionContact,deliveryContact:trip.deliveryContact})).digest('hex');
    const changed=previous?.state==='planned'&&previous.signature!==signature;
    const acknowledged=previous?.signature===signature&&(previous.state==='planned'||previous.state==='snoozed'&&previous.until_day>today);
    if(!upcoming.length&&stops.length&&!changed)continue;
    const label=[trip.bike,customerFirstName(trip)].filter(Boolean).join(' · ')+(trip.trip===2?' · Return':'');
-   jobs.push({id,ref:order.externalId,trip:trip.trip,label,route:trip.route,carrier:trip.contractor||'Unassigned',own,mixed,stops,upcoming,reasons,signature,changed:!!changed,acknowledged:!!acknowledged,decision:acknowledged?previous.state:null});
+   jobs.push({id,ref:order.externalId,trip:trip.trip,label,route:trip.route,carrier:trip.contractor||'Unassigned',bike:trip.bike,quantity:trip.quantity,own,mixed,stops,upcoming,reasons,signature,changed:!!changed,acknowledged:!!acknowledged,decision:acknowledged?previous.state:null});
   }
  }
  jobs.sort((a,b)=>Number(b.changed)-Number(a.changed)||Number(!!b.reasons.length)-Number(!!a.reasons.length)||(a.upcoming[0]?.date||end).localeCompare(b.upcoming[0]?.date||end)||a.label.localeCompare(b.label));
@@ -102,7 +103,7 @@ function planAhead(orders, decisions=[], instant=new Date().toISOString()) {
   if(!chronological)continue;
   suggestions.push({route:members[0].route,date:members[0].stops[0].date,jobs:members.map(job=>job.id),sequence});
  }
- return {today,end,jobs,suggestions};
+ return {today,end,jobs,suggestions,execution:buildRuns(jobs,today)};
 }
 function planningBrief(plan) {
  const pending=plan.jobs.filter(job=>!job.acknowledged);
@@ -116,6 +117,7 @@ function planningBrief(plan) {
   lines.push([job.changed?'Planned trip changed':'',stops,job.reasons.join(' · ')].filter(Boolean).join(' · '));
  }
  if(own.length>4)lines.push((own.length-4)+' more BTSA jobs in Dispatch');
+ if(plan.execution?.runs.length)lines.push(plan.execution.runs.length+' BTSA load plan(s), with maps, in Dispatch');
  if(plan.suggestions.length)lines.push(plan.suggestions.length+' possible combined BTSA run'+(plan.suggestions.length===1?'':'s')+' in Dispatch');
  if(partners)lines.push(partners+' partner job'+(partners===1?'':'s')+' for awareness');
  lines.push('Review, mark Planned or remind tomorrow in Dispatch.');
