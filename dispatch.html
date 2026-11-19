@@ -54,11 +54,19 @@
 .calendar-dropoff,.calendar-dropoff:hover{background:#e6f0ff;color:#24518c}
 @media(max-width:1100px){.calendar-month{grid-template-columns:1fr}.calendar-day{min-height:0}.calendar-weekday,.calendar-padding,.calendar-day.no-events{display:none}}
 .customer-preview{white-space:pre-line}
+.plan-card{border:1px solid var(--line);border-radius:10px;padding:14px;margin:12px 0}
+.plan-card h3{font-size:17px}
+.plan-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.plan-actions button{min-height:44px}
+.plan-card p,.plan-card li{margin:6px 0}
+.plan-changed{border-color:#b66e00;background:#fff8eb}
+.plan-stop{padding:8px 0;border-bottom:1px solid var(--line)}
 </style>
 <div class="top"><div class="brand">BTSA <span style="font-weight:400;opacity:.65">/ dispatch</span></div><span>Operations workspace</span></div>
 <form id="login"><div class="eyebrow">Bike Transport South Africa</div><h1>Welcome to Dispatch</h1><p class="sub">Your orders, contractors and next moves in one place.</p><label for="key">Dispatch access key</label><input id="key" type="password" autocomplete="off" required><button class="primary">Open workspace</button><small>Use your existing INTAKE_API_KEY. You stay logged in on this device until you log out or clear browser data.</small><p id="loginError" class="result" role="status"></p></form>
 <div id="board" class="layout" hidden><aside><div class="workspace"><strong>BTSA Operations</strong><small>Dispatch & contractor desk</small></div><h3>Workspace</h3><nav id="views" aria-label="Order views"></nav><h3>Status channels</h3><nav id="statuses" aria-label="Status channels"></nav><h3>Contractors · open jobs</h3><nav id="contractors" aria-label="Contractor channels"></nav></aside>
 <main><div class="heading"><div><div class="eyebrow">Dispatch workspace</div><h1 id="title">Calendar</h1><p class="sub" id="subtitle"></p></div><div class="actions"><button id="menu" class="mobile-nav" aria-expanded="false">Channels</button><button id="mobileCalendar" class="mobile-nav" type="button">Calendar</button><button id="newOrder" class="primary">+ New order</button><button id="refresh">↻ Refresh</button><button id="lock">Log out</button></div></div><p id="notice" class="notice" role="status"></p><div class="content"><div class="stats" id="stats"></div><div id="orderTools" class="tools"><input id="search" type="search" aria-label="Search orders" placeholder="Search SLA, customer, bike or route…"><label>Group by <select id="group"><option value="status">Status</option><option value="contractor">Contractor</option><option value="route">Route</option><option value="none">No grouping</option></select></label></div><p id="intro"></p><div class="workarea" id="workarea"><div class="list"><div class="listhead"><input id="selectAll" type="checkbox" aria-label="Select all visible orders"><span id="listCount"></span><button id="clear">Clear selection</button></div><div id="jobs"></div></div><section id="editor" class="editor" hidden aria-label="Edit selected orders"><header><h2 id="editorTitle"></h2><p class="sub" id="editorRefs"></p></header><form id="editForm"><label class="field" for="editStatus">Status</label><select id="editStatus"></select><label class="field" for="assignment">Contractor assignments</label><select id="assignment"><option value="unchanged">Keep existing assignments</option><option value="add">Add selected contractors</option><option value="replace">Replace with selected contractors</option><option value="clear">Clear assignments</option></select><fieldset id="choiceField" hidden><legend>Select one or more contractors</legend><div class="choices" id="choices"></div></fieldset><p id="editHelp" class="sub" style="margin-top:12px"></p><button class="primary" id="apply">Apply changes</button><p id="result" class="result" role="status"></p></form></section></div>
+<section id="planAhead" hidden aria-label="Plan ahead"></section>
 <section id="calendar" hidden aria-label="Order calendar">
  <div class="calendar-bar"><h2 id="calendarRange" aria-live="polite"></h2><label for="calendarPeriod">View <select id="calendarPeriod"><option value="month" selected>Month</option><option value="week">Week</option></select></label><button id="calendarPrev" type="button" aria-label="Previous month">‹ Month</button><button id="calendarToday" type="button">Today</button><button id="calendarNext" type="button" aria-label="Next month">Month ›</button></div>
  <div class="calendar-filter" role="group" aria-label="Order status">
@@ -132,10 +140,10 @@ if(typeof window!=='undefined')setInterval(()=>{
 $('lock').onclick=()=>{if(busy)return;rememberLogin('');key='';data={orders:[],statuses:[],contractors:[]};selected.clear();$('jobs').replaceChildren();$('board').hidden=true;$('login').hidden=false;$('notice').textContent='';$('loginError').textContent='';};
 $('menu').onclick=()=>{$('board').classList.toggle('nav-open');$('menu').setAttribute('aria-expanded',String($('board').classList.contains('nav-open')));};
 function channel(parent,label,count,kind,value=''){const b=node('button');b.append(node('span',label));if(count!==null)b.append(node('b',String(count)));b.classList.toggle('active',view.kind===kind&&view.value===value);b.setAttribute('aria-pressed',String(view.kind===kind&&view.value===value));b.onclick=()=>setView(kind,value);parent.append(b);}
-function renderNav(){const open=data.orders.filter(o=>!bookingClosed(o));$('views').replaceChildren();channel($('views'),'▦  Overview',open.length,'open');channel($('views'),'▦  Calendar',null,'calendar');channel($('views'),'◷  Collections today',open.filter(o=>o.collectionToday).length,'collections');channel($('views'),'↗  Upcoming collections',open.filter(o=>!['Collected','In Transit'].includes(o.status)&&!o.actualCollection&&o.collection?.date>todayZA()).length,'upcoming');channel($('views'),'!  Overdue collections',open.filter(o=>o.collectionOverdue).length,'overdue');channel($('views'),'↘  Deliveries today',open.filter(o=>o.deliveryToday).length,'deliveries');channel($('views'),'⚑  Needs attention',open.filter(o=>o.needsAttention||o.followUpDue).length,'attention');const settingsButton=node('button','⚙  Customer messages');settingsButton.onclick=openCommunicationSettings;$('views').append(settingsButton);const reportsButton=node('button','▤  Operations report');reportsButton.onclick=openReport;$('views').append(reportsButton);const inboxButton=node('button','!  Unprocessed messages ('+((data.inbox||[]).length+(data.unmatchedProofs||[]).length)+')');inboxButton.onclick=openInbox;$('views').append(inboxButton);const draftsButton=node('button','↳  WhatsApp drafts');draftsButton.onclick=openDrafts;$('views').append(draftsButton);channel($('views'),'＋  Manual orders',data.orders.filter(o=>o.origin!=='sheet').length,'manual');channel($('views'),'○  Unassigned',open.filter(unassigned).length,'unassigned');channel($('views'),'✓  Closed orders',data.orders.filter(bookingClosed).length,'closed');channel($('views'),'≡  All orders',data.orders.length,'all');$('statuses').replaceChildren();for(const s of data.statuses)channel($('statuses'),'#  '+s,data.orders.filter(o=>o.status===s).length,'status',s);$('contractors').replaceChildren();for(const n of [...new Set([...data.contractors,...open.flatMap(names)])].sort())channel($('contractors'),n,open.filter(o=>names(o).includes(n)).length,'contractor',n);
+function renderNav(){const open=data.orders.filter(o=>!bookingClosed(o));$('views').replaceChildren();channel($('views'),'▦  Overview',open.length,'open');channel($('views'),'▦  Calendar',null,'calendar');channel($('views'),'🗓  Plan ahead',data.planning?.jobs.filter(job=>!job.acknowledged&&(job.own||job.mixed)).length||0,'planning');channel($('views'),'◷  Collections today',open.filter(o=>o.collectionToday).length,'collections');channel($('views'),'↗  Upcoming collections',open.filter(o=>!['Collected','In Transit'].includes(o.status)&&!o.actualCollection&&o.collection?.date>todayZA()).length,'upcoming');channel($('views'),'!  Overdue collections',open.filter(o=>o.collectionOverdue).length,'overdue');channel($('views'),'↘  Deliveries today',open.filter(o=>o.deliveryToday).length,'deliveries');channel($('views'),'⚑  Needs attention',open.filter(o=>o.needsAttention||o.followUpDue).length,'attention');const settingsButton=node('button','⚙  Customer messages');settingsButton.onclick=openCommunicationSettings;$('views').append(settingsButton);const reportsButton=node('button','▤  Operations report');reportsButton.onclick=openReport;$('views').append(reportsButton);const inboxButton=node('button','!  Unprocessed messages ('+((data.inbox||[]).length+(data.unmatchedProofs||[]).length)+')');inboxButton.onclick=openInbox;$('views').append(inboxButton);const draftsButton=node('button','↳  WhatsApp drafts');draftsButton.onclick=openDrafts;$('views').append(draftsButton);channel($('views'),'＋  Manual orders',data.orders.filter(o=>o.origin!=='sheet').length,'manual');channel($('views'),'○  Unassigned',open.filter(unassigned).length,'unassigned');channel($('views'),'✓  Closed orders',data.orders.filter(bookingClosed).length,'closed');channel($('views'),'≡  All orders',data.orders.length,'all');$('statuses').replaceChildren();for(const s of data.statuses)channel($('statuses'),'#  '+s,data.orders.filter(o=>o.status===s).length,'status',s);$('contractors').replaceChildren();for(const n of [...new Set([...data.contractors,...open.flatMap(names)])].sort())channel($('contractors'),n,open.filter(o=>names(o).includes(n)).length,'contractor',n);
  const stats=[['Open orders',open.length,'open',''],['Collections today',open.filter(o=>o.collectionToday).length,'collections',''],['Deliveries today',open.filter(o=>o.deliveryToday).length,'deliveries',''],['Overdue collections',open.filter(o=>o.collectionOverdue).length,'overdue',''],['Needs attention',open.filter(o=>o.needsAttention||o.followUpDue).length,'attention','']];$('stats').replaceChildren();for(const [label,count,kind,value] of stats){const b=node('button',undefined,'stat');b.append(node('span',label),node('strong',String(count)));b.classList.toggle('active',view.kind===kind&&view.value===value);b.onclick=()=>setView(kind,value);$('stats').append(b);}
 }
-function render(){renderNav();const calendar=view.kind==='calendar';$('calendar').hidden=!calendar;$('mobileCalendar').textContent=calendar?'Orders':'Calendar';for(const element of [$('stats'),$('orderTools'),$('intro'),$('workarea')])if(element)element.hidden=calendar;if(calendar){$('title').textContent='Calendar';$('subtitle').textContent='Pickups and drop-offs by date';renderCalendar();return;}const titles={collections:'Collections today',upcoming:'Upcoming collections',overdue:'Overdue collections',deliveries:'Deliveries today',attention:'Needs attention',manual:'Manual orders',open:'Overview',unassigned:'Unassigned orders',closed:'Closed orders',all:'All orders',awaiting:'Awaiting collection',transit:'On the move',status:'# '+view.value,contractor:view.value};$('title').textContent=titles[view.kind];$('subtitle').textContent=view.kind==='contractor'?'Open jobs assigned to this contractor':'A live view of your transport orders';renderList();renderEditor();}
+function render(){renderNav();const planning=view.kind==='planning';$('planAhead').hidden=!planning;const calendar=view.kind==='calendar';$('calendar').hidden=!calendar;$('mobileCalendar').textContent=calendar?'Orders':'Calendar';for(const element of [$('stats'),$('orderTools'),$('intro'),$('workarea')])if(element)element.hidden=calendar||planning;if(planning){$('title').textContent='Plan ahead';$('subtitle').textContent='The next seven days';renderPlanning();return;}if(calendar){$('title').textContent='Calendar';$('subtitle').textContent='Pickups and drop-offs by date';renderCalendar();return;}const titles={collections:'Collections today',upcoming:'Upcoming collections',overdue:'Overdue collections',deliveries:'Deliveries today',attention:'Needs attention',manual:'Manual orders',open:'Overview',unassigned:'Unassigned orders',closed:'Closed orders',all:'All orders',awaiting:'Awaiting collection',transit:'On the move',status:'# '+view.value,contractor:view.value};$('title').textContent=titles[view.kind];$('subtitle').textContent=view.kind==='contractor'?'Open jobs assigned to this contractor':'A live view of your transport orders';renderList();renderEditor();}
 $('mobileCalendar').onclick=()=>setView(view.kind==='calendar'?'open':'calendar');
 let calendarAnchor='';
 let calendarPeriod='month';
@@ -245,6 +253,67 @@ for(const [id,offset] of [['calendarPrev',-1],['calendarNext',1],['calendarToday
   calendarAnchor=!offset?todayZA():calendarPeriod==='week'?shiftCalendarDay(start,7*offset):shiftCalendarMonth(start,offset);
   renderCalendar();
  };
+}
+function renderPlanning(){
+ const panel=$('planAhead');
+ panel.replaceChildren();
+ const plan=data.planning;
+ if(!plan){panel.append(node('p','Planning is temporarily unavailable.'));return;}
+ const pending=plan.jobs.filter(job=>!job.acknowledged);
+ const own=pending.filter(job=>job.own||job.mixed);
+ panel.append(node('p','Possible runs use matching routes and confirmed dates. Check your starting point, vehicle space and travel time before marking jobs Planned.','sub'));
+ for(const run of plan.suggestions){
+  const card=node('section',undefined,'plan-card');
+  card.append(node('h3','Possible BTSA run · '+run.route),node('p',run.jobs.length+' bikes · '+run.date,'sub'));
+  const list=node('ol');
+  for(const stop of run.sequence){
+   list.append(node('li',stop.date+(stop.time?' '+stop.time:stop.window?' · '+stop.window:'')+' · '+stop.kind+' · '+stop.label+' · '+stop.address));
+  }
+  card.append(list);
+  panel.append(card);
+ }
+ const addJob=job=>{
+  const card=node('section',undefined,'plan-card'+(job.changed?' plan-changed':''));
+  const title=node('button',job.label);title.type='button';
+  title.onclick=async()=>{await openOrder(job.ref);if(job.trip===2&&$('orderDialog').open)$('returnPanel').open=true;};
+  card.append(title,node('p',job.route+' · '+job.carrier,'sub'));
+  if(job.changed)card.append(node('strong','Planned trip changed. Review the new details.'));
+  for(const stop of job.upcoming)card.append(node('p',stop.kind+' · '+stop.date+(stop.time?' '+stop.time:stop.window?' · '+stop.window:'')+(stop.confidence==='confirmed'?'':' · Tentative'),'plan-stop'));
+  if(job.reasons.length)card.append(node('p',job.reasons.join(' · ')));
+  if(job.own||job.mixed){
+   const actions=node('div',undefined,'plan-actions');
+   for(const [state,label] of [['planned','Planned'],['snoozed','Remind me tomorrow']]){
+    const button=node('button',label);button.type='button';
+    button.onclick=async()=>{
+     if(busy)return;
+     busy=true;button.disabled=true;
+     try{
+      await api('/dispatch/plan',{id:job.id,signature:job.signature,state});
+      busy=false;
+      await load({recorded:true});
+     }catch(error){$('notice').textContent=error.message;}
+     finally{busy=false;button.disabled=false;}
+    };
+    actions.append(button);
+   }
+   card.append(actions);
+  }
+  panel.append(card);
+ };
+ if(!own.length)panel.append(node('p','BTSA planning is up to date.'));
+ else{panel.append(node('h2','BTSA trips to review'));own.forEach(addJob);}
+ const acknowledged=plan.jobs.filter(job=>job.acknowledged&&(job.own||job.mixed));
+ if(acknowledged.length){
+  const details=node('details',undefined,'order-panel');
+  details.append(node('summary','Planned or snoozed · '+acknowledged.length));
+  for(const job of acknowledged)details.append(node('p',job.label+' · '+job.route+' · '+(job.decision==='planned'?'Planned':'Tomorrow')));
+  panel.append(details);
+ }
+ const partners=pending.filter(job=>!job.own&&!job.mixed);
+ if(partners.length){
+  panel.append(node('h2','Partner trips'));
+  partners.forEach(addJob);
+ }
 }
 function renderList(){const orders=visibleOrders();$('jobs').replaceChildren();$('intro').textContent=orders.length+' orders in this view · Select rows to update several orders together.';let buckets=new Map();for(const o of orders){let group=$('group').value==='status'?(o.status||'No status'):$('group').value==='route'?(o.route||'No route'):$('group').value==='contractor'?(o.contractor||'Unassigned'):'';if(!buckets.has(group))buckets.set(group,[]);buckets.get(group).push(o);}for(const [label,items] of buckets){if(label){const g=node('div',undefined,'group');g.append(node('span',label),node('span',String(items.length)));$('jobs').append(g);}for(const o of items){const row=node('div',undefined,'job');row.classList.toggle('selected',selected.has(o.externalId));const check=node('input');check.type='checkbox';check.checked=selected.has(o.externalId);check.setAttribute('aria-label','Select '+o.externalId);check.onchange=()=>{if(busy)return;if(check.checked)selected.add(o.externalId);else selected.delete(o.externalId);renderList();renderEditor();};const content=node('div',undefined,'order'),button=node('button');button.textContent=o.bike||'Motorcycle';button.setAttribute('aria-label','Edit '+[o.bike||'Motorcycle',o.clientName,o.route].filter(Boolean).join(' · '));button.onclick=()=>openOrder(o.externalId);const sub=node('p',o.clientName+' · '+o.route,'sub'),meta=node('div',undefined,'meta');const cls=['Collected','In Transit'].includes(o.status)?'transit':closed(o)?'done':o.status==='Paused'?'paused':'pending';meta.append(node('span',o.status||'No status','badge '+cls),node('span',o.contractor||'Unassigned','contract'));if(o.returnTrip)meta.append(node('span','↩ Return · '+o.returnTrip.status,'contract'));if(o.collection?.date)meta.append(node('span','Collect '+dateLabel(o.collection),'contract'));if(o.nextAction)meta.append(node('span','Next: '+o.nextAction,'contract'));if(o.syncState&&o.syncState!=='synced')meta.append(node('span','Sheet '+o.syncState,'badge paused'));content.append(button,sub,meta);row.append(check,content);$('jobs').append(row);}}
  if(!orders.length)$('jobs').append(node('div','No orders match this view. Try another channel or search.','empty'));const count=orders.filter(o=>selected.has(o.externalId)).length;$('selectAll').checked=orders.length>0&&count===orders.length;$('selectAll').indeterminate=count>0&&count<orders.length;$('selectAll').disabled=!orders.length;$('listCount').textContent=orders.length+' shown · '+selected.size+' selected';$('clear').disabled=!selected.size;

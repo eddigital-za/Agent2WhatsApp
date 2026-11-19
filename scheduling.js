@@ -1239,7 +1239,7 @@ async function summary(period,requestedKey=''){
   const key=requestedKey||`${period}-summary-${localDate()}`;
   if(db.prepare('SELECT 1 FROM report_runs WHERE run_key=?').get(key))return;
   const open=db.prepare("SELECT * FROM orders WHERE completed_at IS NULL AND status NOT IN ('cancelled','completed') AND (external_id GLOB 'M-[0-9]*' OR (external_id GLOB 'SLA-[0-9]*' AND CAST(substr(external_id,5) AS INTEGER)>=380)) ORDER BY contractor COLLATE NOCASE, CAST(substr(external_id,5) AS INTEGER)").all();
-  const text=formatDispatchBrief(open.map(order=>({...order,legs:operations.get(order.external_id)?.legs||[]})),localDate());
+  const text=formatDispatchBrief(open.map(order=>({...order,legs:operations.get(order.external_id)?.legs||[]})),localDate())+require('./dispatch-planning').planningBrief(operations.planning());
   const sent=await sendGroup(text,key);
   if(!sent.disabled) db.prepare('INSERT OR IGNORE INTO report_runs(run_key,sent_at) VALUES(?,?)').run(key,nowIso());
 }
