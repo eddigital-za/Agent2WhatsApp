@@ -60,7 +60,17 @@
 .plan-actions button{min-height:44px}
 .plan-card p,.plan-card li{margin:6px 0}
 .plan-changed{border-color:#b66e00;background:#fff8eb}
-.plan-stop{padding:8px 0;border-bottom:1px solid var(--line)}
+.plan-stop{padding:8px;border-radius:6px;margin:6px 0;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.plan-pickup{background:#e4f4ec;color:#176043}
+.plan-handover{background:#eee8fa;color:#573491}
+.plan-dropoff{background:#e6f0ff;color:#24518c}
+.plan-day{font-weight:700;color:var(--teal)}
+.plan-bike{padding:12px 0;border-bottom:1px solid var(--line)}
+.plan-bike>strong{font-size:17px}
+.plan-bike>small{display:block;margin-top:8px}
+.plan-problem{color:#9a4100;font-weight:600}
+.plan-combine{color:#176043;font-weight:600}
+@media(max-width:700px){.heading{display:block}.heading .actions{margin-top:12px;justify-content:flex-start}.plan-actions button{flex:1}.plan-card{padding:12px}.plan-card h3{font-size:20px}}
 </style>
 <div class="top"><div class="brand">BTSA <span style="font-weight:400;opacity:.65">/ dispatch</span></div><span>Operations workspace</span></div>
 <form id="login"><div class="eyebrow">Bike Transport South Africa</div><h1>Welcome to Dispatch</h1><p class="sub">Your orders, contractors and next moves in one place.</p><label for="key">Dispatch access key</label><input id="key" type="password" autocomplete="off" required><button class="primary">Open workspace</button><small>Use your existing INTAKE_API_KEY. You stay logged in on this device until you log out or clear browser data.</small><p id="loginError" class="result" role="status"></p></form>
@@ -259,60 +269,84 @@ function renderPlanning(){
  panel.replaceChildren();
  const plan=data.planning;
  if(!plan){panel.append(node('p','Planning is temporarily unavailable.'));return;}
- const pending=plan.jobs.filter(job=>!job.acknowledged);
- const own=pending.filter(job=>job.own||job.mixed);
- panel.append(node('p','Possible runs use matching routes and confirmed dates. Check your starting point, vehicle space and travel time before marking jobs Planned.','sub'));
- for(const run of plan.suggestions){
-  const card=node('section',undefined,'plan-card');
-  card.append(node('h3','Possible BTSA run · '+run.route),node('p',run.jobs.length+' bikes · '+run.date,'sub'));
-  const list=node('ol');
-  for(const stop of run.sequence){
-   list.append(node('li',stop.date+(stop.time?' '+stop.time:stop.window?' · '+stop.window:'')+' · '+stop.kind+' · '+stop.label+' · '+stop.address));
-  }
-  card.append(list);
-  panel.append(card);
+ const dateLabel=day=>new Intl.DateTimeFormat('en-ZA',{timeZone:'UTC',weekday:'short',day:'numeric',month:'short'}).format(new Date(day+'T12:00:00Z')).replaceAll(',','');
+ const openJob=async job=>{await openOrder(job.ref);if(job.trip===2&&$('orderDialog').open)$('returnPanel').open=true;};
+ const saveDecision=async(jobs,state,button)=>{
+  if(busy)return;
+  busy=true;button.disabled=true;
+  let problem='';
+  try{
+   for(const job of jobs)await api('/dispatch/plan',{id:job.id,signature:job.signature,state});
+  }catch(error){problem=error.message;}
+  finally{busy=false;button.disabled=false;}
+  await load({recorded:true});
+  if(problem)$('notice').textContent=problem;
+ };
+ const own=plan.jobs.filter(job=>job.own||job.mixed);
+ const buckets=new Map();
+ for(const job of own){
+  const start=job.upcoming.find(stop=>stop.kind==='Pickup')?.date||job.upcoming[0]?.date||'';
+  const key=start+'|'+job.route.trim().toLowerCase();
+  if(!buckets.has(key))buckets.set(key,{day:start,route:job.route,jobs:[]});
+  buckets.get(key).jobs.push(job);
  }
- const addJob=job=>{
-  const card=node('section',undefined,'plan-card'+(job.changed?' plan-changed':''));
-  const title=node('button',job.label);title.type='button';
-  title.onclick=async()=>{await openOrder(job.ref);if(job.trip===2&&$('orderDialog').open)$('returnPanel').open=true;};
-  card.append(title,node('p',job.route+' · '+job.carrier,'sub'));
-  if(job.changed)card.append(node('strong','Planned trip changed. Review the new details.'));
-  for(const stop of job.upcoming)card.append(node('p',stop.kind+' · '+stop.date+(stop.time?' '+stop.time:stop.window?' · '+stop.window:'')+(stop.confidence==='confirmed'?'':' · Tentative'),'plan-stop'));
-  if(job.reasons.length)card.append(node('p',job.reasons.join(' · ')));
-  if(job.own||job.mixed){
+ const runs=[...buckets.values()].sort((a,b)=>(a.day||'9999').localeCompare(b.day||'9999')||a.route.localeCompare(b.route));
+ if(!runs.length)panel.append(node('p','No upcoming BTSA trips.'));
+ for(const run of runs){
+  const card=node('section',undefined,'plan-card');
+  const needsReview=run.jobs.some(job=>job.reasons.length||job.changed);
+  card.classList.toggle('plan-changed',needsReview);
+  card.append(node('p',run.day?dateLabel(run.day):'DATE NEEDED','plan-day'),node('h3',run.route));
+  const suggestion=plan.suggestions.find(item=>item.jobs.length===run.jobs.length&&run.jobs.every(job=>item.jobs.includes(job.id)));
+  if(suggestion)card.append(node('p','These '+run.jobs.length+' bikes could travel together.','plan-combine'));
+  for(const job of run.jobs){
+   const bike=node('div',undefined,'plan-bike');
+   bike.append(node('strong',job.label));
+   if(job.mixed)bike.append(node('p',job.carrier,'sub'));
+   if(job.changed)bike.append(node('p','This trip changed since you planned it.','plan-problem'));
+   for(const stop of job.stops){
+    const row=node('div',undefined,'plan-stop plan-'+({'Pickup':'pickup','Handover':'handover','Drop-off':'dropoff'}[stop.kind]));
+    row.append(node('span',stop.kind),node('strong',dateLabel(stop.date)+(stop.time?' · '+stop.time:stop.window?' · '+stop.window:'')));
+    if(stop.confidence!=='confirmed')row.append(node('small','Tentative'));
+    bike.append(row);
+   }
+   for(const reason of job.reasons){
+    const readable=reason.replace(/\d{4}-\d{2}-\d{2}/g,dateLabel);
+    bike.append(node('p',readable,'plan-problem'));
+   }
+   const edit=node('button','Edit dates / open order');edit.type='button';edit.onclick=()=>openJob(job);
+   bike.append(edit);
+   if(job.acknowledged)bike.append(node('small',job.decision==='planned'?'✓ You have planned this trip':'Reminder tomorrow'));
+   card.append(bike);
+  }
+  if(suggestion){
+   const details=node('details',undefined,'order-panel');
+   details.append(node('summary','Suggested stop order'));
+   const list=node('ol');
+   for(const stop of suggestion.sequence)list.append(node('li',dateLabel(stop.date)+(stop.time?' · '+stop.time:stop.window?' · '+stop.window:'')+' · '+stop.kind+' · '+stop.label+' · '+stop.address));
+   details.append(list,node('p','Check travel time and vehicle space before using this order.','sub'));
+   card.append(details);
+  }
+  const pending=run.jobs.filter(job=>!job.acknowledged);
+  if(pending.length){
    const actions=node('div',undefined,'plan-actions');
-   for(const [state,label] of [['planned','Planned'],['snoozed','Remind me tomorrow']]){
-    const button=node('button',label);button.type='button';
-    button.onclick=async()=>{
-     if(busy)return;
-     busy=true;button.disabled=true;
-     try{
-      await api('/dispatch/plan',{id:job.id,signature:job.signature,state});
-      busy=false;
-      await load({recorded:true});
-     }catch(error){$('notice').textContent=error.message;}
-     finally{busy=false;button.disabled=false;}
-    };
+   for(const [state,label] of [['planned',"I've planned this"],['snoozed','Remind tomorrow']]){
+    const button=node('button',label);button.type='button';button.onclick=()=>saveDecision(pending,state,button);
     actions.append(button);
    }
    card.append(actions);
   }
   panel.append(card);
- };
- if(!own.length)panel.append(node('p','BTSA planning is up to date.'));
- else{panel.append(node('h2','BTSA trips to review'));own.forEach(addJob);}
- const acknowledged=plan.jobs.filter(job=>job.acknowledged&&(job.own||job.mixed));
- if(acknowledged.length){
-  const details=node('details',undefined,'order-panel');
-  details.append(node('summary','Planned or snoozed · '+acknowledged.length));
-  for(const job of acknowledged)details.append(node('p',job.label+' · '+job.route+' · '+(job.decision==='planned'?'Planned':'Tomorrow')));
-  panel.append(details);
  }
- const partners=pending.filter(job=>!job.own&&!job.mixed);
+ const partners=plan.jobs.filter(job=>!job.own&&!job.mixed);
  if(partners.length){
-  panel.append(node('h2','Partner trips'));
-  partners.forEach(addJob);
+  const details=node('details',undefined,'order-panel');
+  details.append(node('summary','Partner trips · '+partners.length));
+  for(const job of partners){
+   const button=node('button',job.label+' · '+job.route);button.type='button';button.onclick=()=>openJob(job);
+   details.append(button);
+  }
+  panel.append(details);
  }
 }
 function renderList(){const orders=visibleOrders();$('jobs').replaceChildren();$('intro').textContent=orders.length+' orders in this view · Select rows to update several orders together.';let buckets=new Map();for(const o of orders){let group=$('group').value==='status'?(o.status||'No status'):$('group').value==='route'?(o.route||'No route'):$('group').value==='contractor'?(o.contractor||'Unassigned'):'';if(!buckets.has(group))buckets.set(group,[]);buckets.get(group).push(o);}for(const [label,items] of buckets){if(label){const g=node('div',undefined,'group');g.append(node('span',label),node('span',String(items.length)));$('jobs').append(g);}for(const o of items){const row=node('div',undefined,'job');row.classList.toggle('selected',selected.has(o.externalId));const check=node('input');check.type='checkbox';check.checked=selected.has(o.externalId);check.setAttribute('aria-label','Select '+o.externalId);check.onchange=()=>{if(busy)return;if(check.checked)selected.add(o.externalId);else selected.delete(o.externalId);renderList();renderEditor();};const content=node('div',undefined,'order'),button=node('button');button.textContent=o.bike||'Motorcycle';button.setAttribute('aria-label','Edit '+[o.bike||'Motorcycle',o.clientName,o.route].filter(Boolean).join(' · '));button.onclick=()=>openOrder(o.externalId);const sub=node('p',o.clientName+' · '+o.route,'sub'),meta=node('div',undefined,'meta');const cls=['Collected','In Transit'].includes(o.status)?'transit':closed(o)?'done':o.status==='Paused'?'paused':'pending';meta.append(node('span',o.status||'No status','badge '+cls),node('span',o.contractor||'Unassigned','contract'));if(o.returnTrip)meta.append(node('span','↩ Return · '+o.returnTrip.status,'contract'));if(o.collection?.date)meta.append(node('span','Collect '+dateLabel(o.collection),'contract'));if(o.nextAction)meta.append(node('span','Next: '+o.nextAction,'contract'));if(o.syncState&&o.syncState!=='synced')meta.append(node('span','Sheet '+o.syncState,'badge paused'));content.append(button,sub,meta);row.append(check,content);$('jobs').append(row);}}

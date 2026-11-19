@@ -177,7 +177,7 @@ assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orde
  assert.equal(vm.runInContext("selected.has('SLA-501')",context),false);assert.equal(vm.runInContext("selected.has('SLA-502')",context),true);
  assert.match($('notice').textContent,/1 order saved and verified/);assert.match($('notice').textContent,/1 failed/);assert.equal($('editorTitle').textContent,'Edit order');
  vm.runInContext("setView('all')",context);$('search').value='Bike B';$('search').oninput();assert.match($('intro').textContent,/1 orders/);assert.equal(vm.runInContext('selected.size',context),0);
- context.fixture.planning={today:'2026-11-19',end:'2026-11-26',suggestions:[],jobs:[{id:'SLA-501:1',ref:'SLA-501',trip:1,label:'Bike A · John',route:'JHB to DBN',carrier:'BTSA',own:true,signature:'signature',upcoming:[{kind:'Pickup',date:'2026-11-20',confidence:'confirmed'}],reasons:['Delivery date needed']}]};
+ context.fixture.planning={today:'2026-11-19',end:'2026-11-26',suggestions:[],jobs:[{id:'SLA-501:1',ref:'SLA-501',trip:1,label:'Bike A · John',route:'JHB to DBN',carrier:'BTSA',own:true,signature:'signature',upcoming:[{kind:'Pickup',date:'2026-11-20',confidence:'confirmed'}],stops:[{kind:'Pickup',date:'2026-11-20',confidence:'confirmed'}],reasons:['Delivery date needed']}]};
  vm.runInContext("setView('planning')",context);
  assert.equal($('planAhead').hidden,false);
  assert.equal($('calendar').hidden,true);
@@ -187,7 +187,8 @@ assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orde
  assert.equal(calls.at(-1).url,'/dispatch/plan');
  assert.equal(calls.at(-1).state,'planned');
  assert.equal($('planAhead').hidden,false);
- assert.ok($('planAhead').children.some(child=>child.textContent==='BTSA planning is up to date.'));
+ const plannedCard=$('planAhead').children.find(child=>child.className==='plan-card');
+ assert.ok(plannedCard.children.some(child=>child.children.some?.(text=>text.textContent==='✓ You have planned this trip')));
  vm.runInContext("setView('calendar')",context);
  assert.equal($('planAhead').hidden,true);
  assert.equal($('calendar').hidden,false);

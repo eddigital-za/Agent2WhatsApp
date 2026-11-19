@@ -48,7 +48,7 @@ assert.equal(planAhead(cancelled,decisions,now).jobs.find(j=>j.id===saved.id).ch
 assert.match(planningBrief(plan),/PLAN AHEAD/);
 assert.match(planningBrief(plan),/partner job/);
 assert.equal(planningBrief({...plan,jobs:plan.jobs.map(j=>({...j,acknowledged:true}))}),'');
-assert.equal(planAhead([job('W',{collection:{...eta('2026-11-20'),window:'afternoon'},delivery:{...eta('2026-11-20'),window:'morning'}})],[],now).jobs[0].reasons.includes('Check stop dates and times'),true);
+assert.equal(planAhead([job('W',{collection:{...eta('2026-11-20'),window:'afternoon'},delivery:{...eta('2026-11-20'),window:'morning'}})],[],now).jobs[0].reasons.some(reason=>reason.includes('is before pickup')),true);
 assert.equal(planAhead([job('X',{delivery:eta('2026-11-19')})],[],now).suggestions.length,0);
 
 (async()=>{

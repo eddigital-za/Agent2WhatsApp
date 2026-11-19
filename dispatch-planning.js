@@ -49,7 +49,12 @@ function planAhead(orders, decisions=[], instant=new Date().toISOString()) {
    if(!collected&&!trip.collection?.date)reasons.push('Pickup date needed');
    if(!trip.delivery?.date)reasons.push('Delivery date needed');
    if(stops.some(stop=>stop.confidence!=='confirmed'||stop.precision==='week'))reasons.push('Confirm estimated dates');
-   if(stops.some((stop,index)=>index>0&&(stop.date<stops[index-1].date||stop.date===stops[index-1].date&&stopBounds(stop)[1]<stopBounds(stops[index-1])[0])))reasons.push('Check stop dates and times');
+   for(let index=1;index<stops.length;index++){
+    const stop=stops[index],before=stops[index-1];
+    if(stop.date<before.date||stop.date===before.date&&stopBounds(stop)[1]<stopBounds(before)[0]){
+     reasons.push(stop.kind+' '+stop.date+(stop.time?' '+stop.time:stop.window?' '+stop.window:'')+' is before '+before.kind.toLowerCase()+' '+before.date+(before.time?' '+before.time:before.window?' '+before.window:'')+'. Check these dates.');
+    }
+   }
    if(trip.syncState&&trip.syncState!=='synced')reasons.push('Resolve sheet sync');
    if(mixed)reasons.push(stops.some(stop=>stop.kind==='Handover'&&stop.confidence==='confirmed')?'Confirm which stops BTSA will handle':'Confirm partner handover date');
    if(!own&&!mixed)reasons.push('Partner schedule');
