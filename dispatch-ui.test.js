@@ -189,6 +189,13 @@ assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orde
  assert.equal($('planAhead').hidden,false);
  const plannedCard=$('planAhead').children.find(child=>child.className==='plan-card');
  assert.ok(plannedCard.children.some(child=>child.children.some?.(text=>text.textContent==='✓ You have planned this trip')));
+ context.fixture.planning.jobs.push({...context.fixture.planning.jobs[0],id:'SLA-502:1',ref:'SLA-502',route:'Johannesburg to Durban',label:'Bike B · Jane',acknowledged:false});
+ context.fixture.planning.jobs[0].acknowledged=false;
+ context.fixture.planning.suggestions=[{route:'JHB to DBN',date:'2026-11-20',jobs:['SLA-501:1','SLA-502:1'],sequence:[]}];
+ vm.runInContext('renderPlanning()',context);
+ const combinedCards=$('planAhead').children.filter(child=>child.className==='plan-card');
+ assert.equal(combinedCards.length,1);
+ assert.ok(combinedCards[0].children.some(child=>child.textContent==='These 2 bikes could travel together.'));
  vm.runInContext("setView('calendar')",context);
  assert.equal($('planAhead').hidden,true);
  assert.equal($('calendar').hidden,false);

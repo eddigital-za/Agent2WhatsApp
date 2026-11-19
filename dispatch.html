@@ -286,8 +286,9 @@ function renderPlanning(){
  const buckets=new Map();
  for(const job of own){
   const start=job.upcoming.find(stop=>stop.kind==='Pickup')?.date||job.upcoming[0]?.date||'';
-  const key=start+'|'+job.route.trim().toLowerCase();
-  if(!buckets.has(key))buckets.set(key,{day:start,route:job.route,jobs:[]});
+  const suggested=plan.suggestions.find(run=>run.jobs.includes(job.id));
+  const key=suggested?'suggested|'+suggested.jobs.join('|'):start+'|'+job.route.trim().toLowerCase();
+  if(!buckets.has(key))buckets.set(key,{day:start,route:suggested?.route||job.route,jobs:[]});
   buckets.get(key).jobs.push(job);
  }
  const runs=[...buckets.values()].sort((a,b)=>(a.day||'9999').localeCompare(b.day||'9999')||a.route.localeCompare(b.route));
