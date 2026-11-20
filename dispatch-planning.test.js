@@ -94,7 +94,32 @@ assert.equal(planAhead([job('X',{delivery:eta('2026-11-19')})],[],now).suggestio
  ops.keepRun(proposed.id,proposed.signature,true);
  assert.equal(ops.planning().execution.accepted.length,0);
  assert.throws(()=>ops.keepRun(proposed.id,proposed.signature),/changed/);
+
  db.close();
+ const db2=new DatabaseSync(':memory:');
+ db2.exec(fs.readFileSync('scheduling.js','utf8').match(/db\.exec\(`([\s\S]*?)`\);/)[1]);
+ const sheetRows=[];
+ const trips=createOperations({db:db2,now:()=>now,sheet:{read:async()=>structuredClone(sheetRows),append:async row=>sheetRows.push(row),update:async()=>{},updateCells:async()=>{}}});
+ const enter=(key,route,bike='Honda CBR')=>trips.createAndSync({bike,clientName:'Test Customer',route,contractor:'BTSA',collection:eta('2026-11-24'),delivery:eta('2026-11-25')},key);
+ await enter('circuit-outbound','DBN to JHB');
+ await enter('circuit-homebound','JHB to DBN');
+ const savedCircuit=trips.planning().execution.journeys[0];
+ trips.keepRun(savedCircuit.id,savedCircuit.signature);
+ await enter('circuit-lowveld-car','JHB to Hoedspruit','BAJAJ Qute');
+ await enter('circuit-lowveld-bike','Montana to Malelane');
+ const extension=trips.planning().execution.journeys.find(j=>j.replaces?.includes(savedCircuit.id));
+ assert.ok(extension);assert.equal(extension.source.length,4);
+ assert.throws(()=>trips.keepRun(extension.id,'stale'),/changed/);
+ assert.equal(db2.prepare('SELECT COUNT(*) n FROM dispatch_run_plans').get().n,1);
+ const beforeOrders=JSON.stringify(trips.all());
+ trips.keepRun(extension.id,extension.signature);
+ assert.equal(db2.prepare('SELECT COUNT(*) n FROM dispatch_run_plans').get().n,1);
+ assert.equal(trips.planning().execution.accepted[0].source.length,4);
+ assert.equal(JSON.stringify(trips.all()),beforeOrders);
+ assert.equal(trips.planning().execution.bookingCount,4);
+ assert.equal(trips.planning().execution.coverageCounts.saved,4);
+ db2.close();
+
  console.log('PASS: planning, corridor/date grouping, stop precedence, partner limits, returns, no invented dates, durable actions, changed plans and authenticated route handlers. Fake bookings only.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 

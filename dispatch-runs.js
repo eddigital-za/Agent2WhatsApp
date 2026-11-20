@@ -14,7 +14,7 @@ function region(value){
  ['Bloemfontein',/\b(bloemfontein|bloem|pellissier)\b/],
  ['Hoedspruit',/\bhoedspruit\b/],['Malelane',/\bmalelane\b/],
  ['Gqeberha',/\b(gqeberha|port elizabeth|st[.]? francis|pe)\b/],
- ['East London',/\b(east london|el)\b/],['George',/\bgeorge\b/]];
+ ['East London',/\b(east london|el)\b/],['George',/\b(george|herolds bay|herold.s bay|swellendam|suurbraak|stuurbrak)\b/]];
  return aliases.find(([,pattern])=>pattern.test(text))?.[0]||'';
 }
 function routeParts(route){
@@ -53,11 +53,9 @@ function mapLinks(stops){
 }
 
 function buildRuns(orders,today,decisions=[],kept=[]){
- const end=day(today,14),all=expand(orders),candidates=[],blocked=[],opportunities=[],future=[];
- const savedIds=new Set(kept.filter(p=>p.end>=today).flatMap(p=>p.source.map(s=>s.id)));
+ const end=day(today,14),all=expand(orders),candidates=[],blocked=[],opportunities=[],future=[],partners=[],deferred=[];
  const snoozed=new Set(decisions.filter(d=>d.state==='snoozed'&&d.until_day>today).map(d=>d.id));
  for(const o of all){
-  if(savedIds.has(o.id))continue;
   const carriers=String(o.contractor||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
   const own=carriers.length===1&&carriers[0]==='btsa',mixed=carriers.includes('btsa')&&carriers.some(s=>/cheet/.test(s));
   const parts=routeParts(o.route);
@@ -65,10 +63,11 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   const from=region(parts[0])||region(o.collectionAddress)||named(parts[0]),to=region(parts.at(-1))||region(o.deliveryAddress)||named(parts.at(-1));
   const label=o.label,id=o.id;
   const load=vehicle(o),sourceSignature=fingerprint(o);
-  if(!own&&!mixed){if(!carriers.length&&from&&to)opportunities.push({id,label,from,to,reason:'Unassigned: assign BTSA before including'});continue;}
-  if(snoozed.has(id))continue;
+  if(!own&&!mixed){const item={id,label,from,to,load,reason:carriers.length?'Partner-controlled: '+o.contractor+'; confirm a BTSA leg before including':'Unassigned: assign BTSA before including'};(carriers.length?partners:opportunities).push(item);continue;}
+  if(snoozed.has(id)){deferred.push({id,label,reason:'Reminder postponed until tomorrow'});continue;}
   let reason='';
-  if(o.actualCollection||['Collected','In Transit'].includes(o.status))reason='Already collected: confirm current location before planning another load';
+  if(o.status==='Paused')reason='Paused booking: confirm it is ready before including';
+  else if(o.actualCollection||['Collected','In Transit'].includes(o.status))reason='Already collected: confirm current location before planning another load';
   else if(parts.length>2)reason='Return route: add the separate return trip details';
   else if(!from||!to)reason='Confirm the route towns';
   else if(from===to)reason='Local job: review separately from the long-distance loads';
@@ -105,6 +104,7 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   group.items.push(item);
  }
  function makeRun(items,from,to,date,alternative=false){
+  items=[...items].sort((a,b)=>to==='Lowveld'?(['Malelane','Hoedspruit'].indexOf(a.to)-['Malelane','Hoedspruit'].indexOf(b.to)):0);
   const days=allowance(from,to);
   const booked=items.map(i=>i.delivery).filter(Boolean).sort();
   const arrival=booked.at(-1)||day(date,days);
@@ -130,7 +130,8 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   const source=items.map(i=>({id:i.id,signature:i.sourceSignature}));
   const id=hash([from,to,date,items.map(i=>i.id).sort(),alternative]).slice(0,24);
   const signature=hash([source,date,arrival,alternative]);
-  return {id,signature,from,to,date,end:arrival,jobs:items.map(i=>i.id),members:items.map(({original,...i})=>i),source,bikes,cars,capacity,spare:capacity-bikes,trailer:cars?'1 car + up to 3 bikes':bikes>7?'Hire 6m trailer':bikes>5?'Own trailer · check fit':'Own trailer',warnings,sequence,maps:mapLinks(sequence),flexible:items.every(i=>!i.pickup&&!i.delivery),alternative,priority:items.map(i=>i.priority).sort()[0],proposed:items.some(i=>!i.pickup||!i.delivery)};
+  const towns=[from,...new Set(items.map(i=>i.to))];
+  return {id,signature,from,to,towns,date,end:arrival,jobs:items.map(i=>i.id),members:items.map(({original,...i})=>i),source,bikes,cars,capacity,spare:capacity-bikes,trailer:cars?'1 car + up to 3 bikes':bikes>7?'Hire 6m trailer':bikes>5?'Own trailer · check fit':'Own trailer',warnings,sequence,maps:mapLinks(sequence),flexible:items.every(i=>!i.pickup&&!i.delivery),alternative,priority:items.map(i=>i.priority).sort()[0],proposed:items.some(i=>!i.pickup||!i.delivery)};
  }
  const runs=[];
  for(const group of groups){
@@ -154,36 +155,102 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   const direct=makeRun(items,'Durban','Cape Town',run.date,true);direct.alternativeTo=run.id;alternatives.push(direct);
  }
  runs.sort((a,b)=>a.date.localeCompare(b.date)||a.priority.localeCompare(b.priority)||b.bikes-a.bikes);
- // Connect loads into journeys. Proposed return dates may move; booked dates never move.
+
+ // Draft circuits can propose changed dates, but never write those dates to bookings.
  const journeys=[],used=new Set();
- const shift=(run,date)=>{
-  const delta=Math.round((new Date(date+'T12:00:00Z')-new Date(run.date+'T12:00:00Z'))/86400000);
-  run.date=date;run.end=day(run.end,delta);run.sequence=run.sequence.map(s=>({...s,date:day(s.date,delta)}));
-  run.signature=hash([run.source,run.date,run.end,run.alternative]);
- };
+ function align(run,ready){
+  const originalDate=run.date;
+  const date=run.date<ready?ready:run.date;
+  const minimumEnd=day(date,allowance(run.from,run.to));
+  const finish=run.end<minimumEnd?minimumEnd:run.end;
+  const changes=[];
+  run.sequence=run.sequence.map(stop=>{
+   let proposed=stop.date;
+   if(stop.kind==='Start'||stop.kind==='Pickup')proposed=date;
+   else if(stop.date<date||stop.kind==='Drop-off'||stop.kind==='Handover')proposed=finish;
+   if(proposed!==stop.date){
+    if(!stop.proposed)changes.push({jobId:stop.jobId,kind:stop.kind,booked:stop.date,proposed});
+    return {...stop,bookedDate:stop.proposed?undefined:stop.date,date:proposed,proposed:true};
+   }
+   return stop;
+  });
+  run.date=date;run.end=finish;
+  run.dateChanges=changes;
+  if(changes.length)run.warnings.push('This combined trip needs agreement on '+changes.length+' booked stop date'+(changes.length===1?'':'s')+'. Original dates remain unchanged.');
+  if(originalDate!==date||changes.length)run.proposed=true;
+  run.maps=mapLinks(run.sequence);
+  run.signature=hash([run.source,run.date,run.end,run.sequence]);
+ }
+ const hubAddress=town=>town==='Johannesburg'?POMONA:town==='Durban'?WOODHAVEN:town+', South Africa';
+ function emptyLeg(last,to){
+  const from=last.to,actual=last.towns?.at(-1)||from,date=last.end,finish=day(date,1);
+  const stops=[{kind:'Start',address:last.sequence.at(-1).address,date},{kind:'Reposition',address:hubAddress(to),date:finish,proposed:true}];
+  return {id:'empty-'+last.id+'-'+to,signature:hash([from,to,date]),from,to,towns:[actual,to],date,end:finish,jobs:[],members:[],source:[],bikes:0,cars:0,capacity:0,spare:0,trailer:'Empty trailer',warnings:['Empty positioning leg to collect the next load. Check road timing in Maps.'],sequence:stops,maps:mapLinks(stops),reposition:true,proposed:true};
+ }
+ // ponytail: regional circuit sequencing, not road-distance optimisation. Maps provides the road route.
  const starts=[...runs.filter(r=>r.from==='Durban'),...runs.filter(r=>r.from!=='Durban')];
  for(const start of starts){
   if(used.has(start.id))continue;
+  align(start,today);
   const legs=[start];used.add(start.id);
-  for(let n=0;n<2;n++){
-   const last=legs.at(-1);
-   if(last.to===start.from)break;
-   const next=runs.filter(r=>!used.has(r.id)&&r.from===last.to&&(r.date>=day(last.end,1)||r.flexible&&day(last.end,1)<=end)&&(!r.members.some(i=>i.deadline&&i.deadline<day(last.end,1)))).sort((a,b)=>Number(b.to===start.from)-Number(a.to===start.from)||a.date.localeCompare(b.date)||b.bikes-a.bikes)[0];
-   if(!next)break;
-   if(next.flexible&&next.date<day(last.end,1))shift(next,day(last.end,1));
-   if(next.date>end)break;
+  for(let count=0;count<runs.length*2;count++){
+   const last=legs.at(-1),home=start.from;
+   if(last.to===home)break;
+   const choices=runs.filter(r=>!used.has(r.id)&&r.from===last.to);
+   // At Pomona, finish the Lowveld excursion before returning to Durban.
+   choices.sort((a,b)=>{
+    const rank=r=>r.to==='Lowveld'&&r.from==='Johannesburg'?0:r.to===home?2:runs.some(onward=>!used.has(onward.id)&&onward.from===r.to&&onward.to===home)?1:3;
+    return rank(a)-rank(b)||a.priority.localeCompare(b.priority)||b.bikes-a.bikes;
+   });
+   let next=choices.find(r=>(r.date>last.end?r.date:last.end)<=end);
+   if(!next){
+    // Connect a regional offload back to the next booked loading hub, instead of
+    // pretending the trailer is already there or starting a second Durban trip.
+    const backHub=legs.slice().reverse().map(r=>r.from).find(hub=>hub!==home&&runs.some(r=>!used.has(r.id)&&r.from===hub));
+    if(backHub&&last.end<end){legs.push(emptyLeg(last,backHub));continue;}
+    break;
+   }
+   align(next,last.end);
    legs.push(next);used.add(next.id);
   }
   const source=legs.flatMap(r=>r.source);
   const id=hash(legs.map(r=>r.id)).slice(0,24),signature=hash(legs.map(r=>r.signature));
-  journeys.push({id,signature,legs,source,start:legs[0].date,end:legs.at(-1).end,route:[legs[0].from,...legs.map(r=>r.to)],bikes:legs.reduce((n,r)=>n+r.bikes,0),cars:legs.reduce((n,r)=>n+r.cars,0),alternative:false});
+  const route=[];
+  for(const leg of legs)for(const town of leg.towns||[leg.from,leg.to])if(route.at(-1)!==town)route.push(town);
+  const dateChanges=legs.flatMap(r=>r.dateChanges||[]);
+  journeys.push({id,signature,legs,source,start:legs[0].date,end:legs.at(-1).end,route,dateChanges,bikes:legs.reduce((n,r)=>n+r.bikes,0),cars:legs.reduce((n,r)=>n+r.cars,0),alternative:false});
  }
  for(const run of alternatives)journeys.push({id:run.id,signature:run.signature,legs:[run],source:run.source,start:run.date,end:run.end,route:[run.from,run.to],bikes:run.bikes,cars:run.cars,alternative:true,alternativeTo:run.alternativeTo});
  const current=new Map(all.map(o=>[o.id,fingerprint(o)]));
  const accepted=kept.map(plan=>({...plan,changed:plan.source.some(s=>current.get(s.id)!==s.signature),expired:plan.end<today}));
- const reserved=new Set(accepted.filter(p=>!p.expired).flatMap(p=>p.source.map(s=>s.id)));
- const proposals=journeys.filter(j=>!j.source.some(s=>reserved.has(s.id)));
+ const proposals=journeys.filter(j=>{
+  const overlaps=accepted.filter(p=>!p.expired&&p.source.some(s=>j.source.some(item=>item.id===s.id)));
+  if(!overlaps.length)return true;
+  // A replacement must retain every order in the saved plan.
+  if(overlaps.some(p=>p.source.some(s=>!j.source.some(item=>item.id===s.id))))return false;
+  const unchanged=overlaps.length===1&&!overlaps[0].changed&&overlaps[0].source.length===j.source.length&&JSON.stringify(overlaps[0].route)===JSON.stringify(j.route);
+  if(unchanged)return false;
+  j.replaces=overlaps.map(p=>p.id);
+  return true;
+ });
  const directions=[...new Set(candidates.map(i=>i.from+' → '+i.to))].map(route=>{const items=candidates.filter(i=>i.from+' → '+i.to===route);return {route,bikes:items.reduce((n,i)=>n+i.load.bikes,0),cars:items.reduce((n,i)=>n+i.load.cars,0),undated:items.filter(i=>!i.pickup).length};});
- return {today,end,origin:WOODHAVEN,handover:POMONA,journeys:proposals,accepted,blocked,opportunities,future,directions,runs};
+
+
+ for(const proposal of proposals){
+  proposal.maps=mapLinks(proposal.legs.flatMap(leg=>leg.sequence));
+  proposal.opportunities=opportunities.filter(o=>proposal.legs.some(leg=>leg.from===o.from&&(leg.to===o.to||leg.from==='Cape Town'&&leg.to==='Durban'&&o.to==='George'||leg.to==='Lowveld'&&['Malelane','Hoedspruit'].includes(o.to))));
+ }
+ const planned=new Set(proposals.filter(p=>!p.alternative).flatMap(p=>p.source.map(s=>s.id)));
+ const saved=new Set(accepted.filter(p=>!p.expired).flatMap(p=>p.source.map(s=>s.id)));
+ const categories=[['review',blocked],['unassigned',opportunities],['partner',partners],['later',future],['postponed',deferred]];
+ const coverage=all.map(o=>{
+  let state=saved.has(o.id)?'saved':planned.has(o.id)?'proposed':'review',reason='';
+  for(const [category,items] of categories){const item=items.find(i=>i.id===o.id);if(item){state=category;reason=item.reason||(category==='later'?'Pickup beyond 14 days: '+item.date:'');break;}}
+  if(state==='review'&&!reason)reason='Needs review before joining a load';
+  return {id:o.id,ref:o.externalId,trip:o.trip,label:o.label,route:o.route,state,reason};
+ });
+ const bookingCount=new Set(coverage.map(o=>o.ref)).size;
+ const coverageCounts=Object.fromEntries(['proposed','saved','review','unassigned','partner','later','postponed'].map(state=>[state,coverage.filter(o=>o.state===state).length]));
+ return {today,end,origin:WOODHAVEN,handover:POMONA,journeys:proposals,accepted,blocked,opportunities,future,directions,runs,partners,deferred,coverage,bookingCount,tripCount:coverage.length,coverageCounts};
 }
 module.exports={buildRuns,mapLinks,region,routeParts};

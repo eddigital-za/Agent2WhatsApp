@@ -281,10 +281,25 @@ function renderPlanning(){
   finally{busy=false;button.disabled=false;}
   await load({recorded:true});if(problem)$('notice').textContent=problem;
  };
+
+ if(execution.coverage){
+  const accounting=node('section',undefined,'plan-card');
+  accounting.append(node('h2',execution.bookingCount+' open orders accounted for'));
+  const counts=execution.coverageCounts;
+  accounting.append(node('p',[counts.proposed+' proposed',counts.saved+' saved', (counts.review+counts.unassigned+counts.partner+counts.later+counts.postponed)+' need a decision'].join(' · '),'plan-combine'));
+  const details=node('details',undefined,'order-panel');details.append(node('summary','Where each order is'));
+  const labels={proposed:'In a proposed trip',saved:'In your saved plan',review:'Needs review',unassigned:'Awaiting assignment',partner:'Partner-controlled',later:'Beyond 14 days',postponed:'Reminder postponed'};
+  for(const item of execution.coverage){
+   const row=node('div',undefined,'run-member');const button=node('button',item.label);button.type='button';button.onclick=()=>openMember(item);
+   row.append(button,node('small',labels[item.state]+(item.reason?' · '+item.reason:'')));details.append(row);
+  }
+  accounting.append(details);panel.append(accounting);
+ }
+
  const overview=node('div',undefined,'run-overview');
  for(const direction of execution.directions){
   const tile=node('div',undefined,'run-volume');
-  tile.append(node('strong',direction.route),node('span',direction.bikes+' bikes'+(direction.cars?' + '+direction.cars+' car'+(direction.cars===1?'':'s'):'')),node('small',direction.undated?direction.undated+' without a pickup date':'Pickup dates recorded'));
+  tile.append(node('strong',direction.route),node('span',direction.bikes+' bike'+(direction.bikes===1?'':'s')+(direction.cars?' + '+direction.cars+' car'+(direction.cars===1?'':'s'):'')),node('small',direction.undated?direction.undated+' without a pickup date':'Pickup dates recorded'));
   overview.append(tile);
  }
  panel.append(overview);
@@ -297,16 +312,28 @@ function renderPlanning(){
   const route=node('div',undefined,'run-route');route.setAttribute('aria-label',trip.route.join(' to '));
   trip.route.forEach((town,index)=>{if(index)route.append(node('span','→','run-arrow'));route.append(node('strong',town));});
   card.append(route,node('p',dateLabel(trip.start)+' to '+dateLabel(trip.end)+(trip.alternative?' · Choose this OR the Pomona handover plan':''),'sub'));
+  if(trip.replaces?.length)card.append(node('p','Extends your saved plan. Keeping this proposal replaces that plan and retains its orders.','plan-combine'));
+  if(trip.dateChanges?.length)card.append(node('p',trip.dateChanges.length+' booked stop dates need agreement. Proposed dates are shown below.','plan-problem'));
   if(trip.changed)card.append(node('p','An order, date or assignment changed. Release this saved plan and review a fresh proposal.','plan-problem'));
   if(trip.legs[0].from!=='Durban')card.append(node('p','Starts away from Woodhaven: positioning to '+trip.legs[0].from+' is still needed.','plan-problem'));
+
+  if(trip.maps?.length){
+   const maps=node('details',undefined,'order-panel');maps.append(node('summary','Map the whole trip'));
+   for(const map of trip.maps){const link=node('a',map.label);link.href=map.url;link.target='_blank';link.rel='noopener noreferrer';link.className='run-map';maps.append(link);}
+   card.append(maps);
+  }
+  if(trip.opportunities?.length){
+   const possible=node('details',undefined,'order-panel');possible.append(node('summary',trip.opportunities.length+' unassigned order'+(trip.opportunities.length===1?'':'s')+' could join this route'));
+   for(const item of trip.opportunities){const row=node('div',undefined,'run-member');const button=node('button',item.label);button.type='button';button.onclick=()=>openMember({ref:item.id.replace(/:[12]$/,''),trip:Number(item.id.at(-1))});row.append(button,node('small',item.from+' → '+item.to+' · assign BTSA and check space first'));possible.append(row);}card.append(possible);
+  }
   trip.legs.forEach((leg,index)=>{
    const block=node('div',undefined,'run-leg');block.style.borderLeft=index===0?'5px solid #008079':'5px solid #5969b5';
-   const heading=index===0?'OUTBOUND LOAD':leg.to===trip.route[0]?'RETURN LOAD':'ONWARD LOAD';
+   const heading=leg.reposition?'EMPTY POSITIONING':index===0?'OUTBOUND LOAD':leg.to===trip.route[0]?'RETURN LOAD':'ONWARD LOAD';
    block.append(node('p',heading+' · '+dateLabel(leg.date),'plan-day'),node('h3',leg.from+' → '+leg.to));
    block.append(node('strong',[leg.cars?leg.cars+' car':'',leg.bikes?leg.bikes+' bike'+(leg.bikes===1?'':'s'):''].filter(Boolean).join(' + ')+' · '+leg.trailer));
-   const slots=node('div',undefined,'run-slots');slots.setAttribute('aria-label',leg.bikes+' bike spaces used; '+leg.spare+' remaining');
+   const slots=node('div',undefined,'run-slots');slots.hidden=!!leg.reposition;slots.setAttribute('aria-label',leg.bikes+' bike spaces used; '+leg.spare+' remaining');
    for(let i=0;i<leg.capacity;i++)slots.append(node('span',i<leg.bikes?'●':'○',i<leg.bikes?'slot-used':'slot-free'));
-   block.append(slots,node('small',leg.spare+' bike space'+(leg.spare===1?'':'s')+' available'+(leg.cars?' with the car loaded':'')));
+   block.append(slots,node('small',leg.reposition?'Collect the next load at '+leg.to:leg.spare+' bike space'+(leg.spare===1?'':'s')+' available'+(leg.cars?' with the car loaded':'')));
    for(const member of leg.members){
     const row=node('div',undefined,'run-member');
     const button=node('button',member.label);button.type='button';button.onclick=()=>openMember(member);
@@ -321,8 +348,8 @@ function renderPlanning(){
    for(const warning of leg.warnings)detail.append(node('p',warning,'plan-problem'));
    const list=node('ol');
    for(const stop of leg.sequence){
-    const action=({'Start':'START','Pickup':'LOAD','Handover':'HANDOVER','Drop-off':'OFFLOAD'})[stop.kind]||stop.kind;
-    list.append(node('li',action+(stop.label?' · '+stop.label:'')+' · '+stop.address+' · '+dateLabel(stop.date)+(stop.time?' '+stop.time:'')+(stop.proposed?' (suggested)':'')));
+    const action=({'Start':'START','Pickup':'LOAD','Handover':'HANDOVER','Drop-off':'OFFLOAD','Reposition':'EMPTY TRAILER'})[stop.kind]||stop.kind;
+    list.append(node('li',action+(stop.label?' · '+stop.label:'')+' · '+stop.address+' · '+dateLabel(stop.date)+(stop.time?' '+stop.time:'')+(stop.bookedDate?' (booked '+dateLabel(stop.bookedDate)+'; change needs agreement)':stop.proposed?' (suggested)':'')));
    }
    detail.append(list);
    const links=node('div',undefined,'plan-actions');
@@ -334,7 +361,7 @@ function renderPlanning(){
    const back=execution.opportunities.filter(o=>o.from===last.to&&o.to===trip.route[0]);
    card.append(node('p',back.length?'Potential return: '+back.map(o=>o.label).join(', ')+'. Keep space in mind; assign BTSA before including.':'Return space is open. No compatible booked return load is included yet.','plan-combine'));
   }
-  const button=node('button',saved?'Release plan':'Keep this trip plan');button.type='button';button.className='run-keep';button.onclick=()=>save(trip,button,saved);card.append(button);
+  const button=node('button',saved?'Release plan':trip.replaces?.length?'Replace saved plan with this trip':'Keep this trip plan');button.type='button';button.className='run-keep';button.onclick=()=>save(trip,button,saved);card.append(button);
   return card;
  }
  const active=execution.accepted.filter(t=>!t.expired);
@@ -342,7 +369,7 @@ function renderPlanning(){
  panel.append(node('h2','Suggested trips'));
  if(!execution.journeys.length)panel.append(node('p',active.length?'All current loads are in your saved plans.':'No suitable load yet. Check the decisions below.'));
  for(const trip of execution.journeys)panel.append(tripCard(trip));
- const reviews=[...execution.blocked,...execution.opportunities];
+ const reviews=[...execution.blocked,...execution.opportunities,...(execution.partners||[]),...(execution.deferred||[])];
  if(reviews.length){
   const details=node('details',undefined,'order-panel');details.append(node('summary','Jobs needing a decision · '+reviews.length));
   for(const item of reviews){const row=node('div',undefined,'plan-bike');const button=node('button',item.label);button.type='button';button.onclick=()=>openMember({ref:item.id.replace(/:[12]$/,''),trip:Number(item.id.at(-1))});row.append(button,node('p',item.reason,'sub'));details.append(row);}panel.append(details);

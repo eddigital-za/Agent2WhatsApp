@@ -180,7 +180,13 @@ assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orde
 
  const proposal={id:'trip1',signature:'signature',route:['Durban','Johannesburg','Durban'],start:'2026-11-24',end:'2026-11-29',source:[{id:'SLA-501:1',signature:'source'}],legs:[{from:'Durban',to:'Johannesburg',date:'2026-11-24',end:'2026-11-26',cars:0,bikes:2,capacity:5,spare:3,trailer:'Own trailer',members:[{ref:'SLA-501',trip:1,label:'Bike A · John',finalTo:'Johannesburg',condition:'Suggested dates'}],sequence:[{kind:'Start',address:'Woodhaven',date:'2026-11-24'},{kind:'Pickup',label:'Bike A · John',address:'Test pickup',date:'2026-11-24',proposed:true}],maps:[{label:'Open map',url:'https://www.google.com/maps/dir/?api=1'}],warnings:[],proposed:true}]};
  context.fixture.planning={jobs:[],execution:{journeys:[proposal],accepted:[],blocked:[],opportunities:[],future:[],directions:[{route:'Durban → Johannesburg',bikes:2,cars:0,undated:1}]}};
+
+ context.fixture.planning.execution.coverage=[{id:'SLA-501:1',ref:'SLA-501',trip:1,label:'Bike A · John',state:'proposed',reason:''},{id:'SLA-502:1',ref:'SLA-502',trip:1,label:'Bike B · Jane',state:'partner',reason:'Partner-controlled'}];
+ context.fixture.planning.execution.bookingCount=13;
+ context.fixture.planning.execution.coverageCounts={proposed:5,saved:0,review:3,unassigned:2,partner:2,later:1,postponed:0};
  vm.runInContext("setView('planning')",context);
+ assert.ok($('planAhead').children.some(section=>section.children.some(child=>child.textContent==='13 open orders accounted for')));
+
  assert.equal($('planAhead').hidden,false);
  assert.equal($('calendar').hidden,true);
  const findCards=()=>$('planAhead').children.filter(child=>child.className==='plan-card trip-proposal');
