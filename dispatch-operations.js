@@ -12,6 +12,7 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
  CREATE TABLE IF NOT EXISTS dispatch_sequence(id INTEGER PRIMARY KEY CHECK(id=1),next_id INTEGER NOT NULL);
  INSERT OR IGNORE INTO dispatch_sequence VALUES(1,1000);
  CREATE TABLE IF NOT EXISTS dispatch_messages(id TEXT PRIMARY KEY,ref TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,text TEXT NOT NULL,created_at TEXT NOT NULL,reason TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS dispatch_run_plans(id TEXT PRIMARY KEY,data TEXT NOT NULL,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS dispatch_plan_decisions(id TEXT PRIMARY KEY,signature TEXT NOT NULL,state TEXT NOT NULL,until_day TEXT);
  CREATE TABLE IF NOT EXISTS dispatch_settings(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
  INSERT OR IGNORE INTO dispatch_settings VALUES(1,'{}');`);
@@ -111,7 +112,7 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
  function enrich(o){const today=domain.localDay(now());const evidence=db.prepare("SELECT SUM(CASE WHEN p.stage='collection' THEN 1 ELSE 0 END) collection,SUM(CASE WHEN p.stage='delivery' THEN 1 ELSE 0 END) delivery FROM proofs p JOIN orders r ON r.id=p.order_id WHERE r.external_id=? AND p.status='confirmed'").get(o.externalId);return {...o,evidence:{collection:Number(evidence.collection||0),delivery:Number(evidence.delivery||0)},missing:missing(o),collectionToday:!domain.closed(o.status)&&!['Collected','In Transit'].includes(o.status)&&!o.actualCollection&&o.collection?.date===today,collectionOverdue:!domain.closed(o.status)&&!['Collected','In Transit'].includes(o.status)&&!o.actualCollection&&!!o.collection?.date&&o.collection.date<today,deliveryToday:!domain.closed(o.status)&&o.delivery?.date===today,followUpDue:!domain.closed(o.status)&&!!o.followUpAt&&(o.followUpAt.length>10?new Date(o.followUpAt+':00+02:00')<=new Date(now()):o.followUpAt<=today),needsAttention:o.syncState!=='synced'||missing(o).length>0||!!o.nextAction};}
  function inbox(id,source,value,ref,error){db.prepare('INSERT OR IGNORE INTO dispatch_inbox(id,at,source,text,error,ref) VALUES(?,?,?,?,?,?)').run(id,now(),source,text(value,20000),error||'Needs review',ref||null);}
  function details(ref){const o=get(ref);if(!o)return null;const events=db.prepare('SELECT * FROM dispatch_events WHERE ref=? ORDER BY id DESC LIMIT 150').all(ref).map(e=>({...e,details:JSON.parse(e.details)}));const legacy=db.prepare('SELECT id FROM orders WHERE external_id=?').get(ref);const proofs=legacy?db.prepare('SELECT id,stage,status,created_at,mime_type,filename FROM proofs WHERE order_id=? ORDER BY id DESC').all(legacy.id):[];return {order:enrich(o),events,proofs,messages:db.prepare('SELECT * FROM dispatch_messages WHERE ref=? ORDER BY created_at DESC').all(ref).map(message=>message.state==='awaiting_approval'?{...message,customerText:domain.customerUpdateText(message)}:message)};}
- function planning(){return planAhead(all(),db.prepare('SELECT * FROM dispatch_plan_decisions').all(),now());}
+ function planning(){return planAhead(all(),db.prepare('SELECT * FROM dispatch_plan_decisions').all(),now(),db.prepare('SELECT data FROM dispatch_run_plans ORDER BY created_at DESC').all().map(row=>JSON.parse(row.data)));}
  function decidePlan(id,signature,state){
   const job=planning().jobs.find(job=>job.id===id);
   if(!job||job.signature!==signature)throw Object.assign(Error('This trip changed. Review the latest details.'),{status:409});
@@ -121,8 +122,22 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
   emit(job.ref,'dashboard','trip_planning_updated',{trip:job.trip,state,until});
   return planning();
  }
+
+ function keepRun(id,signature,remove=false){
+  if(typeof id!=='string'||typeof signature!=='string')throw Object.assign(Error('Choose the latest trip proposal.'),{status:400});
+  const existing=db.prepare('SELECT data FROM dispatch_run_plans WHERE id=?').get(id);
+  if(remove){if(!existing)throw Object.assign(Error('Saved plan not found.'),{status:404});const saved=JSON.parse(existing.data);if(saved.signature!==signature)throw Object.assign(Error('This saved plan changed. Refresh and review it.'),{status:409});db.prepare('DELETE FROM dispatch_run_plans WHERE id=?').run(id);return planning();}
+  if(existing){if(JSON.parse(existing.data).signature!==signature)throw Object.assign(Error('This plan changed.'),{status:409});return planning();}
+  const proposal=planning().execution.journeys.find(j=>j.id===id);
+  if(!proposal||proposal.signature!==signature)throw Object.assign(Error('The load or dates changed. Review the latest proposal.'),{status:409});
+  db.prepare('INSERT INTO dispatch_run_plans VALUES(?,?,?)').run(id,JSON.stringify(proposal),now());
+  emit(null,'dashboard','run_plan_kept',{id,route:proposal.route,jobs:proposal.source.map(s=>s.id)});
+  return planning();
+ }
+
  function install(app,auth){const route=(method,url,handler)=>app[method](url,auth,async(req,res)=>{res.set?.('Cache-Control','no-store');try{res.json(await handler(req));}catch(e){res.status(e.status||500).json({error:e.message});}});
   route('get','/dispatch/workspace',async req=>{let warning='';try{if(req.query?.recorded!=='1')await serial(refresh);}catch(e){warning='Showing recorded orders; sheet unavailable: '+e.message;}return {planning:planning(),orders:all().map(enrich),statuses:domain.STATUSES,contractors,inbox:db.prepare("SELECT * FROM dispatch_inbox WHERE state='attention' ORDER BY at DESC LIMIT 100").all(),warning,unmatchedProofs:db.prepare("SELECT p.id,p.stage,p.status,p.created_at,p.filename,r.external_id AS ref FROM proofs p LEFT JOIN orders r ON r.id=p.order_id WHERE p.order_id IS NULL OR p.status IN ('awaiting_confirmation','awaiting_stage') ORDER BY p.id DESC LIMIT 100").all(),settings:JSON.parse(db.prepare('SELECT data FROM dispatch_settings WHERE id=1').get().data),readOnlyCustomerMessaging:true};});
+  route('post','/dispatch/run-plan',req=>keepRun(req.body.id,req.body.signature,req.body.remove===true));
   route('post','/dispatch/plan',req=>decidePlan(req.body.id,req.body.signature,req.body.state));
   route('get','/dispatch/order/:ref',req=>{const d=details(req.params.ref);if(!d)throw Object.assign(Error('Order not found'),{status:404});return d;});
   route('post','/dispatch/manual',req=>createAndSync(req.body.order,req.body.requestKey));
@@ -136,6 +151,6 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
   route('post','/dispatch/resolve/:id',req=>{const i=db.prepare('SELECT * FROM dispatch_inbox WHERE id=?').get(req.params.id);if(!i)throw Object.assign(Error('Issue not found'),{status:404});if(i.ref&&get(i.ref)?.syncState!=='synced')throw Object.assign(Error('Resolve the sheet conflict before dismissing this issue.'),{status:409});db.prepare("UPDATE dispatch_inbox SET state='resolved' WHERE id=?").run(i.id);emit(i.ref,'dashboard','issue_resolved',{id:i.id});return {success:true};});
   route('post','/dispatch/reconcile/:ref',req=>serial(async()=>{const o=get(req.params.ref);if(!o||o.version!==Number(req.body.version))throw Object.assign(Error('Order changed. Refresh first.'),{status:409});const rows=await sheet.read(),found=rows.filter(r=>rowRef(r)===o.externalId);if(found.length!==1)throw Object.assign(Error('Resolve missing/duplicate sheet reference first.'),{status:409});const remote=fromRow(found[0]);if(req.body.choice==='sheet'){if(domain.closed(o.status)&&!domain.closed(remote.status)&&!req.body.reopen)throw Object.assign(Error('Explicitly confirm reopening this closed order.'),{status:409});save({...o,...Object.fromEntries(['status','contractor','route','clientName','company','phone','email','bike','collectionContact','collectionPhone','collectionAddress','deliveryContact','deliveryPhone','deliveryAddress','sourceId','invoiceRef'].map(k=>[k,remote[k]])),sheetExpected:remote.sheetExpected,sheetCells:remote.sheetCells,pendingCells:{}},'synced');}else if(req.body.choice==='recorded'){save({...o,sheetExpected:remote.sheetExpected,sheetCells:remote.sheetCells},'pending');await flushOne(o.externalId);}else throw Object.assign(Error('Choose sheet or recorded values.'),{status:400});emit(o.externalId,'dashboard','conflict_reconciled',{choice:req.body.choice});return get(o.externalId);}));
  }
- return {planning,decidePlan,get,all,save,queueMessages,queueDeliverySchedule,project,emit,issue,inbox,update,createAndSync,flush,flushOne,refresh,reconcile,install,details,enrich,serial,fromRow,missing};
+ return {planning,decidePlan,keepRun,get,all,save,queueMessages,queueDeliverySchedule,project,emit,issue,inbox,update,createAndSync,flush,flushOne,refresh,reconcile,install,details,enrich,serial,fromRow,missing};
 }
 module.exports={createOperations,internalStatus};

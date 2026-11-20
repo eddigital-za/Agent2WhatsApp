@@ -20,8 +20,8 @@ function stopBounds(stop) {
  const windows={morning:['06:00','11:59'],afternoon:['12:00','17:59'],evening:['18:00','23:59']};
  return windows[String(stop.window||'').toLowerCase()]||['00:00','23:59'];
 }
-function planAhead(orders, decisions=[], instant=new Date().toISOString()) {
- const today=localDay(instant), end=addDays(today,7), jobs=[];
+function planAhead(orders, decisions=[], instant=new Date().toISOString(),kept=[]) {
+ const today=localDay(instant), end=addDays(today,14), jobs=[];
  const saved=new Map(decisions.map(row=>[row.id,row]));
  for(const order of orders) {
   if(order.status==='Duplicate')continue;
@@ -103,24 +103,17 @@ function planAhead(orders, decisions=[], instant=new Date().toISOString()) {
   if(!chronological)continue;
   suggestions.push({route:members[0].route,date:members[0].stops[0].date,jobs:members.map(job=>job.id),sequence});
  }
- return {today,end,jobs,suggestions,execution:buildRuns(jobs,today)};
+ return {today,end,jobs,suggestions,execution:buildRuns(orders,today,decisions,kept)};
 }
 function planningBrief(plan) {
- const pending=plan.jobs.filter(job=>!job.acknowledged);
- if(!pending.length)return '';
- const own=pending.filter(job=>job.own||job.mixed);
- const partners=pending.length-own.length;
- const lines=['','🗓 *PLAN AHEAD · NEXT 7 DAYS*'];
- for(const job of own.slice(0,4)) {
-  const stops=job.upcoming.map(stop=>stop.kind+' '+stop.date.slice(5).split('-').reverse().join('/')+(stop.time?' '+stop.time:'')).join(' · ');
-  lines.push('*'+job.label.replace(/[*_~]/g,'')+'* · '+job.route);
-  lines.push([job.changed?'Planned trip changed':'',stops,job.reasons.join(' · ')].filter(Boolean).join(' · '));
+ const proposals=plan.execution?.journeys||[];
+ if(!proposals.length)return '';
+ const lines=['','🗓 *BTSA TRIP IDEAS · NEXT 14 DAYS*'];
+ for(const trip of proposals.filter(t=>!t.alternative).slice(0,2)){
+  lines.push('*'+trip.route.join(' → ')+'*');
+  lines.push(trip.bikes+' bike'+(trip.bikes===1?'':'s')+(trip.cars?' · '+trip.cars+' cars':'')+' · proposed '+trip.start.slice(5).split('-').reverse().join('/'));
  }
- if(own.length>4)lines.push((own.length-4)+' more BTSA jobs in Dispatch');
- if(plan.execution?.runs.length)lines.push(plan.execution.runs.length+' BTSA load plan(s), with maps, in Dispatch');
- if(plan.suggestions.length)lines.push(plan.suggestions.length+' possible combined BTSA run'+(plan.suggestions.length===1?'':'s')+' in Dispatch');
- if(partners)lines.push(partners+' partner job'+(partners===1?'':'s')+' for awareness');
- lines.push('Review, mark Planned or remind tomorrow in Dispatch.');
+ lines.push('Loads, return opportunities and maps in Dispatch. Dates are proposals until agreed.');
  return lines.join('\n');
 }
 module.exports={planAhead,planningBrief,addDays};

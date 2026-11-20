@@ -45,9 +45,9 @@ assert.equal(planAhead(orders,[{...decisions[0],state:'snoozed',until_day:'2026-
 assert.equal(planAhead(orders,[{...decisions[0],state:'snoozed',until_day:'2026-11-19'}],now).jobs.find(j=>j.id===saved.id).acknowledged,false);
 const cancelled=orders.map(j=>j.externalId==='SLA-1'?{...j,status:'Cancelled'}:j);
 assert.equal(planAhead(cancelled,decisions,now).jobs.find(j=>j.id===saved.id).changed,true);
-assert.match(planningBrief(plan),/PLAN AHEAD/);
-assert.match(planningBrief(plan),/partner job/);
-assert.equal(planningBrief({...plan,jobs:plan.jobs.map(j=>({...j,acknowledged:true}))}),'');
+assert.match(planningBrief(plan),/BTSA TRIP IDEAS/);
+assert.match(planningBrief(plan),/NEXT 14 DAYS/);
+assert.equal(planningBrief({...plan,execution:{journeys:[]}}),'');
 assert.equal(planAhead([job('W',{collection:{...eta('2026-11-20'),window:'afternoon'},delivery:{...eta('2026-11-20'),window:'morning'}})],[],now).jobs[0].reasons.some(reason=>reason.includes('is before pickup')),true);
 assert.equal(planAhead([job('X',{delivery:eta('2026-11-19')})],[],now).suggestions.length,0);
 
@@ -76,6 +76,25 @@ assert.equal(planAhead([job('X',{delivery:eta('2026-11-19')})],[],now).suggestio
  await routes['/dispatch/workspace']({query:{recorded:'1'}},res);
  assert.ok(result.planning);
  assert.equal(rows.length,prior);
+
+ const second=await ops.createAndSync({bike:'Honda CBR',clientName:'Jane Test',route:'DBN to JHB',contractor:'BTSA'},'run-plan-safe-test');
+ const proposed=ops.planning().execution.journeys.find(j=>j.source.some(s=>s.id===second.externalId+':1'));
+ assert.ok(proposed);
+ const baseline=JSON.stringify(ops.get(second.externalId));
+ const messageCount=db.prepare('SELECT COUNT(*) n FROM dispatch_messages').get().n;
+ await routes['/dispatch/run-plan']({body:{id:proposed.id,signature:proposed.signature}},res);
+ assert.equal(result.execution.accepted.length,1);
+ assert.equal(JSON.stringify(ops.get(second.externalId)),baseline);
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM dispatch_messages').get().n,messageCount);
+ assert.equal(ops.planning().execution.accepted[0].id,proposed.id);
+ assert.equal(ops.keepRun(proposed.id,proposed.signature).execution.accepted.length,1);
+ ops.update(second.externalId,{bike:'Yamaha XT'},ops.get(second.externalId).version);
+ assert.equal(ops.planning().execution.accepted[0].changed,true);
+ assert.throws(()=>ops.keepRun(proposed.id,'wrong',true),/changed/);
+ ops.keepRun(proposed.id,proposed.signature,true);
+ assert.equal(ops.planning().execution.accepted.length,0);
+ assert.throws(()=>ops.keepRun(proposed.id,proposed.signature),/changed/);
  db.close();
  console.log('PASS: planning, corridor/date grouping, stop precedence, partner limits, returns, no invented dates, durable actions, changed plans and authenticated route handlers. Fake bookings only.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
+
