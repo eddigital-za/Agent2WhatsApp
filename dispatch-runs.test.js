@@ -43,4 +43,10 @@ assert.equal(new URL(maps[0].url).searchParams.get('destination'),new URL(maps[1
 p=plan([order(1,{bike:'BAJAJ Qute',route:'JHB to Hoedspruit',collection:eta('2026-11-24')}),order(2,{route:'Montana to Malelane',collection:eta('2026-11-24')})]);
 assert.equal(p.runs.length,1);assert.equal(p.runs[0].to,'Lowveld');assert.equal(p.runs[0].cars,1);assert.equal(p.runs[0].bikes,1);
 assert.ok(p.journeys.every(j=>j.start<=p.end));
+
+const withExtra=[...mixed,order(99)];
+const direct=plan(withExtra).journeys.find(j=>j.alternative);
+const afterDirect=plan(withExtra,[direct]);
+assert.ok(afterDirect.journeys.some(j=>j.source.some(s=>s.id==='SLA-99:1')));
+assert.ok(afterDirect.journeys.every(j=>j.source.every(s=>!direct.source.some(saved=>saved.id===s.id))));
 console.log('PASS: undated fill, mixed Pomona split, direct Cape alternative, three-leg circuits, independent returns, capacity splitting, commitment boundaries, saved plan changes and mobile Maps. Fake bookings only.');

@@ -54,8 +54,10 @@ function mapLinks(stops){
 
 function buildRuns(orders,today,decisions=[],kept=[]){
  const end=day(today,14),all=expand(orders),candidates=[],blocked=[],opportunities=[],future=[];
+ const savedIds=new Set(kept.filter(p=>p.end>=today).flatMap(p=>p.source.map(s=>s.id)));
  const snoozed=new Set(decisions.filter(d=>d.state==='snoozed'&&d.until_day>today).map(d=>d.id));
  for(const o of all){
+  if(savedIds.has(o.id))continue;
   const carriers=String(o.contractor||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
   const own=carriers.length===1&&carriers[0]==='btsa',mixed=carriers.includes('btsa')&&carriers.some(s=>/cheet/.test(s));
   const parts=routeParts(o.route);
