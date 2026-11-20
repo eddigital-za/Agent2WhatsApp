@@ -1,5 +1,6 @@
 'use strict';
 const crypto=require('node:crypto');
+const {nearby,orderStops,generateOptions}=require('./dispatch-route-options');
 const {closed,customerFirstName}=require('./dispatch-domain');
 const WOODHAVEN='Woodhaven, Durban, South Africa';
 const POMONA='Cheetah Express Depot, Pomona, Kempton Park, South Africa';
@@ -63,7 +64,7 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   const from=region(parts[0])||region(o.collectionAddress)||named(parts[0]),to=region(parts.at(-1))||region(o.deliveryAddress)||named(parts.at(-1));
   const label=o.label,id=o.id;
   const load=vehicle(o),sourceSignature=fingerprint(o);
-  if(!own&&!mixed){const item={id,label,from,to,load,reason:carriers.length?'Partner-controlled: '+o.contractor+'; confirm a BTSA leg before including':'Unassigned: assign BTSA before including'};(carriers.length?partners:opportunities).push(item);continue;}
+  if(!own&&!mixed){const item={id,label,from,to,load,reason:carriers.length?'Partner-controlled: '+o.contractor+'; confirm a BTSA leg before including':'Unassigned: assign BTSA before including'};(carriers.length?partners:opportunities).push(item);}
   if(snoozed.has(id)){deferred.push({id,label,reason:'Reminder postponed until tomorrow'});continue;}
   let reason='';
   if(o.status==='Paused')reason='Paused booking: confirm it is ready before including';
@@ -80,7 +81,8 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   if(!reason&&fixedPickup&&fixedDrop&&(fixedDrop<fixedPickup||fixedDrop===fixedPickup&&o.collection?.time&&o.delivery?.time&&o.delivery.time<o.collection.time))reason='Delivery is before collection';
   if(reason){blocked.push({id,label,reason});continue;}
   if(fixedPickup>end){future.push({id,label,date:fixedPickup,from,to});continue;}
-  let legFrom=from,legTo=to,partner='';
+  const assignmentRequired=!own&&!mixed;
+  let legFrom=from,legTo=to,partner=assignmentRequired?(carriers.length?'Proposed BTSA takeover: agree release and timing with '+o.contractor:'Unassigned booking: BTSA assignment needs agreement'):'';
   if(mixed){
    if(from==='Durban'&&to!=='Johannesburg'){legTo='Johannesburg';partner='Proposed BTSA handover at Pomona; Cheetah onward dates need confirmation';}
    else if(to==='Durban'&&from!=='Johannesburg'){legFrom='Johannesburg';partner='Cheetah must confirm arrival at Pomona before BTSA loads';}
@@ -89,14 +91,14 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   const pickupAddress=legFrom===from?(o.collectionAddress||from+', South Africa'):POMONA;
   const dropAddress=legTo===to?(o.deliveryAddress||to+', South Africa'):POMONA;
   // Mixed-trip final delivery is not a promise that the BTSA handover happens that day.
-  candidates.push({id,ref:o.externalId,trip:o.trip,label,from:legFrom,to:legTo,finalTo:to,load,pickup:legFrom===from?fixedPickup:'',deadline:fixedDrop,delivery:legTo===to?fixedDrop:'',pickupAddress,dropAddress,pickupTime:o.collection?.time||'',deliveryTime:o.delivery?.time||'',partner,sourceSignature,priority:fixedDrop||fixedPickup||end,condition:mixed?'Partner confirmation needed':!fixedPickup||!fixedDrop?'Suggested dates':'Booked dates',original:o});
+  candidates.push({id,ref:o.externalId,trip:o.trip,label,from:legFrom,to:legTo,finalTo:to,load,pickup:legFrom===from?fixedPickup:'',deadline:fixedDrop,delivery:legTo===to?fixedDrop:'',pickupAddress,dropAddress,pickupTime:o.collection?.time||'',deliveryTime:o.delivery?.time||'',partner,sourceSignature,assignmentRequired,priority:fixedDrop||fixedPickup||end,condition:assignmentRequired?'BTSA assignment needs agreement':mixed?'Partner confirmation needed':!fixedPickup||!fixedDrop?'Suggested dates':'Booked dates',original:o});
  }
  const groups=[];
  const sorted=candidates.sort((a,b)=>Number(!a.pickup)-Number(!b.pickup)||a.priority.localeCompare(b.priority)||a.label.localeCompare(b.label));
  for(const item of sorted){
-  const destination=item.from==='Johannesburg'&&['Hoedspruit','Malelane'].includes(item.to)?'Lowveld':item.to;
+  const destination=item.to;
   const days=allowance(item.from,destination);
-  let group=groups.find(g=>g.from===item.from&&g.to===destination&&(!item.pickup||g.date===item.pickup)&&(!item.deadline||g.date<=item.deadline));
+  let group=groups.find(g=>g.from===item.from&&(g.to===destination||g.items.every(member=>nearby(member.to,destination)))&&(!item.pickup||g.date===item.pickup)&&(!item.deadline||g.date<=item.deadline));
   if(!group){
    const target=item.pickup||(item.deadline?day(item.deadline,-days):day(today,7));
    group={from:item.from,to:destination,date:target<today?today:target>end?day(today,7):target,items:[]};groups.push(group);
@@ -104,7 +106,7 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   group.items.push(item);
  }
  function makeRun(items,from,to,date,alternative=false){
-  items=[...items].sort((a,b)=>to==='Lowveld'?(['Malelane','Hoedspruit'].indexOf(a.to)-['Malelane','Hoedspruit'].indexOf(b.to)):0);
+  items=orderStops(items,from);to=items.at(-1).to;
   const days=allowance(from,to);
   const booked=items.map(i=>i.delivery).filter(Boolean).sort();
   const arrival=booked.at(-1)||day(date,days);
@@ -126,7 +128,7 @@ function buildRuns(orders,today,decisions=[],kept=[]){
     sequence.push({kind:'Handover',address:leg.to||POMONA,label:i.label,jobId:i.id,date:handoverDate,time,proposed:leg.handoverConfidence!=='confirmed'});
    }
   }
-  for(const i of items)sequence.push({kind:i.partner&&to==='Johannesburg'?'Handover':'Drop-off',address:i.dropAddress,label:i.label,jobId:i.id,date:i.delivery||arrival,time:i.deliveryTime,proposed:!i.delivery});
+  for(const i of items)sequence.push({kind:i.partner&&!i.assignmentRequired&&!i.directMode&&to==='Johannesburg'?'Handover':'Drop-off',address:i.dropAddress,label:i.label,jobId:i.id,date:i.delivery||arrival,time:i.deliveryTime,proposed:!i.delivery});
   const source=items.map(i=>({id:i.id,signature:i.sourceSignature}));
   const id=hash([from,to,date,items.map(i=>i.id).sort(),alternative]).slice(0,24);
   const signature=hash([source,date,arrival,alternative]);
@@ -146,18 +148,26 @@ function buildRuns(orders,today,decisions=[],kept=[]){
    runs.push(makeRun(members,group.from,group.to,group.date));
   }
  }
- // Offer direct Cape Town only as an alternative to the same Pomona load, never as extra booked volume.
+
+ // Shared-booking handovers and direct BTSA carriage are competing cargo variants.
+ // Every destination is evaluated; no threshold or named route is privileged.
  const alternatives=[];
  for(const run of runs){
-  const cape=run.members.filter(i=>i.partner&&i.from==='Durban'&&i.finalTo==='Cape Town');
-  if(cape.reduce((n,i)=>n+i.load.bikes,0)<5)continue;
-  const items=cape.map(i=>({...i,to:'Cape Town',dropAddress:candidates.find(c=>c.id===i.id).original.deliveryAddress||'Cape Town, South Africa',delivery:i.deadline,partner:'Alternative to Pomona handover: confirm Cheetah is no longer handling this leg'}));
-  const direct=makeRun(items,'Durban','Cape Town',run.date,true);direct.alternativeTo=run.id;alternatives.push(direct);
+   const variants=new Map();
+  for(const i of run.members.filter(i=>i.partner&&!i.assignmentRequired)){
+   const original=candidates.find(c=>c.id===i.id).original,parts=routeParts(original.route);
+   const from=region(parts[0])||parts[0],to=region(parts.at(-1))||parts.at(-1);
+   if(from===i.from&&to===i.to)continue;
+   const key=from+'|'+to;
+   if(!variants.has(key))variants.set(key,[]);
+   variants.get(key).push({...i,from,to,directMode:true,assignmentRequired:true,pickup:original.collection?.confidence==='confirmed'?original.collection.date:'',delivery:original.delivery?.confidence==='confirmed'?original.delivery.date:'',pickupAddress:original.collectionAddress||from+', South Africa',dropAddress:original.deliveryAddress||to+', South Africa',partner:'Direct BTSA option: agree the change with the assigned partner',condition:'Direct BTSA option · assignment needs agreement'});
+  }
+  for(const items of variants.values()){
+   const direct=makeRun(items,items[0].from,items[0].to,run.date,true);direct.directVariant=true;alternatives.push(direct);
+  }
  }
- runs.sort((a,b)=>a.date.localeCompare(b.date)||a.priority.localeCompare(b.priority)||b.bikes-a.bikes);
-
  // Draft circuits can propose changed dates, but never write those dates to bookings.
- const journeys=[],used=new Set();
+ 
  function align(run,ready){
   const originalDate=run.date;
   const date=run.date<ready?ready:run.date;
@@ -169,8 +179,8 @@ function buildRuns(orders,today,decisions=[],kept=[]){
    if(stop.kind==='Start'||stop.kind==='Pickup')proposed=date;
    else if(stop.date<date||stop.kind==='Drop-off'||stop.kind==='Handover')proposed=finish;
    if(proposed!==stop.date){
-    if(!stop.proposed)changes.push({jobId:stop.jobId,kind:stop.kind,booked:stop.date,proposed});
-    return {...stop,bookedDate:stop.proposed?undefined:stop.date,date:proposed,proposed:true};
+    if(!stop.proposed&&stop.jobId&&stop.kind!=='Start')changes.push({jobId:stop.jobId,kind:stop.kind,booked:stop.date,proposed});
+    return {...stop,bookedDate:stop.proposed||!stop.jobId||stop.kind==='Start'?undefined:stop.date,date:proposed,proposed:true};
    }
    return stop;
   });
@@ -182,45 +192,8 @@ function buildRuns(orders,today,decisions=[],kept=[]){
   run.signature=hash([run.source,run.date,run.end,run.sequence]);
  }
  const hubAddress=town=>town==='Johannesburg'?POMONA:town==='Durban'?WOODHAVEN:town+', South Africa';
- function emptyLeg(last,to){
-  const from=last.to,actual=last.towns?.at(-1)||from,date=last.end,finish=day(date,1);
-  const stops=[{kind:'Start',address:last.sequence.at(-1).address,date},{kind:'Reposition',address:hubAddress(to),date:finish,proposed:true}];
-  return {id:'empty-'+last.id+'-'+to,signature:hash([from,to,date]),from,to,towns:[actual,to],date,end:finish,jobs:[],members:[],source:[],bikes:0,cars:0,capacity:0,spare:0,trailer:'Empty trailer',warnings:['Empty positioning leg to collect the next load. Check road timing in Maps.'],sequence:stops,maps:mapLinks(stops),reposition:true,proposed:true};
- }
- // ponytail: regional circuit sequencing, not road-distance optimisation. Maps provides the road route.
- const starts=[...runs.filter(r=>r.from==='Durban'),...runs.filter(r=>r.from!=='Durban')];
- for(const start of starts){
-  if(used.has(start.id))continue;
-  align(start,today);
-  const legs=[start];used.add(start.id);
-  for(let count=0;count<runs.length*2;count++){
-   const last=legs.at(-1),home=start.from;
-   if(last.to===home)break;
-   const choices=runs.filter(r=>!used.has(r.id)&&r.from===last.to);
-   // At Pomona, finish the Lowveld excursion before returning to Durban.
-   choices.sort((a,b)=>{
-    const rank=r=>r.to==='Lowveld'&&r.from==='Johannesburg'?0:r.to===home?2:runs.some(onward=>!used.has(onward.id)&&onward.from===r.to&&onward.to===home)?1:3;
-    return rank(a)-rank(b)||a.priority.localeCompare(b.priority)||b.bikes-a.bikes;
-   });
-   let next=choices.find(r=>(r.date>last.end?r.date:last.end)<=end);
-   if(!next){
-    // Connect a regional offload back to the next booked loading hub, instead of
-    // pretending the trailer is already there or starting a second Durban trip.
-    const backHub=legs.slice().reverse().map(r=>r.from).find(hub=>hub!==home&&runs.some(r=>!used.has(r.id)&&r.from===hub));
-    if(backHub&&last.end<end){legs.push(emptyLeg(last,backHub));continue;}
-    break;
-   }
-   align(next,last.end);
-   legs.push(next);used.add(next.id);
-  }
-  const source=legs.flatMap(r=>r.source);
-  const id=hash(legs.map(r=>r.id)).slice(0,24),signature=hash(legs.map(r=>r.signature));
-  const route=[];
-  for(const leg of legs)for(const town of leg.towns||[leg.from,leg.to])if(route.at(-1)!==town)route.push(town);
-  const dateChanges=legs.flatMap(r=>r.dateChanges||[]);
-  journeys.push({id,signature,legs,source,start:legs[0].date,end:legs.at(-1).end,route,dateChanges,bikes:legs.reduce((n,r)=>n+r.bikes,0),cars:legs.reduce((n,r)=>n+r.cars,0),alternative:false});
- }
- for(const run of alternatives)journeys.push({id:run.id,signature:run.signature,legs:[run],source:run.source,start:run.date,end:run.end,route:[run.from,run.to],bikes:run.bikes,cars:run.cars,alternative:true,alternativeTo:run.alternativeTo});
+ // Recompute ranked circuits from every current load and its direct variants.
+ const journeys=generateOptions([...runs,...alternatives],today,end,{day,hash,mapLinks,align,hubAddress});
  const current=new Map(all.map(o=>[o.id,fingerprint(o)]));
  const accepted=kept.map(plan=>({...plan,changed:plan.source.some(s=>current.get(s.id)!==s.signature),expired:plan.end<today}));
  const proposals=journeys.filter(j=>{
@@ -238,7 +211,7 @@ function buildRuns(orders,today,decisions=[],kept=[]){
 
  for(const proposal of proposals){
   proposal.maps=mapLinks(proposal.legs.flatMap(leg=>leg.sequence));
-  proposal.opportunities=opportunities.filter(o=>proposal.legs.some(leg=>leg.from===o.from&&(leg.to===o.to||leg.from==='Cape Town'&&leg.to==='Durban'&&o.to==='George'||leg.to==='Lowveld'&&['Malelane','Hoedspruit'].includes(o.to))));
+  proposal.opportunities=opportunities.filter(o=>proposal.legs.some(leg=>leg.from===o.from&&(leg.to===o.to||nearby(leg.to,o.to))));
  }
  const planned=new Set(proposals.filter(p=>!p.alternative).flatMap(p=>p.source.map(s=>s.id)));
  const saved=new Set(accepted.filter(p=>!p.expired).flatMap(p=>p.source.map(s=>s.id)));

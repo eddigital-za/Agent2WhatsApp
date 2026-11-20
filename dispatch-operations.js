@@ -127,9 +127,9 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
   if(typeof id!=='string'||typeof signature!=='string')throw Object.assign(Error('Choose the latest trip proposal.'),{status:400});
   const existing=db.prepare('SELECT data FROM dispatch_run_plans WHERE id=?').get(id);
   if(remove){if(!existing)throw Object.assign(Error('Saved plan not found.'),{status:404});const saved=JSON.parse(existing.data);if(saved.signature!==signature)throw Object.assign(Error('This saved plan changed. Refresh and review it.'),{status:409});db.prepare('DELETE FROM dispatch_run_plans WHERE id=?').run(id);return planning();}
-  if(existing){if(JSON.parse(existing.data).signature!==signature)throw Object.assign(Error('This plan changed.'),{status:409});return planning();}
+  if(existing&&JSON.parse(existing.data).signature===signature)return planning();
   const proposal=planning().execution.journeys.find(j=>j.id===id);
-  if(!proposal||proposal.signature!==signature)throw Object.assign(Error('The load or dates changed. Review the latest proposal.'),{status:409});
+  if(!proposal||proposal.signature!==signature||existing&&!proposal.replaces?.includes(id))throw Object.assign(Error('The load or dates changed. Review the latest proposal.'),{status:409});
   db.exec('BEGIN IMMEDIATE');
   try{
    for(const replaced of proposal.replaces||[])db.prepare('DELETE FROM dispatch_run_plans WHERE id=?').run(replaced);
@@ -157,7 +157,7 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
   route('post','/dispatch/reconcile/:ref',req=>serial(async()=>{const o=get(req.params.ref);if(!o||o.version!==Number(req.body.version))throw Object.assign(Error('Order changed. Refresh first.'),{status:409});const rows=await sheet.read(),found=rows.filter(r=>rowRef(r)===o.externalId);if(found.length!==1)throw Object.assign(Error('Resolve missing/duplicate sheet reference first.'),{status:409});const remote=fromRow(found[0]);if(req.body.choice==='sheet'){if(domain.closed(o.status)&&!domain.closed(remote.status)&&!req.body.reopen)throw Object.assign(Error('Explicitly confirm reopening this closed order.'),{status:409});save({...o,...Object.fromEntries(['status','contractor','route','clientName','company','phone','email','bike','collectionContact','collectionPhone','collectionAddress','deliveryContact','deliveryPhone','deliveryAddress','sourceId','invoiceRef'].map(k=>[k,remote[k]])),sheetExpected:remote.sheetExpected,sheetCells:remote.sheetCells,pendingCells:{}},'synced');}else if(req.body.choice==='recorded'){save({...o,sheetExpected:remote.sheetExpected,sheetCells:remote.sheetCells},'pending');await flushOne(o.externalId);}else throw Object.assign(Error('Choose sheet or recorded values.'),{status:400});emit(o.externalId,'dashboard','conflict_reconciled',{choice:req.body.choice});return get(o.externalId);}));
  }
  queueMicrotask(()=>{
-  try{const e=planning().execution;console.info('Dispatch planning coverage',JSON.stringify({bookings:e.bookingCount,trips:e.tripCount,...e.coverageCounts}));}
+  try{const e=planning().execution;console.info('Dispatch planning coverage',JSON.stringify({bookings:e.bookingCount,trips:e.tripCount,...e.coverageCounts,options:e.journeys.length,circuits:e.journeys.map(j=>({route:j.route,orders:j.source.length,alternative:j.alternative}))}));}
   catch(error){console.error('Dispatch planning coverage unavailable:',error.message);}
  });
  return {planning,decidePlan,keepRun,get,all,save,queueMessages,queueDeliverySchedule,project,emit,issue,inbox,update,createAndSync,flush,flushOne,refresh,reconcile,install,details,enrich,serial,fromRow,missing};

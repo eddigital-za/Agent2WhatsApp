@@ -74,6 +74,7 @@
 
 .run-overview{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}.run-volume{display:grid;gap:5px;flex:1 1 180px;padding:14px;border-radius:12px;background:#e5f3ef;color:#154b43}.run-route{display:flex;align-items:center;flex-wrap:wrap;gap:10px;font-size:1.35rem;line-height:1.5}.run-arrow{color:#00847d}.run-leg{margin-top:14px;padding:16px;background:#f4f8fa;border-radius:12px}.run-leg h3{margin:4px 0 12px}.run-slots{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 4px}.run-slots span{font-size:1.25rem;min-width:22px;text-align:center}.slot-used{color:#008079}.slot-free{color:#71878a}.run-member{display:flex;flex-direction:column;gap:4px;margin-top:12px}.run-member button{text-align:left;padding:12px;white-space:normal}.run-keep{width:100%;margin-top:14px;background:#007e78;color:#fff;font-weight:700}.run-map{display:inline-block;padding:12px;border:1px solid #bfd1d5;border-radius:9px;color:#125d72}.trip-proposal>p{margin:10px 0}.run-leg li{margin-bottom:12px}.run-leg .order-panel{margin-top:14px}@media(max-width:600px){.run-volume{flex-basis:140px}.run-route{font-size:1.15rem}.run-leg{padding:12px}.trip-proposal{padding:16px}}
 
+.run-reason{padding:8px 10px;background:#e2f1ee;border-radius:8px;font-size:.9rem;line-height:1.4}
 </style>
 <div class="top"><div class="brand">BTSA <span style="font-weight:400;opacity:.65">/ dispatch</span></div><span>Operations workspace</span></div>
 <form id="login"><div class="eyebrow">Bike Transport South Africa</div><h1>Welcome to Dispatch</h1><p class="sub">Your orders, contractors and next moves in one place.</p><label for="key">Dispatch access key</label><input id="key" type="password" autocomplete="off" required><button class="primary">Open workspace</button><small>Use your existing INTAKE_API_KEY. You stay logged in on this device until you log out or clear browser data.</small><p id="loginError" class="result" role="status"></p></form>
@@ -307,11 +308,17 @@ function renderPlanning(){
  function tripCard(trip,saved=false){
   const card=node('section',undefined,'plan-card trip-proposal');
   if(trip.changed)card.classList.add('plan-changed');
-  const title=trip.changed?'PLAN CHANGED · REVIEW':saved?'✓ YOUR PLAN':trip.alternative?'ALTERNATIVE · DIRECT CAPE TOWN':'SUGGESTED TRIP';
+  const title=trip.changed?'PLAN CHANGED · REVIEW':saved?'✓ YOUR PLAN':trip.comparison?.toUpperCase()||(trip.alternative?'ALTERNATIVE OPTION':'RECOMMENDED COMBINATION');
   card.append(node('p',title,'plan-day'));
   const route=node('div',undefined,'run-route');route.setAttribute('aria-label',trip.route.join(' to '));
   trip.route.forEach((town,index)=>{if(index)route.append(node('span','→','run-arrow'));route.append(node('strong',town));});
-  card.append(route,node('p',dateLabel(trip.start)+' to '+dateLabel(trip.end)+(trip.alternative?' · Choose this OR the Pomona handover plan':''),'sub'));
+  card.append(route,node('p',dateLabel(trip.start)+' to '+dateLabel(trip.end)+(trip.alternative?' · Alternative: overlaps another option':''),'sub'));
+  if(trip.reasons){
+   const why=node('div',undefined,'run-overview');
+   for(const reason of trip.reasons)why.append(node('span',reason,'run-reason'));
+   card.append(why);
+   if(trip.assignmentRequired?.length)card.append(node('p',trip.assignmentRequired.length+' orders require BTSA assignment / partner agreement. This is a conditional plan, not a confirmed schedule.','plan-problem'));
+  }
   if(trip.replaces?.length)card.append(node('p','Extends your saved plan. Keeping this proposal replaces that plan and retains its orders.','plan-combine'));
   if(trip.dateChanges?.length)card.append(node('p',trip.dateChanges.length+' booked stop dates need agreement. Proposed dates are shown below.','plan-problem'));
   if(trip.changed)card.append(node('p','An order, date or assignment changed. Release this saved plan and review a fresh proposal.','plan-problem'));
@@ -337,13 +344,14 @@ function renderPlanning(){
    for(const member of leg.members){
     const row=node('div',undefined,'run-member');
     const button=node('button',member.label);button.type='button';button.onclick=()=>openMember(member);
-    row.append(button,node('small',member.partner?'Via Pomona · '+member.finalTo+' · partner timing unconfirmed':member.finalTo+' · '+member.condition));
+    row.append(button,node('small',member.directMode||member.assignmentRequired?member.finalTo+' · '+member.condition:member.partner?'Via Pomona · '+member.finalTo+' · partner timing unconfirmed':member.finalTo+' · '+member.condition));
     block.append(row);
    }
    const possible=execution.opportunities.filter(o=>o.from===leg.from&&o.to===leg.to);
    if(possible.length)block.append(node('p','Could fill space: '+possible.map(o=>o.label).join(', ')+'. Assign BTSA first.','plan-combine'));
    if(leg.warnings.length)block.append(node('p',leg.warnings.length+' check'+(leg.warnings.length===1?'':'s')+' before confirming','plan-problem'));
    const detail=node('details',undefined,'order-panel');detail.append(node('summary','Stops, map and checks'));
+   if(trip.metrics)detail.append(node('p','Compared using regional geography, empty positioning, capacity and booked-date changes. This is a screening comparison, not live road distances, fuel cost or traffic. Open Maps to check the road route.','sub'));
    if(leg.proposed)detail.append(node('p','Dates marked suggested are planning allowances, not customer commitments or road travel estimates.','sub'));
    for(const warning of leg.warnings)detail.append(node('p',warning,'plan-problem'));
    const list=node('ol');
@@ -366,7 +374,7 @@ function renderPlanning(){
  }
  const active=execution.accepted.filter(t=>!t.expired);
  if(active.length){panel.append(node('h2','Your trip plans'));for(const trip of active)panel.append(tripCard(trip,true));}
- panel.append(node('h2','Suggested trips'));
+ panel.append(node('h2','Plans to review'),node('p','Dispatch compares the available loads automatically. Options can share orders: choose a combination, not every card.','sub'));
  if(!execution.journeys.length)panel.append(node('p',active.length?'All current loads are in your saved plans.':'No suitable load yet. Check the decisions below.'));
  for(const trip of execution.journeys)panel.append(tripCard(trip));
  const reviews=[...execution.blocked,...execution.opportunities,...(execution.partners||[]),...(execution.deferred||[])];

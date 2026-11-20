@@ -1,77 +1,63 @@
 'use strict';
 const assert=require('node:assert/strict');
-const {buildRuns,mapLinks,region}=require('./dispatch-runs');
-const eta=(date,confidence='confirmed')=>({date,confidence,precision:'day'});
-const now='2026-11-20';
-function order(n,extra={}){return {externalId:'SLA-'+n,bike:'Honda CBR',clientName:'John Test',route:'DBN to JHB',status:'New Order',contractor:'BTSA',collection:null,delivery:null,syncState:'synced',collectionAddress:'Woodhaven Durban',deliveryAddress:'Sandton Johannesburg',...extra};}
-function plan(orders,kept=[]){return buildRuns(orders,now,[],kept);}
+const {buildRuns,mapLinks}=require('./dispatch-runs');
+const eta=date=>({date,confidence:'confirmed',precision:'day'});
+const today='2026-11-20';
+const order=(n,extra={})=>({externalId:'SLA-'+n,bike:'Honda CBR',clientName:'Test Customer',route:'DBN to JHB',status:'New Order',contractor:'BTSA',collection:null,delivery:null,syncState:'synced',collectionAddress:'Durban, South Africa',deliveryAddress:'Johannesburg, South Africa',...extra});
+const plan=(orders,kept=[])=>buildRuns(orders,today,[],kept);
+function check(p){
+ assert.equal(Object.values(p.coverageCounts).reduce((a,b)=>a+b,0),p.tripCount);
+ for(const j of p.journeys){
+  assert.equal(j.route[0],'Durban');assert.equal(j.route.at(-1),'Durban');
+  assert.equal(new Set(j.source.map(s=>s.id)).size,j.source.length);
+  assert.ok(j.reasons.length);assert.ok(Number.isFinite(j.score));
+  assert.ok(j.metrics.changedOrders<=j.source.length);
+  for(const leg of j.legs){assert.ok(leg.cars<=1);assert.ok(leg.bikes<=(leg.cars?3:11));}
+  for(let i=1;i<j.legs.length;i++)assert.ok(j.legs[i].date>=j.legs[i-1].end);
+ }
+}
 let p=plan([order(1,{collection:eta('2026-11-24'),delivery:eta('2026-11-26')}),order(2),order(3,{route:'JHB to DBN'})]);
-assert.equal(p.journeys.length,1);assert.equal(p.journeys[0].legs.length,2);
-assert.equal(p.journeys[0].legs[0].bikes,2);assert.equal(p.journeys[0].legs[0].date,'2026-11-24');
-assert.equal(p.journeys[0].legs[1].bikes,1);assert.ok(p.journeys[0].legs[1].date>p.journeys[0].legs[0].end);
-assert.equal(p.journeys[0].legs[0].members.find(i=>i.id==='SLA-2:1').condition,'Suggested dates');
-assert.equal(p.journeys[0].legs[0].spare,3);
-let mixed=Array.from({length:5},(_,i)=>order(i,{route:'Ballito-Paarl (Pearl valley)',contractor:'BTSA, Cheetah Express',deliveryAddress:'Paarl Cape Town'}));
-p=plan(mixed);
-assert.equal(p.journeys.length,2);assert.ok(p.journeys.some(j=>j.alternative&&j.route.at(-1)==='Cape Town'));
-const normal=p.journeys.find(j=>!j.alternative);
-assert.equal(normal.legs[0].to,'Johannesburg');assert.match(normal.legs[0].sequence.at(-1).address,/Pomona/);
-assert.ok(normal.legs[0].members.every(m=>m.partner));
-p=plan(mixed,[normal]);assert.ok(p.journeys.every(j=>j.replaces?.includes(normal.id)));assert.equal(p.accepted.length,1);assert.equal(p.accepted[0].changed,false);
-const changed=mixed.map((o,i)=>i===0?{...o,delivery:eta('2026-11-29')}:o);
-assert.equal(plan(changed,[normal]).accepted[0].changed,true);
-p=plan([order(1,{status:'Delivered',returnTrip:{status:'New Order',contractor:'BTSA'}})]);
-assert.equal(p.runs.length,1);assert.equal(p.runs[0].from,'Johannesburg');assert.equal(p.runs[0].jobs[0],'SLA-1:2');
-p=plan([order(1,{status:'In Transit'}),order(2,{contractor:'Cheetah Express'}),order(3,{contractor:''}),order(4,{syncState:'conflict'}),order(5,{collection:eta('2026-11-19')})]);
-assert.equal(p.journeys.length,0);assert.equal(p.blocked.length,3);assert.equal(p.opportunities.length,1);
-p=plan(Array.from({length:13},(_,i)=>order(i)));assert.equal(p.runs.length,2);assert.equal(new Set(p.runs.flatMap(r=>r.jobs)).size,13);assert.ok(p.runs.every(r=>r.bikes<=11));
-p=plan([order(1,{bike:'VW Beetle'}),...Array.from({length:5},(_,i)=>order(i+2))]);
-assert.equal(p.runs.length,2);assert.ok(p.runs.every(r=>r.cars<=1&&r.bikes<=(r.cars?3:11)));
-p=plan([order(1,{collection:eta('2026-12-20')}),order(2,{collection:eta('2026-11-24')}),order(3,{collection:eta('2026-11-25')})]);
-assert.equal(p.future.length,1);assert.equal(p.runs.length,2);
-p=plan([order(1,{route:'DBN to JHB',collection:eta('2026-11-23'),delivery:eta('2026-11-25')}),order(2,{route:'JHB to CPT'}),order(3,{route:'CPT to DBN'})]);
-assert.deepEqual(p.journeys[0].route,['Durban','Johannesburg','Cape Town','Durban']);
-assert.ok(p.journeys[0].legs.every((r,i,legs)=>!i||r.date>=legs[i-1].end));
-p=plan([order(1,{route:'CPT to PTA',collection:eta('2026-11-27')}),order(2,{route:'CPT to PMB',collection:eta('2026-11-27')})]);
-assert.equal(p.runs.length,2);assert.ok(p.runs.every(r=>r.from==='Cape Town'));
-assert.equal(region('Pellissier'),'Bloemfontein');assert.equal(region('Montana'),'Johannesburg');
+check(p);assert.ok(p.journeys.some(j=>j.source.length===3));
+const before=JSON.stringify([order(1)]);
+plan([order(1)]);assert.equal(JSON.stringify([order(1)]),before);
+const lowveld=[order(1,{collection:eta('2026-11-24'),delivery:eta('2026-11-25')}),order(2,{route:'JHB to DBN',collection:eta('2026-11-24'),delivery:eta('2026-11-25')}),order(3,{bike:'BAJAJ Qute',route:'JHB to Hoedspruit',collection:eta('2026-11-24'),delivery:eta('2026-11-25')}),order(4,{route:'Montana to Malelane',collection:eta('2026-11-24'),delivery:eta('2026-11-25')})];
+p=plan(lowveld);check(p);
+const complete=p.journeys.find(j=>j.source.length===4);assert.ok(complete);
+assert.ok(complete.route.includes('Hoedspruit')&&complete.route.includes('Malelane'));
+assert.ok(complete.dateChanges.length);
+const saved=plan(lowveld.slice(0,2)).journeys[0];
+assert.ok(plan(lowveld,[saved]).journeys.some(j=>j.replaces?.includes(saved.id)&&j.source.length===4));
+// A different destination produces an onward/return circuit without any named-route rule.
+p=plan([order(1),order(2,{route:'JHB to Bloemfontein'}),order(3,{route:'Bloemfontein to DBN'})]);check(p);
+assert.ok(p.journeys.some(j=>j.source.length===3&&j.route.includes('Bloemfontein')));
+// Even one Cape-bound shared booking plus return work is evaluated automatically.
+// Direct BTSA and the original partner handover are competing variants, not duplicate jobs.
+const cape=[order(1,{route:'DBN to CPT',contractor:'BTSA, Cheetah Express',deliveryAddress:'Cape Town'}),order(2,{route:'CPT to DBN',collectionAddress:'Cape Town',deliveryAddress:'Durban'})];
+p=plan(cape);check(p);
+assert.ok(p.journeys.some(j=>j.route.includes('Cape Town')&&j.legs.some(l=>l.directVariant)));
+assert.ok(p.journeys.some(j=>j.legs.some(l=>l.to==='Johannesburg'&&l.members.some(m=>m.id==='SLA-1:1'))));
+assert.ok(p.journeys.length>=2);
+// New orders trigger fresh options, without a destination or trailer being entered.
+const starting=plan([order(1)]);
+const grown=plan([order(1),...cape.map((o,i)=>({...o,externalId:'SLA-'+(i+20)}))]);check(grown);
+assert.ok(grown.journeys.some(j=>j.route.includes('Cape Town')));
+assert.notDeepEqual(grown.journeys.map(j=>j.id),starting.journeys.map(j=>j.id));
+// Partner and unassigned work are conditional and must never be presented as confirmed BTSA work.
+p=plan([order(1,{contractor:'Cheetah Express'}),order(2,{contractor:''})]);check(p);
+assert.equal(p.partners.length,1);assert.equal(p.opportunities.length,1);
+assert.ok(p.journeys.every(j=>j.assignmentRequired.length===j.source.length));
+p=plan([order(1,{status:'Delivered',returnTrip:{status:'New Order',contractor:'BTSA'}})]);check(p);
+assert.ok(p.journeys.some(j=>j.source.some(s=>s.id==='SLA-1:2')));
+assert.ok(p.journeys.every(j=>!j.source.some(s=>s.id==='SLA-1:1')));
+p=plan(Array.from({length:13},(_,i)=>order(i)));check(p);
+assert.equal(p.runs.length,2);assert.equal(new Set(p.runs.flatMap(r=>r.jobs)).size,13);
+const thirteen=[...lowveld,order(5,{contractor:''}),order(6,{contractor:'Cheetah Express'}),order(7,{status:'In Transit'}),order(8,{collection:eta('2026-11-19')}),order(9,{bike:'Tuk Tuk'}),order(10,{syncState:'conflict'}),order(11,{collection:eta('2026-12-20')}),order(12,{route:'JHB to Herolds Bay'}),order(13,{status:'Paused'})];
+p=plan(thirteen);check(p);assert.equal(p.bookingCount,13);assert.equal(p.coverage.length,13);
+assert.equal(p.coverage.find(r=>r.id==='SLA-6:1').state,'partner');
+assert.equal(p.coverage.find(r=>r.id==='SLA-11:1').state,'later');
+assert.ok(p.coverage.every(r=>r.state==='proposed'||r.state==='saved'||r.reason));
 const stops=Array.from({length:15},(_,i)=>({address:'Address '+i}));
 const maps=mapLinks(stops);assert.equal(maps.length,4);
-for(const link of maps){const u=new URL(link.url);assert.equal(u.hostname,'www.google.com');assert.ok((u.searchParams.get('waypoints')||'').split('|').length<=3);}
+for(const link of maps){const url=new URL(link.url);assert.equal(url.hostname,'www.google.com');assert.ok((url.searchParams.get('waypoints')||'').split('|').length<=3);}
 assert.equal(new URL(maps[0].url).searchParams.get('destination'),new URL(maps[1].url).searchParams.get('origin'));
-
-p=plan([order(1,{bike:'BAJAJ Qute',route:'JHB to Hoedspruit',collection:eta('2026-11-24')}),order(2,{route:'Montana to Malelane',collection:eta('2026-11-24')})]);
-assert.equal(p.runs.length,1);assert.equal(p.runs[0].to,'Lowveld');assert.equal(p.runs[0].cars,1);assert.equal(p.runs[0].bikes,1);
-assert.ok(p.journeys.every(j=>j.start<=p.end));
-
-const withExtra=[...mixed,order(99)];
-const direct=plan(withExtra).journeys.find(j=>j.alternative);
-const afterDirect=plan(withExtra,[direct]);
-assert.ok(afterDirect.journeys.some(j=>j.source.some(s=>s.id==='SLA-99:1')));
-assert.ok(afterDirect.journeys.every(j=>j.replaces?.includes(direct.id)||j.source.every(s=>!direct.source.some(saved=>saved.id===s.id))));
-
-const sameDate=[order(101,{collection:eta('2026-11-24'),delivery:eta('2026-11-25')}),order(102,{route:'JHB to DBN',collection:eta('2026-11-24'),delivery:eta('2026-11-25')}),order(103,{bike:'BAJAJ Qute',route:'JHB to Hoedspruit',collection:eta('2026-11-24'),delivery:eta('2026-11-25')}),order(104,{route:'Montana to Malelane',collection:eta('2026-11-24'),delivery:eta('2026-11-25')})];
-p=plan(sameDate);
-assert.equal(p.journeys.length,1);
-assert.deepEqual(p.journeys[0].route,['Durban','Johannesburg','Malelane','Hoedspruit','Johannesburg','Durban']);
-assert.equal(p.journeys[0].source.length,4);
-assert.equal(p.journeys[0].legs.find(leg=>leg.to==='Lowveld').cars,1);
-assert.equal(p.journeys[0].legs.find(leg=>leg.to==='Lowveld').bikes,1);
-assert.ok(p.journeys[0].legs.some(leg=>leg.reposition&&leg.to==='Johannesburg'&&leg.bikes===0&&leg.cars===0));
-assert.ok(p.journeys[0].dateChanges.length>0);
-assert.equal(sameDate[1].collection.date,'2026-11-24');
-assert.ok(p.journeys[0].legs.every((leg,i,legs)=>!i||leg.date>=legs[i-1].end));
-const oldPlan=plan(sameDate.slice(0,2)).journeys[0];
-const extension=plan(sameDate,[oldPlan]).journeys.find(j=>j.replaces?.includes(oldPlan.id));
-assert.ok(extension);assert.equal(extension.source.length,4);
-const thirteen=[...sameDate,order(105,{contractor:''}),order(106,{contractor:'Cheetah Express'}),order(107,{status:'In Transit'}),order(108,{collection:eta('2026-11-19')}),order(109,{bike:'Tuk Tuk'}),order(110,{syncState:'conflict'}),order(111,{collection:eta('2026-12-20')}),order(112,{route:'JHB to Herolds Bay'}),order(113,{status:'Paused'})];
-p=plan(thirteen);
-assert.equal(p.bookingCount,13);assert.equal(p.coverage.length,13);
-assert.equal(Object.values(p.coverageCounts).reduce((a,b)=>a+b,0),13);
-assert.ok(p.coverage.every(row=>row.state==='proposed'||row.state==='saved'||row.reason));
-assert.equal(p.coverage.find(row=>row.id==='SLA-106:1').state,'partner');
-assert.equal(p.coverage.find(row=>row.id==='SLA-105:1').state,'unassigned');
-assert.equal(p.coverage.find(row=>row.id==='SLA-111:1').state,'later');
-assert.equal(region('Herolds Bay'),'George');
-
-console.log('PASS: undated fill, mixed Pomona split, direct Cape alternative, three-leg circuits, independent returns, capacity splitting, commitment boundaries, saved plan changes and mobile Maps. Fake bookings only.');
+console.log('PASS: general circuit search, automatic Cape options, direct vs partner variants, dynamic new orders, capacities, saved extensions, conditional assignments, date conflicts and complete order accounting. Fake bookings only.');
