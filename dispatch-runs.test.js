@@ -8,7 +8,7 @@ const plan=(orders,kept=[])=>buildRuns(orders,today,[],kept);
 function check(p){
  assert.equal(Object.values(p.coverageCounts).reduce((a,b)=>a+b,0),p.tripCount);
  for(const j of p.journeys){
-  assert.equal(j.route[0],'Durban');assert.equal(j.route.at(-1),'Durban');
+  assert.equal(j.route[0],'Durban');assert.equal(j.route.at(-1),'Durban');assert.equal(j.route.slice(1,-1).includes('Durban'),false);
   assert.equal(new Set(j.source.map(s=>s.id)).size,j.source.length);
   assert.ok(j.reasons.length);assert.ok(Number.isFinite(j.score));
   assert.ok(j.metrics.changedOrders<=j.source.length);

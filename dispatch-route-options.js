@@ -65,6 +65,8 @@ function generateOptions(pool,today,end,{day,hash,mapLinks,align,hubAddress}){
   const next=[];
   for(const state of beam){
    for(const template of pool){
+    // A return to Woodhaven closes this circuit; another departure is a separate option.
+    if(state.legs.length&&(state.town==='Durban'||template.from==='Durban'))continue;
     if(template.source.some(s=>state.used.has(s.id)))continue;
     if(++expansions>6000)break;
     const legs=[...state.legs];
