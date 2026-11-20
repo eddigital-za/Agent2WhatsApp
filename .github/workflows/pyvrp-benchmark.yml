@@ -16,6 +16,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install pyvrp==0.14.1
+      - run: node benchmarks/prepare-workspace.test.cjs
       - run: python benchmarks/pyvrp_verify.py
       - uses: actions/upload-artifact@v4
         with:
