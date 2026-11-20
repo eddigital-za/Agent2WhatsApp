@@ -91,10 +91,10 @@ job("Durban","Johannesburg",p=(0,0)) for _ in range(8)],expect=False))
 reports.append(solve("twelve bike hired trailer",[
 job("Durban","Johannesburg",p=(0,0)) for _ in range(12)],bikes=12))
 reports.append(solve("incompatible dates rejected",[
-job("Johannesburg","Cape Town",p=(1000,1000),d=(0,100))],expect=False))
+job("Johannesburg","Cape Town",p=(1000,1000),d=(1000,1100))],expect=False))
 r=solve("optional impossible order accounted for",[
 job("Durban","Johannesburg"),
-job("Johannesburg","Cape Town",p=(1000,1000),d=(0,100),required=False)])
+job("Johannesburg","Cape Town",p=(1000,1000),d=(1000,1100),required=False)])
 assert r["unassigned"]==[1]
 reports.append(r)
 Path("benchmark-results.json").write_text(json.dumps({
