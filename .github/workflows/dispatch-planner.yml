@@ -1,0 +1,28 @@
+name: Dispatch planner production checks
+on:
+  push:
+    branches: [verify/dispatch-pyvrp-live]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install --only-binary=:all: -r requirements-planner.txt
+      - run: python dispatch-solver.test.py
+      - run: for test in *.test.js; do node "$test" || exit 1; done
+        env:
+          PLANNER_PYTHON: python
+      - run: curl -fsSL https://railpack.com/install.sh | sh
+      - run: railpack build . --name btsa-planner-check
+      - run: docker run --rm --entrypoint /app/.planner-venv/bin/python btsa-planner-check -c 'from pyvrp import Model; print("Runtime verified")'

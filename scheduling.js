@@ -846,7 +846,8 @@ function backupDispatchDatabase(){
 }
 backupDispatchDatabase();setInterval(()=>{try{backupDispatchDatabase();}catch(e){console.error('Dispatch backup failed:',e.message);}},3600000);
 const dispatchDomain=require('./dispatch-domain');
-const operations=require('./dispatch-operations').createOperations({db,contractors:SHEET_CONTRACTORS,beforeReconcile:rows=>applySheetOrders(sheetOrders([[],...rows])),sheet:{
+const tripOptimizer=require('./dispatch-optimizer').createOptimizer();
+const operations=require('./dispatch-operations').createOperations({db,tripOptimizer,contractors:SHEET_CONTRACTORS,beforeReconcile:rows=>applySheetOrders(sheetOrders([[],...rows])),sheet:{
  read:async()=> (await dispatchSheets(await dispatchToken(),'A2:AN')).values||[],
  update:async(row,values)=>dispatchSheets(await dispatchToken(),'B'+row+':C'+row,{method:'PUT',body:JSON.stringify({values:[values]})}),
  updateCells:async(row,cells)=>{

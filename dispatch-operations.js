@@ -4,7 +4,7 @@ const domain=require('./dispatch-domain');
 const {planAhead,addDays}=require('./dispatch-planning');
 const internalStatus=s=>({'Delivered':'completed','Cancelled':'cancelled','Duplicate':'cancelled','In Transit':'in_transit','Collected':'in_transit','Pending':'scheduled'}[s]||'unscheduled');
 const text=(v,max=2000)=>String(v??'').trim().slice(0,max);
-function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()=>new Date().toISOString()}){
+function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()=>new Date().toISOString(),tripOptimizer=null}){
  db.exec(`CREATE TABLE IF NOT EXISTS dispatch_records(ref TEXT PRIMARY KEY,version INTEGER NOT NULL,data TEXT NOT NULL,sheet_state TEXT NOT NULL DEFAULT 'synced',sheet_error TEXT,updated_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS dispatch_events(id INTEGER PRIMARY KEY,ref TEXT,at TEXT NOT NULL,source TEXT NOT NULL,kind TEXT NOT NULL,details TEXT NOT NULL,event_key TEXT UNIQUE);
  CREATE TABLE IF NOT EXISTS dispatch_inbox(id TEXT PRIMARY KEY,at TEXT NOT NULL,source TEXT NOT NULL,text TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'attention',error TEXT,ref TEXT);
@@ -112,7 +112,7 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
  function enrich(o){const today=domain.localDay(now());const evidence=db.prepare("SELECT SUM(CASE WHEN p.stage='collection' THEN 1 ELSE 0 END) collection,SUM(CASE WHEN p.stage='delivery' THEN 1 ELSE 0 END) delivery FROM proofs p JOIN orders r ON r.id=p.order_id WHERE r.external_id=? AND p.status='confirmed'").get(o.externalId);return {...o,evidence:{collection:Number(evidence.collection||0),delivery:Number(evidence.delivery||0)},missing:missing(o),collectionToday:!domain.closed(o.status)&&!['Collected','In Transit'].includes(o.status)&&!o.actualCollection&&o.collection?.date===today,collectionOverdue:!domain.closed(o.status)&&!['Collected','In Transit'].includes(o.status)&&!o.actualCollection&&!!o.collection?.date&&o.collection.date<today,deliveryToday:!domain.closed(o.status)&&o.delivery?.date===today,followUpDue:!domain.closed(o.status)&&!!o.followUpAt&&(o.followUpAt.length>10?new Date(o.followUpAt+':00+02:00')<=new Date(now()):o.followUpAt<=today),needsAttention:o.syncState!=='synced'||missing(o).length>0||!!o.nextAction};}
  function inbox(id,source,value,ref,error){db.prepare('INSERT OR IGNORE INTO dispatch_inbox(id,at,source,text,error,ref) VALUES(?,?,?,?,?,?)').run(id,now(),source,text(value,20000),error||'Needs review',ref||null);}
  function details(ref){const o=get(ref);if(!o)return null;const events=db.prepare('SELECT * FROM dispatch_events WHERE ref=? ORDER BY id DESC LIMIT 150').all(ref).map(e=>({...e,details:JSON.parse(e.details)}));const legacy=db.prepare('SELECT id FROM orders WHERE external_id=?').get(ref);const proofs=legacy?db.prepare('SELECT id,stage,status,created_at,mime_type,filename FROM proofs WHERE order_id=? ORDER BY id DESC').all(legacy.id):[];return {order:enrich(o),events,proofs,messages:db.prepare('SELECT * FROM dispatch_messages WHERE ref=? ORDER BY created_at DESC').all(ref).map(message=>message.state==='awaiting_approval'?{...message,customerText:domain.customerUpdateText(message)}:message)};}
- function planning(){return planAhead(all(),db.prepare('SELECT * FROM dispatch_plan_decisions').all(),now(),db.prepare('SELECT data FROM dispatch_run_plans ORDER BY created_at DESC').all().map(row=>JSON.parse(row.data)));}
+ function planning(){const orders=all(),decisions=db.prepare('SELECT * FROM dispatch_plan_decisions').all(),instant=now(),kept=db.prepare('SELECT data FROM dispatch_run_plans ORDER BY created_at DESC').all().map(row=>JSON.parse(row.data));return planAhead(orders,decisions,instant,kept,tripOptimizer?.get(orders,instant,decisions,kept));}
  function decidePlan(id,signature,state){
   const job=planning().jobs.find(job=>job.id===id);
   if(!job||job.signature!==signature)throw Object.assign(Error('This trip changed. Review the latest details.'),{status:409});
@@ -129,6 +129,7 @@ function createOperations({db,sheet,beforeReconcile=()=>{},contractors=[],now=()
   if(remove){if(!existing)throw Object.assign(Error('Saved plan not found.'),{status:404});const saved=JSON.parse(existing.data);if(saved.signature!==signature)throw Object.assign(Error('This saved plan changed. Refresh and review it.'),{status:409});db.prepare('DELETE FROM dispatch_run_plans WHERE id=?').run(id);return planning();}
   if(existing&&JSON.parse(existing.data).signature===signature)return planning();
   const proposal=planning().execution.journeys.find(j=>j.id===id);
+  if(proposal&&planning().execution.accepted.some(p=>!p.expired&&!(proposal.replaces||[]).includes(p.id)&&proposal.start<=p.end&&p.start<=proposal.end))throw Object.assign(Error('This overlaps another saved trip for the BTSA vehicle. Release that plan before choosing this alternative.'),{status:409});
   if(!proposal||proposal.signature!==signature||existing&&!proposal.replaces?.includes(id))throw Object.assign(Error('The load or dates changed. Review the latest proposal.'),{status:409});
   db.exec('BEGIN IMMEDIATE');
   try{

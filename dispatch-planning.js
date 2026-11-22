@@ -20,7 +20,7 @@ function stopBounds(stop) {
  const windows={morning:['06:00','11:59'],afternoon:['12:00','17:59'],evening:['18:00','23:59']};
  return windows[String(stop.window||'').toLowerCase()]||['00:00','23:59'];
 }
-function planAhead(orders, decisions=[], instant=new Date().toISOString(),kept=[]) {
+function planAhead(orders, decisions=[], instant=new Date().toISOString(),kept=[],execution) {
  const today=localDay(instant), end=addDays(today,14), jobs=[];
  const saved=new Map(decisions.map(row=>[row.id,row]));
  for(const order of orders) {
@@ -103,7 +103,7 @@ function planAhead(orders, decisions=[], instant=new Date().toISOString(),kept=[
   if(!chronological)continue;
   suggestions.push({route:members[0].route,date:members[0].stops[0].date,jobs:members.map(job=>job.id),sequence});
  }
- return {today,end,jobs,suggestions,execution:buildRuns(orders,today,decisions,kept)};
+ return {today,end,jobs,suggestions,execution:execution||buildRuns(orders,today,decisions,kept)};
 }
 function planningBrief(plan) {
  const proposals=plan.execution?.journeys||[];

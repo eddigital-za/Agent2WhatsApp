@@ -151,6 +151,9 @@ $('login').onsubmit=e=>{e.preventDefault();key=$('key').value.trim();$('key').va
 if(typeof window!=='undefined')setInterval(()=>{
  if(key&&!document.hidden&&!busy&&!selected.size&&!$('orderDialog').open)void load({recorded:true,quiet:true});
 },60000);
+if(typeof window!=='undefined')setInterval(()=>{
+ if(key&&view.kind==='planning'&&data.planning?.execution?.optimizer?.state==='working'&&!document.hidden&&!busy&&!selected.size&&!$('orderDialog').open)void load({recorded:true,quiet:true});
+},8000);
 $('lock').onclick=()=>{if(busy)return;rememberLogin('');key='';data={orders:[],statuses:[],contractors:[]};selected.clear();$('jobs').replaceChildren();$('board').hidden=true;$('login').hidden=false;$('notice').textContent='';$('loginError').textContent='';};
 $('menu').onclick=()=>{$('board').classList.toggle('nav-open');$('menu').setAttribute('aria-expanded',String($('board').classList.contains('nav-open')));};
 function channel(parent,label,count,kind,value=''){const b=node('button');b.append(node('span',label));if(count!==null)b.append(node('b',String(count)));b.classList.toggle('active',view.kind===kind&&view.value===value);b.setAttribute('aria-pressed',String(view.kind===kind&&view.value===value));b.onclick=()=>setView(kind,value);parent.append(b);}
@@ -306,6 +309,31 @@ function renderPlanning(){
  panel.append(overview);
  panel.append(node('p','14-day proposals · undated jobs fill available space. Keeping a plan does not change order dates or send messages.','sub'));
  function tripCard(trip,saved=false){
+  if(trip.engine==='pyvrp'){
+   const card=node('section',undefined,'plan-card trip-proposal');
+   card.append(node('p',saved?'✓ YOUR PLAN':trip.comparison.toUpperCase(),'plan-day'));
+   const route=node('div',undefined,'run-route');route.setAttribute('aria-label',trip.route.join(' to '));
+   trip.route.forEach((place,index)=>{if(index)route.append(node('span','→','run-arrow'));route.append(node('strong',place));});
+   card.append(route,node('p',dateLabel(trip.start)+' to '+dateLabel(trip.end)+' · '+trip.source.length+' orders · about '+Math.round(trip.roadKm).toLocaleString()+' road km','sub'));
+   const why=node('div',undefined,'run-overview');for(const reason of trip.reasons)why.append(node('span',reason,'run-reason'));card.append(why);
+   if(trip.alternative)card.append(node('p','Choose this instead of the other option. These are alternatives for one BTSA vehicle.','plan-combine'));
+   if(trip.changed)card.append(node('p','Orders changed. Release this saved plan and review the new options.','plan-problem'));
+   if(trip.assignmentRequired.length)card.append(node('p','Conditional: agree BTSA assignment and partner release before using this option.','plan-problem'));
+   let lastDay='';
+   for(const stop of trip.stops){
+    if(stop.date!==lastDay){card.append(node('h3',dateLabel(stop.date),'plan-day'));lastDay=stop.date;}
+    const block=node('div',undefined,'run-leg');block.style.background=stop.kind==='Pickup'?'#e3f2eb':stop.kind==='Handover'?'#eee7f8':stop.kind==='Drop-off'?'#e5eeff':'#f5f7f8';
+    block.append(node('strong',({'Pickup':'Collect','Drop-off':'Deliver','Start':'Leave Woodhaven','Return':'Return to Woodhaven','Handover':'Handover'})[stop.kind]+' · '+stop.town));
+    if(stop.jobId){const button=node('button',stop.label);button.type='button';button.onclick=()=>openMember({ref:stop.ref,trip:stop.trip});block.append(button,node('small',stop.bikes+' bikes'+(stop.cars?' + '+stop.cars+' car':'')+' aboard after this stop'));}
+    card.append(block);
+   }
+   const details=node('details',undefined,'order-panel');details.append(node('summary','Maps and planning checks'));
+   for(const warning of trip.warnings)details.append(node('p',warning,'sub'));
+   for(const map of trip.maps){const link=node('a',map.label);link.href=map.url;link.target='_blank';link.rel='noopener noreferrer';link.className='run-map';details.append(link);}
+   card.append(details);
+   const button=node('button',saved?'Release plan':'Keep this trip plan');button.type='button';button.className='run-keep';button.onclick=()=>save(trip,button,saved);card.append(button);
+   return card;
+  }
   const card=node('section',undefined,'plan-card trip-proposal');
   if(trip.changed)card.classList.add('plan-changed');
   const title=trip.changed?'PLAN CHANGED · REVIEW':saved?'✓ YOUR PLAN':trip.comparison?.toUpperCase()||(trip.alternative?'ALTERNATIVE OPTION':'RECOMMENDED COMBINATION');
@@ -374,7 +402,8 @@ function renderPlanning(){
  }
  const active=execution.accepted.filter(t=>!t.expired);
  if(active.length){panel.append(node('h2','Your trip plans'));for(const trip of active)panel.append(tripCard(trip,true));}
- panel.append(node('h2','Plans to review'),node('p','Dispatch compares the available loads automatically. Options can share orders: choose a combination, not every card.','sub'));
+ panel.append(node('h2','Plans to review'),node('p',execution.optimizer?'Dispatch pairs loads and return work automatically. Choose one trip option; these are proposals until agreed.':'Dispatch compares the available loads automatically. Options can share orders: choose a combination, not every card.','sub'));
+ if(execution.optimizer){const status=node('p',execution.optimizer.message,'plan-combine');status.setAttribute('role','status');panel.append(status);}
  if(!execution.journeys.length)panel.append(node('p',active.length?'All current loads are in your saved plans.':'No suitable load yet. Check the decisions below.'));
  for(const trip of execution.journeys)panel.append(tripCard(trip));
  const reviews=[...execution.blocked,...execution.opportunities,...(execution.partners||[]),...(execution.deferred||[])];
