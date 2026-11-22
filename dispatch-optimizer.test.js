@@ -22,6 +22,12 @@ function answer(payload){const j=payload.jobs[0];return {options:[{jobs:[j.id],c
  const result=optimizer.get(input,instant);
  assert.equal(result.optimizer.state,'ready');assert.equal(result.journeys[0].engine,'pyvrp');assert.equal(result.coverageCounts.proposed,1);
  assert.equal(JSON.stringify(input),before,'No booking mutation');
+ const refreshed=[order(1,{version:99,notes:[{text:'Routine admin note'}],sheetCells:['refreshed']})];
+ assert.equal(optimizer.get(refreshed,instant).optimizer.state,'ready','Sheet metadata changes must retain calculated routes');
+ assert.equal(calls,1,'Routine refresh must not restart the solver');
+ const sorted=createOptimizer({fetcher:async()=>matrix,solve:async p=>answer(p)});
+ const pair=[order(1),order(2)];
+ assert.equal(sorted.prepare(pair,instant,[],[]).key,sorted.prepare([...pair].reverse(),instant,[],[]).key,'Database sorting must not invalidate a plan');
  const changed=[order(1,{collection:eta('2026-11-25')})];
  assert.equal(optimizer.get(changed,instant).journeys.length,0,'Never display old proposals after an edit');
  await wait();release();await wait();

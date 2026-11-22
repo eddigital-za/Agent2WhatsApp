@@ -1,7 +1,7 @@
 'use strict';
 const crypto=require('node:crypto'),fs=require('node:fs'),path=require('node:path');
 const {spawn}=require('node:child_process');
-const {buildRuns,expand,routeParts,mapLinks,WOODHAVEN,POMONA}=require('./dispatch-runs');
+const {buildRuns,expand,fingerprint,routeParts,mapLinks,WOODHAVEN,POMONA}=require('./dispatch-runs');
 const {localDay}=require('./dispatch-domain');
 const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
 // Public town centres only. Exact addresses remain in Dispatch for Maps links.
@@ -64,7 +64,8 @@ function createOptimizer({fetcher=globalThis.fetch,solve=runPython,now=()=>Date.
    jobs.push({...member,from,to,collection:mixed&&!member.pickup?null:o.collection,drop:to===town(parts.at(-1))?o.delivery:null,conditional:Boolean(member.assignmentRequired||member.partner)});
   }
   const direct=jobs.filter(m=>m.partner&&!m.assignmentRequired).map(m=>{const o=originals.get(m.id),parts=routeParts(o.route);return {...m,from:town(parts[0]),to:town(parts.at(-1)),pickupAddress:o.collectionAddress||town(parts[0])+', South Africa',dropAddress:o.deliveryAddress||town(parts.at(-1))+', South Africa',collection:o.collection,drop:o.delivery,directMode:true,conditional:true,assignmentRequired:true};});
-  const key=hash([today,orders,decisions,kept]);
+  // Sheet versions, notes and record order change without changing a trip.
+  const key=hash([today,[...originals.values()].map(o=>[o.id,fingerprint(o)]).sort((a,b)=>a[0].localeCompare(b[0])),[...decisions].sort((a,b)=>a.id.localeCompare(b.id)),kept.map(p=>[p.id,p.signature]).sort((a,b)=>a[0].localeCompare(b[0]))]);
   return {key,base,jobs,direct,instant,today,kept};
  }
  function decorate(request,result){
@@ -83,7 +84,9 @@ function createOptimizer({fetcher=globalThis.fetch,solve=runPython,now=()=>Date.
    const warnings=['Town-level road estimates; check exact stops, trailer fit and safe overnight locations before departure.','Eight driving hours per day, 08:00–18:00 services, and driving breaks are planning assumptions; this is not a legal-hours certification.'];
    if(assignmentRequired.length)warnings.push('Partner release / BTSA assignment must be agreed before this option can be used.');
    if(option.capacity>5)warnings.push(option.capacity>7?'Hire trailer only after confirming physical fit and cost.':'Six or seven bikes depend on physical fit.');
-   const trip={id,signature,engine:'pyvrp',source,route,stops,start:stops[0].date,end:stops.at(-1).date,alternative:index>0,alternativeTo:index?null:undefined,comparison:index?'Alternative trip option':'Suggested BTSA trip',assignmentRequired,dateChanges:[],bikes:members.reduce((n,m)=>n+m.load.bikes,0),cars:members.reduce((n,m)=>n+m.load.cars,0),capacity:option.capacity,roadKm:option.distance/1000,warnings,metrics:{km:option.distance/1000,changedOrders:0},reasons:[members.length+' orders paired',option.capacity>7?'Hired trailer option':'Own trailer option','Recorded confirmed dates retained'],maps:mapLinks(stops),members};
+   const lastAway=stops.findLast(s=>s.town!=='Durban');
+   const returnLoad={bikes:lastAway?.bikes||0,cars:lastAway?.cars||0,from:lastAway?.town||'Durban'};
+   const trip={id,signature,engine:'pyvrp',source,route,stops,start:stops[0].date,end:stops.at(-1).date,alternative:index>0,alternativeTo:index?null:undefined,comparison:index?'Alternative trip option':'Suggested BTSA trip',assignmentRequired,dateChanges:[],bikes:members.reduce((n,m)=>n+m.load.bikes,0),cars:members.reduce((n,m)=>n+m.load.cars,0),capacity:option.capacity,roadKm:option.distance/1000,emptyKm:option.empty/1000,returnLoad,warnings,metrics:{km:option.distance/1000,changedOrders:0},reasons:[members.length+' orders paired',option.capacity>7?'Hired trailer option':'Own trailer option','Recorded confirmed dates retained'],maps:mapLinks(stops),members};
    // Retain compatibility with saved-plan and report consumers.
    trip.legs=[{from:'Durban',to:'Durban',date:trip.start,end:trip.end,members,sequence:stops,warnings,maps:trip.maps,bikes:trip.bikes,cars:trip.cars,capacity:option.capacity,spare:0,trailer:option.capacity>7?'Hire 6m trailer':'Own trailer',source}];
    return trip;
