@@ -12,6 +12,10 @@ function answer(payload){const j=payload.jobs[0];return {options:[{jobs:[j.id],c
  assert.deepEqual(vehicle({bike:'Triumph Tiger 800XCA'}),{cars:0,bikes:1});
  assert.equal(vehicle({bike:'2x Honda CBR'}),null);
  assert.equal(town('Dundee'),'Dundee');assert.equal(town('Paarl'),'Paarl');
+ assert.equal(town('Midrand'),'Johannesburg');assert.equal(town('Rosebank'),'Johannesburg');assert.equal(town('Umlazi D'),'Durban');
+ const returnBike=createOptimizer().prepare([order(20,{route:'Midrand to Umlazi D',collection:eta('2026-11-25'),delivery:eta('2026-11-27')})],instant,[],[]).jobs[0];
+ assert.equal(returnBike.from,'Johannesburg');assert.equal(returnBike.to,'Durban');
+ assert.equal(returnBike.collection.date,'2026-11-25');assert.equal(returnBike.drop.date,'2026-11-27');
  let release,calls=0;
  const optimizer=createOptimizer({fetcher:async()=>matrix,solve:p=>{calls++;return new Promise(resolve=>release=()=>resolve(answer(p)));}});
  const input=[order(1)],before=JSON.stringify(input);
