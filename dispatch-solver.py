@@ -17,6 +17,7 @@ CLOSE=18*3600
 
 def optimise(data, budget=24):
     started=time.monotonic()
+    deadline=started+budget*.75
     towns=data['towns'];dist=data['distances'];duration=data['durations']
     base=datetime.fromisoformat(data['today'])
     horizon=15*DAY-1
@@ -112,7 +113,7 @@ def optimise(data, budget=24):
         return plans[-1] if plans else None
 
     def solve(jobs,capacity,bias=None):
-        if not jobs or time.monotonic()-started>=budget:return None
+        if not jobs or time.monotonic()>=deadline:return None
         model=Model();loc=[model.add_location(i,0,name=t) for i,t in enumerate(towns)]
         model.add_depot(loc[0],tw_late=horizon)
         model.add_vehicle_type(1,capacity=[capacity,1,max(7,capacity)],tw_early=current_seconds,tw_late=horizon)
@@ -129,7 +130,7 @@ def optimise(data, budget=24):
         if not packed:return None
         for i,a in enumerate(loc):
             for j,b in enumerate(loc):model.add_edge(a,b,distance=dist[i][j],duration=duration[i][j])
-        result=model.solve(MaxRuntime(min(1.3,max(.1,budget-(time.monotonic()-started)))),seed=42,display=False)
+        result=model.solve(MaxRuntime(min(1.3,max(.1,deadline-time.monotonic()))),seed=42,display=False)
         if not result.is_feasible() or len(result.best.routes())!=1:return None
         route=result.best.routes()[0]
         actions=[(k=='L',int(i)) for k,i in re.findall(r'([LU])(\d+)',str(route))]
@@ -167,15 +168,30 @@ def optimise(data, budget=24):
             for bias in biases[:5]:
                 option=solve(pool,capacity,bias)
                 if option:option['direct']=direct;options.append(option)
-            if time.monotonic()-started>=budget:break
+            if time.monotonic()>=deadline:break
     # If all-date combination fails its driver screen, independently test each
     # dated pickup cluster with undated fill-ins rather than hide every order.
     if not options:
+        deadline=started+budget
         dates=sorted({j.get('pickup',{}).get('date') for j in own if j.get('pickup') and j['pickup'].get('confidence')=='confirmed'}-{None})
-        for date in dates[:5]:
-            pool=[j for j in own if not j.get('pickup') or j['pickup'].get('date')==date]
-            option=solve(pool,5)
-            if option:option['direct']=False;options.append(option)
+        tested={tuple(j['id'] for j in own)}
+        for date in dates:
+            # Try nearby pickup days together, then widen. A conflicting later
+            # booking must not hide a feasible outbound load and its detour.
+            for days in (1,2,7):
+                end=(datetime.fromisoformat(date)+timedelta(days=days)).date().isoformat()
+                pool=[j for j in own if not j.get('pickup') or j['pickup'].get('confidence')!='confirmed' or date<=j['pickup'].get('date','')<end]
+                key=tuple(j['id'] for j in pool)
+                if key in tested:continue
+                tested.add(key)
+                delivery_groups={}
+                for j in pool:
+                    d=j.get('delivery') or {}
+                    if d.get('confidence')=='confirmed' and d.get('date'):delivery_groups.setdefault(d['date'],[]).append(j)
+                biases=[None]+[(j['id'],) for group in delivery_groups.values() if len({j['to'] for j in group})>1 for j in group]
+                for bias in biases[:3]:
+                    option=solve(pool,5,bias)
+                    if option:option['direct']=False;options.append(option)
     options.sort(key=lambda o:(-o['own'],o['conditional'],-len(o['jobs']),o['capacity']>7,o['distance'],o['capacity']))
     unique=[];seen=set()
     for option in options:

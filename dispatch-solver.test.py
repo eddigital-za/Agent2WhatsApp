@@ -30,4 +30,9 @@ for option in result['options']:
 assert any(len(o['jobs'])==3 for o in result['options'])
 bad={**base,'jobs':[job(4,0,1,pickup=eta('2027-05-05'),delivery=eta('2027-05-03'))]}
 assert solver.optimise(bad,budget=2)['options']==[]
+conflict={**base,'jobs':[job(5,0,1,pickup=eta('2027-05-03'),delivery=eta('2027-05-04')),
+ job(6,0,2,pickup=eta('2027-05-04'),delivery=eta('2027-05-04'))]}
+partial=solver.optimise(conflict,budget=8)['options']
+assert partial, 'Reserve search time for workable subsets when the complete load fails its driver-hours check'
+assert any('5' in option['jobs'] for option in partial)
 print('PASS: real PyVRP worker, automatic onward/return pairing, confirmed dates, precedence, dynamic capacity, future departure, one-vehicle return and impossible dates. Synthetic data only.')
