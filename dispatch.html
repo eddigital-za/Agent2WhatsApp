@@ -306,7 +306,7 @@ function renderPlanning(){
   tile.append(node('strong',direction.route),node('span',direction.bikes+' bike'+(direction.bikes===1?'':'s')+(direction.cars?' + '+direction.cars+' car'+(direction.cars===1?'':'s'):'')),node('small',direction.undated?direction.undated+' without a pickup date':'Pickup dates recorded'));
   overview.append(tile);
  }
- panel.append(overview);
+ if(!execution.optimizer)panel.append(overview);
  panel.append(node('p','14-day proposals · undated jobs fill available space. Keeping a plan does not change order dates or send messages.','sub'));
  function tripCard(trip,saved=false){
   if(trip.engine==='pyvrp'){
@@ -324,14 +324,15 @@ function renderPlanning(){
     if(stop.date!==lastDay){card.append(node('h3',dateLabel(stop.date),'plan-day'));lastDay=stop.date;}
     const block=node('div',undefined,'run-leg');block.style.background=stop.kind==='Pickup'?'#e3f2eb':stop.kind==='Handover'?'#eee7f8':stop.kind==='Drop-off'?'#e5eeff':'#f5f7f8';
     block.append(node('strong',({'Pickup':'Collect','Drop-off':'Deliver','Start':'Leave Woodhaven','Return':'Return to Woodhaven','Handover':'Handover'})[stop.kind]+' · '+stop.town));
-    if(stop.jobId){const button=node('button',stop.label);button.type='button';button.onclick=()=>openMember({ref:stop.ref,trip:stop.trip});block.append(button,node('small',stop.bikes+' bikes'+(stop.cars?' + '+stop.cars+' car':'')+' aboard after this stop'));}
+    if(stop.jobId){const button=node('button',stop.label);button.type='button';button.onclick=()=>openMember({ref:stop.ref,trip:stop.trip});block.append(button,node('small',stop.bikes+' bike'+(stop.bikes===1?'':'s')+(stop.cars?' + '+stop.cars+' car':'')+' aboard after this stop'));}
     card.append(block);
    }
    const details=node('details',undefined,'order-panel');details.append(node('summary','Maps and planning checks'));
    for(const warning of trip.warnings)details.append(node('p',warning,'sub'));
    for(const map of trip.maps){const link=node('a',map.label);link.href=map.url;link.target='_blank';link.rel='noopener noreferrer';link.className='run-map';details.append(link);}
    card.append(details);
-   const button=node('button',saved?'Release plan':'Keep this trip plan');button.type='button';button.className='run-keep';button.onclick=()=>save(trip,button,saved);card.append(button);
+   if(trip.replaces?.length)card.append(node('p','Includes the jobs in your saved plan. Choosing this replaces that saved plan.','plan-combine'));
+   const button=node('button',saved?'Release plan':trip.replaces?.length?'Replace saved plan with this trip':'Keep this trip plan');button.type='button';button.className='run-keep';button.onclick=()=>save(trip,button,saved);card.append(button);
    return card;
   }
   const card=node('section',undefined,'plan-card trip-proposal');
@@ -406,7 +407,7 @@ function renderPlanning(){
  if(execution.optimizer){const status=node('p',execution.optimizer.message,'plan-combine');status.setAttribute('role','status');panel.append(status);}
  if(!execution.journeys.length)panel.append(node('p',active.length?'All current loads are in your saved plans.':'No suitable load yet. Check the decisions below.'));
  for(const trip of execution.journeys)panel.append(tripCard(trip));
- const reviews=[...execution.blocked,...execution.opportunities,...(execution.partners||[]),...(execution.deferred||[])];
+ const reviews=[],reviewed=new Set();for(const item of [...execution.blocked,...execution.opportunities,...(execution.partners||[]),...(execution.deferred||[])])if(!reviewed.has(item.id)){reviewed.add(item.id);reviews.push(item);}
  if(reviews.length){
   const details=node('details',undefined,'order-panel');details.append(node('summary','Jobs needing a decision · '+reviews.length));
   for(const item of reviews){const row=node('div',undefined,'plan-bike');const button=node('button',item.label);button.type='button';button.onclick=()=>openMember({ref:item.id.replace(/:[12]$/,''),trip:Number(item.id.at(-1))});row.append(button,node('p',item.reason,'sub'));details.append(row);}panel.append(details);

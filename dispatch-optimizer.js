@@ -89,7 +89,13 @@ function createOptimizer({fetcher=globalThis.fetch,solve=runPython,now=()=>Date.
    return trip;
   });
   const kept=base.accepted.filter(p=>!p.expired),savedIds=new Set(kept.flatMap(p=>p.source.map(s=>s.id)));
-  const available=journeys.filter(j=>!kept.some(p=>j.start<=p.end&&p.start<=j.end||j.source.some(s=>savedIds.has(s.id))));
+  const available=journeys.filter(j=>{
+   const overlaps=kept.filter(p=>j.start<=p.end&&p.start<=j.end||p.source.some(s=>j.source.some(x=>x.id===s.id)));
+   if(!overlaps.length)return true;
+   if(overlaps.some(p=>p.source.some(s=>!j.source.some(x=>x.id===s.id))))return false;
+   if(!overlaps.some(p=>p.changed||j.source.length>p.source.length))return false;
+   j.replaces=overlaps.map(p=>p.id);return true;
+  });
   const planned=new Set(available.filter(j=>!j.alternative).flatMap(j=>j.source.map(s=>s.id)));
   const suggested=new Set(available.flatMap(j=>j.source.map(s=>s.id)));
   base.coverage=base.coverage.map(c=>{const block=base.blocked.find(b=>b.id===c.id);if(block)return {...c,state:'review',reason:block.reason};if(['partner','unassigned','saved','later','postponed'].includes(c.state))return c;if(planned.has(c.id))return {...c,state:'proposed',reason:''};if(suggested.has(c.id))return {...c,state:'review',reason:'Included in an alternative trip option'};if(c.state==='review'&&!block)return {...c,reason:'No date-compatible place found in the tested trip options; review timing or assignment'};return c;});
