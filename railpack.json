@@ -1,10 +1,17 @@
 {
   "$schema": "https://schema.railpack.com",
   "provider": "node",
-  "packages": {"python": "3.13"},
+  "packages": {
+    "python": "3.13"
+  },
   "steps": {
     "build": {
-      "commands": ["...", "python -m venv /app/.planner-venv", "/app/.planner-venv/bin/pip install --disable-pip-version-check --only-binary=:all: -r requirements-planner.txt", "/app/.planner-venv/bin/python -c 'from pyvrp import Model; print(\"PyVRP planner runtime ready\")'"]
+      "commands": [
+        "...",
+        "python -m venv /app/.planner-venv",
+        "/app/.planner-venv/bin/pip install --disable-pip-version-check --only-binary=:all: -r requirements-planner.txt",
+        "/app/.planner-venv/bin/python dispatch-solver.test.py"
+      ]
     }
   }
 }
