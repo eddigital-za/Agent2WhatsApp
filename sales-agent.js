@@ -592,7 +592,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         }
         // Cancel/reply/new-link events can change the row during either lookup.
         if(db.prepare("UPDATE sales_sla_followups SET state='sending',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id).changes!==1)continue;
-        const text="Howzit, did you get a chance to complete the booking form I sent? If you need a hand with anything, ask me here 👍🏼";
+        const text="Howzit, please complete the booking form I sent so we can save your spot on the trailer and lock in your rate. Rates and availability can change as bookings come in, so if you’re holding off, let me know what you need from me before going ahead 👍🏼";
         try {
           const sent=await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`,text);
           remember(row.phone,"agent",text,sent?.id?._serialized);
