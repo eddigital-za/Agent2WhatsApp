@@ -24,6 +24,9 @@ jobs:
       - run: for test in *.test.js; do node "$test" || exit 1; done
         env:
           PLANNER_PYTHON: python
-      - run: curl -fsSL https://railpack.com/install.sh | sh
+      - run: curl -fsSL https://railpack.com/install.sh | bash
+      - run: docker run --rm --privileged -d --name buildkit moby/buildkit
       - run: railpack build . --name btsa-planner-check
+        env:
+          BUILDKIT_HOST: docker-container://buildkit
       - run: docker run --rm --entrypoint /app/.planner-venv/bin/python btsa-planner-check -c 'from pyvrp import Model; print("Runtime verified")'
