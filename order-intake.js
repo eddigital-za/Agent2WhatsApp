@@ -216,6 +216,26 @@ async function commit(author,d,messageId){
  return {slaRef};
 }
 app.get('/health',(req,res)=>res.json({ok:true,openai:Boolean(OPENAI_API_KEY),commit:Boolean(COMMIT_WEBHOOK_URL),history:Boolean(HISTORY_WEBHOOK_URL),group:Boolean(ORDERS_GROUP_ID),dispatchConfigured:Boolean(process.env.DISPATCH_URL&&process.env.DISPATCH_API_KEY),dispatchConnected:dispatchBridge.isConnected(),salesExamples:salesReasonerStatus.exampleCount}));
+app.post('/sales/booking-status', async(req,res)=>{
+ const token=String(process.env.SALES_AGENT_TOKEN||'');
+ if(token.length<32||req.get('authorization')!=='Bearer '+token)return res.status(401).json({error:'Unauthorized'});
+ const normalizePhone=value=>{let n=String(value||'').replace(/\D/g,'');if(n.startsWith('0027'))n=n.slice(2);if(n.startsWith('0'))n='27'+n.slice(1);if(n.length===9)n='27'+n;return n;};
+ const phone=normalizePhone(req.body?.phone||'');
+ if(!/^27\d{9}$/.test(phone))return res.status(400).json({error:'Valid SA phone required'});
+ try{
+  if(!HISTORY_WEBHOOK_URL)throw Error('SLA sheet history is not configured');
+  const r=await fetch(HISTORY_WEBHOOK_URL,{method:'POST',headers:{'content-type':'application/json'},body:'{}',signal:AbortSignal.timeout(15000)});
+  if(!r.ok)throw Error('SLA sheet lookup failed');
+  let body=await r.json();
+  if(typeof body==='string')body=JSON.parse(body);
+  if(typeof body.body==='string')body=JSON.parse(body.body);
+  const values=body.values||body.body?.values;
+  if(!Array.isArray(values)||!values.length||!Array.isArray(values[0])||!/(phone|mobile|contact)/i.test(String(values[0][7]||'')))throw Error('SLA sheet phone column could not be verified');
+  if(values.some(row=>!Array.isArray(row)))throw Error('Invalid SLA sheet rows');
+  const submitted=values.slice(1).some(row=>normalizePhone(row[7]||'')===phone);
+  res.json({checked:true,submitted});
+ }catch(e){console.error('SLA reminder sheet check:',e.message);res.status(503).json({error:'SLA sheet check unavailable'});}
+});
 app.post('/inbound',async(req,res)=>{
  try{
   const p=req.body||{};
