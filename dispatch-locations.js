@@ -7,7 +7,7 @@ const clean=value=>String(value||'').normalize('NFKC').replace(/\s+/g,' ').trim(
 const province=/^(?:south africa|za|kzn|kwazulu[ -]?natal|gauteng|western cape|eastern cape|free state|limpopo|mpumalanga|north west|northern cape)(?:\s+\d{4})?$/i;
 function locality(value){
  const text=clean(value).replace(/\s+\d{4}$/, '');
- if(!text||province.test(text)||/\d|\b(?:road|rd|street|st|avenue|ave|drive|dr|close|crescent|unit|plot|depot|depo|building|floor|phone|contact|unknown|tbc|tbd)\b/i.test(text))return '';
+ if(!text||province.test(text)||/^(?:not specified|unspecified)$/i.test(text)||/\bst\.?$/i.test(text)||/\d|\b(?:road|rd|street|avenue|ave|drive|dr|close|crescent|unit|plot|depot|depo|building|floor|phone|contact|unknown|tbc|tbd)\b/i.test(text))return '';
  return /^[\p{L} .'-]{2,70}$/u.test(text)?text:'';
 }
 function town(value,address){

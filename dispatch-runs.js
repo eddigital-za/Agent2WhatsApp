@@ -49,7 +49,6 @@ function buildRuns(orders,today,decisions=[],kept=[],options={}){
   const carriers=String(o.contractor||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
   const own=carriers.length===1&&carriers[0]==='btsa',mixed=carriers.includes('btsa')&&carriers.some(s=>/cheet/.test(s));
   const parts=routeParts(o.route);
-  const named=value=>value&&!/^(unknown|tbc|tbd|not specified|unspecified)$/i.test(value)?value:'';
   const from=region(parts[0],o.collectionAddress),to=region(parts.at(-1),o.deliveryAddress);
   const label=o.label,id=o.id;
   const load=vehicle(o),sourceSignature=fingerprint(o);

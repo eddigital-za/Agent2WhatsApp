@@ -4,6 +4,8 @@ const {town,region}=require('./dispatch-locations');
 const {createOptimizer}=require('./dispatch-optimizer');
 assert.equal(town('Umlazi D'),'Durban');
 assert.equal(town('Midrand'),'Johannesburg');
+assert.equal(town('St. Francis Bay'),'Gqeberha');
+assert.equal(town('Not specified'),'');
 assert.equal(town('New suburb','17 Example Road, Previously unseen suburb, Durban, KwaZulu-Natal, 4000'),'Durban');
 assert.equal(town('Rosebank','12 Example Avenue, Rosebank, Cape Town, Western Cape'),'Cape Town');
 assert.equal(town('Observatory','12 Durban Road, Observatory, Cape Town, 7925'),'Cape Town');
