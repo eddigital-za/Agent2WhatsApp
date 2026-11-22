@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const {buildRuns,mapLinks}=require('./dispatch-runs');
 const eta=date=>({date,confidence:'confirmed',precision:'day'});
 const today='2026-11-20';
-const order=(n,extra={})=>({externalId:'SLA-'+n,bike:'Honda CBR',clientName:'Test Customer',route:'DBN to JHB',status:'New Order',contractor:'BTSA',collection:null,delivery:null,syncState:'synced',collectionAddress:'Durban, South Africa',deliveryAddress:'Johannesburg, South Africa',...extra});
+const order=(n,extra={})=>({externalId:'SLA-'+n,bike:'Honda CBR',clientName:'Test Customer',route:'DBN to JHB',status:'New Order',contractor:'BTSA',collection:null,delivery:null,syncState:'synced',collectionAddress:'Durban, South Africa',deliveryAddress:'Johannesburg, South Africa',...extra,...(extra.route?{collectionAddress:extra.collectionAddress||extra.route.split(/ to | → /)[0]+', South Africa',deliveryAddress:extra.deliveryAddress||extra.route.split(/ to | → /).at(-1)+', South Africa'}:{})});
 const plan=(orders,kept=[])=>buildRuns(orders,today,[],kept);
 function check(p){
  assert.equal(Object.values(p.coverageCounts).reduce((a,b)=>a+b,0),p.tripCount);

@@ -11,10 +11,8 @@ function addDays(day, count) {
 function routeParts(route) {
  return String(route||'').split(/\s+(?:to|→)\s+/i).map(part=>part.trim()).filter(Boolean);
 }
-function city(value) {
- const name=String(value||'').toLowerCase().replace(/[^a-z0-9 ]/g,'').trim();
- return ({jhb:'johannesburg',joburg:'johannesburg',dbn:'durban',cpt:'cape town',pmb:'pietermaritzburg',el:'east london'})[name]||name;
-}
+const {town:resolveTown}=require('./dispatch-locations');
+const city=value=>resolveTown(value).toLowerCase();
 function stopBounds(stop) {
  if(stop.time)return [stop.time,stop.time];
  const windows={morning:['06:00','11:59'],afternoon:['12:00','17:59'],evening:['18:00','23:59']};

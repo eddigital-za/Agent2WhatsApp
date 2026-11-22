@@ -6,18 +6,7 @@ const WOODHAVEN='Woodhaven, Durban, South Africa';
 const POMONA='Cheetah Express Depot, Pomona, Kempton Park, South Africa';
 const day=(date,n)=>{const d=new Date(date+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);};
 const hash=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
-function region(value){
- const text=String(value||'').toLowerCase();
- const aliases=[
- ['Cape Town',/\b(cpt|cape town|paarl|pearl valley|hout bay|rondebosch|stellenbosch|somerset west)\b/],
- ['Durban',/\b(dbn|durban|ballito|pmb|pietermaritzburg|woodhaven|queensburgh|pinetown|kzn)\b/],
- ['Johannesburg',/\b(jhb|johannesburg|joburg|pomona|kempton|randburg|sandton|edenvale|fourways|gauteng|pta|pretoria|montana|centurion)\b/],
- ['Bloemfontein',/\b(bloemfontein|bloem|pellissier)\b/],
- ['Hoedspruit',/\bhoedspruit\b/],['Malelane',/\bmalelane\b/],
- ['Gqeberha',/\b(gqeberha|port elizabeth|st[.]? francis|pe)\b/],
- ['East London',/\b(east london|el)\b/],['George',/\b(george|herolds bay|herold.s bay|swellendam|suurbraak|stuurbrak)\b/]];
- return aliases.find(([,pattern])=>pattern.test(text))?.[0]||'';
-}
+const {region}=require('./dispatch-locations');
 function routeParts(route){
  return String(route||'').split(/\s+(?:to|→)\s+|\s+-\s+|\s*[–—]\s*|(?<=[a-z)])-(?=[a-z(])/i).map(s=>s.trim()).filter(Boolean);
 }
@@ -61,7 +50,7 @@ function buildRuns(orders,today,decisions=[],kept=[],options={}){
   const own=carriers.length===1&&carriers[0]==='btsa',mixed=carriers.includes('btsa')&&carriers.some(s=>/cheet/.test(s));
   const parts=routeParts(o.route);
   const named=value=>value&&!/^(unknown|tbc|tbd|not specified|unspecified)$/i.test(value)?value:'';
-  const from=region(parts[0])||region(o.collectionAddress)||named(parts[0]),to=region(parts.at(-1))||region(o.deliveryAddress)||named(parts.at(-1));
+  const from=region(parts[0],o.collectionAddress),to=region(parts.at(-1),o.deliveryAddress);
   const label=o.label,id=o.id;
   const load=vehicle(o),sourceSignature=fingerprint(o);
   if(!own&&!mixed){const item={id,label,from,to,load,reason:carriers.length?'Partner-controlled: '+o.contractor+'; confirm a BTSA leg before including':'Unassigned: assign BTSA before including'};(carriers.length?partners:opportunities).push(item);}

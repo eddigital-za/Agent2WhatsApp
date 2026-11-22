@@ -6,11 +6,7 @@ const {localDay}=require('./dispatch-domain');
 const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
 // Public town centres only. Exact addresses remain in Dispatch for Maps links.
 const POINTS={Durban:[31.029,-29.858],Johannesburg:[28.044,-26.202],'Cape Town':[18.423,-33.926],Malelane:[31.511,-25.494],Hoedspruit:[30.95,-24.35],'Herolds Bay':[22.397,-34.05],Dundee:[30.234,-28.166],Pietermaritzburg:[30.379,-29.6],Paarl:[18.963,-33.734],Suurbraak:[20.652,-34.016],George:[22.46,-33.957],Bloemfontein:[26.214,-29.121],Gqeberha:[25.615,-33.961],'East London':[27.912,-33.015]};
-function town(value){
- const text=String(value||'').trim();
- const patterns=[['Herolds Bay',/herold.?s? bay/i],['Paarl',/paarl|pearl valley/i],['Suurbraak',/suurbraak|stuurbraak|stuurbrak|swellendam/i],['Dundee',/dundee/i],['Pietermaritzburg',/\b(pmb|pietermaritzburg)\b/i],['Durban',/\b(dbn|durban|ballito|woodhaven|queensburgh|pinetown|umlazi)\b/i],['Johannesburg',/\b(jhb|joburg|johannesburg|pta|pretoria|montana|sandton|midrand|rosebank|pomona|kempton|randburg|edenvale|fourways|centurion|roodepoort|roodeport)\b/i],['Cape Town',/\b(cpt|cape town|hout bay|rondebosch|milnerton|stellenbosch)\b/i],['Gqeberha',/\b(pe|gqeberha|port elizabeth|st\.? francis)\b/i],['East London',/\b(el|east london)\b/i],['Bloemfontein',/bloem|pellissier/i]];
- return patterns.find(([,re])=>re.test(text))?.[0]||Object.keys(POINTS).find(t=>text.toLowerCase()===t.toLowerCase())||text;
-}
+const {town}=require('./dispatch-locations');
 function runPython(payload,{python,timeout=45000}={}){
  return new Promise((resolve,reject)=>{
   const executable=python||process.env.PLANNER_PYTHON||(fs.existsSync('/app/.planner-venv/bin/python')?'/app/.planner-venv/bin/python':'python');
@@ -60,12 +56,12 @@ function createOptimizer({fetcher=globalThis.fetch,solve=runPython,now=()=>Date.
    const activeLegs=(o.legs||[]).filter(l=>l.handoverAt&&!['Handed over','Delivered','Cancelled'].includes(l.status));
    if(activeLegs.length&&!member.partner){base.blocked.push({id:member.id,label:member.label,reason:'Confirm the handover transport leg before planning this booking'});continue;}
    const mixed=member.partner&&!member.assignmentRequired;
-   const from=mixed&&member.from==='Johannesburg'?'Johannesburg':town(parts[0]);
-   const to=mixed&&member.to==='Johannesburg'?'Johannesburg':town(parts.at(-1));
+   const from=mixed&&member.from==='Johannesburg'?'Johannesburg':town(parts[0],o.collectionAddress);
+   const to=mixed&&member.to==='Johannesburg'?'Johannesburg':town(parts.at(-1),o.deliveryAddress);
    if(from===to){base.blocked.push({id:member.id,label:member.label,reason:'Local stops need a separate local route'});continue;}
-   jobs.push({...member,from,to,collection:mixed&&!member.pickup?null:o.collection,drop:to===town(parts.at(-1))?o.delivery:null,conditional:Boolean(member.assignmentRequired||member.partner)});
+   jobs.push({...member,from,to,collection:mixed&&!member.pickup?null:o.collection,drop:to===town(parts.at(-1),o.deliveryAddress)?o.delivery:null,conditional:Boolean(member.assignmentRequired||member.partner)});
   }
-  const direct=jobs.filter(m=>m.partner&&!m.assignmentRequired).map(m=>{const o=originals.get(m.id),parts=routeParts(o.route);return {...m,from:town(parts[0]),to:town(parts.at(-1)),pickupAddress:o.collectionAddress||town(parts[0])+', South Africa',dropAddress:o.deliveryAddress||town(parts.at(-1))+', South Africa',collection:o.collection,drop:o.delivery,directMode:true,conditional:true,assignmentRequired:true};});
+  const direct=jobs.filter(m=>m.partner&&!m.assignmentRequired).map(m=>{const o=originals.get(m.id),parts=routeParts(o.route);return {...m,from:town(parts[0],o.collectionAddress),to:town(parts.at(-1),o.deliveryAddress),pickupAddress:o.collectionAddress||town(parts[0],o.collectionAddress)+', South Africa',dropAddress:o.deliveryAddress||town(parts.at(-1),o.deliveryAddress)+', South Africa',collection:o.collection,drop:o.delivery,directMode:true,conditional:true,assignmentRequired:true};});
   jobs.sort((a,b)=>a.id.localeCompare(b.id));direct.sort((a,b)=>a.id.localeCompare(b.id));
   // Cache the solver's inputs, not record identities or ETA/source metadata.
   const when=eta=>eta?Object.fromEntries(['date','time','precision','confidence','window'].map(k=>[k,eta[k]||''])):null;
