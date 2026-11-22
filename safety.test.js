@@ -108,33 +108,34 @@ test("sales ignores bot/local/untrusted events; duplicate and concurrent approva
   assert.equal(customerSent,1);
  } finally {global.fetch=oldFetch;db.close();}
 });
-test("SLA links schedule one approval after 24 hours and a client reply cancels it",async()=>{
- process.env.SALES_ENABLED="true";process.env.SALES_TEST_MODE="true";process.env.SALES_TEST_PHONES="27760000000";
- const db=new DatabaseSync(":memory:");
- db.exec("CREATE TABLE leads(id INTEGER PRIMARY KEY, submitted_at TEXT, name TEXT, phone TEXT)");
- db.prepare("INSERT INTO leads(id,submitted_at,name,phone) VALUES(?,?,?,?)").run(1,new Date().toISOString(),"Sipho","760000000");
- const cards=[];
- const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async()=>({id:{_serialized:"sent"}})};
- const approvalClient={info:{},sendMessage:async(_to,text)=>{cards.push(text);return {id:{_serialized:"sla-card"}};}};
- const norm=x=>String(x||"").replace(/\D/g,"");
- const local=x=>{const n=norm(x);return n.startsWith("27")?n.slice(2):n;};
- const agent=installSalesAgent({db,customerClient,approvalClient,approvalGroupId:"123@g.us",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:local,logEvent:()=>{}});
- const outgoing={fromMe:true,body:"Please complete this: https://biketransport.co.za/booking-form/?ts=abc",id:{_serialized:"true_sla1"},timestamp:Math.floor(Date.now()/1000)};
- const oldFetch=global.fetch;
- global.fetch=async()=>({ok:true,json:async()=>({proposedReply:"Howzit Sipho, did you get a chance to complete the booking form? Shout if you need a hand.",category:"booking",confidence:1,notes:""})});
+test("SLA links send one direct reminder after 24h and skip replies or SLA submissions",async()=>{
+ process.env.SALES_ENABLED="false";process.env.SALES_CONVERSATION_ENABLED="false";
+ const db=new DatabaseSync(":memory:"),sends=[],cards=[];let submitted=false,reply=false,uncertain=false,lookupFails=false;
+ const norm=x=>{let n=String(x||"").replace(/\D/g,"");return n.length===9?"27"+n:n;};
+ const local=x=>norm(x).slice(-9);
+ let current;
+ const client={info:{},sendMessage:async(to,text)=>{sends.push({to,text});if(uncertain)throw Error("unknown");return {id:{_serialized:"sent"}};},getChatById:async()=>({fetchMessages:async()=>[current,...(reply?[{fromMe:false,timestamp:current.timestamp+1}]:[])]})};
+ const agent=installSalesAgent({db,customerClient:client,approvalClient:{info:{},sendMessage:async(...p)=>cards.push(p)},approvalGroupId:"",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:norm,localPhone:local,logEvent:()=>{}});
+ const old=global.fetch;
+ global.fetch=async(url)=>{assert.match(url,/sales\/booking-status$/);if(lookupFails)throw Error("sheet unavailable");return {ok:true,json:async()=>({checked:true,submitted})};};
+ const link=async(id)=>{current={fromMe:true,body:"https://biketransport.co.za/booking-form/?ts=1",id:{_serialized:id},timestamp:Math.floor(Date.now()/1000)};await agent.onOutgoing(current,"760000000");};
+ const due=()=>db.prepare("UPDATE sales_sla_followups SET due_at=? WHERE state='pending'").run(new Date(Date.now()-1000).toISOString());
  try {
-  assert.equal(await agent.onOutgoing(outgoing,"760000000"),true);
-  assert.equal(await agent.onOutgoing(outgoing,"760000000"),false);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM sales_sla_followups").get().n,1);
-  db.prepare("UPDATE sales_sla_followups SET due_at=?").run(new Date(Date.now()-1000).toISOString());
-  assert.equal(await agent.processDueFollowups(),1);
+  await link("direct-1");
   assert.equal(await agent.processDueFollowups(),0);
-  assert.equal(cards.length,1);
-  assert.match(cards[0],/SLA follow-up due/);
-  await agent.onCustomer({fromMe:false,body:"Done thanks",id:{_serialized:"false_reply"},timestamp:Math.floor(Date.now()/1000)},null,"760000000");
-  assert.equal(db.prepare("SELECT state FROM sales_sla_followups").get().state,"cancelled_reply");
-  assert.equal(db.prepare("SELECT state FROM sales_approvals").get().state,"superseded");
- } finally {global.fetch=oldFetch;db.close();}
+  assert.equal(Date.parse(db.prepare("SELECT due_at FROM sales_sla_followups").get().due_at)-current.timestamp*1000,86400000);
+  due(); await Promise.all([agent.processDueFollowups(),agent.processDueFollowups()]);
+  assert.equal(sends.length,1);assert.equal(cards.length,0);assert.match(sends[0].text,/Howzit, did you get a chance/);
+  assert.equal(await agent.processDueFollowups(),0);
+  await link("reply-2");reply=true;due();await agent.processDueFollowups();assert.equal(sends.length,1);
+  reply=false;submitted=true;await link("sheet-3");due();await agent.processDueFollowups();assert.equal(sends.length,1);
+  submitted=false;uncertain=true;await link("unknown-4");due();await agent.processDueFollowups();
+  assert.equal(db.prepare("SELECT state FROM sales_sla_followups WHERE source_message_id='unknown-4'").get().state,"send_unknown");
+  await agent.processDueFollowups();assert.equal(sends.length,2);
+  uncertain=false;lookupFails=true;await link("lookup-5");due();await agent.processDueFollowups();assert.equal(sends.length,2);
+  assert.equal(db.prepare("SELECT state FROM sales_sla_followups WHERE source_message_id='lookup-5'").get().state,"pending");
+  lookupFails=false;await link("legacy-5");db.prepare("UPDATE sales_sla_followups SET direct_eligible=0 WHERE source_message_id='legacy-5'").run();due();await agent.processDueFollowups();assert.equal(sends.length,2);
+ }finally{global.fetch=old;db.close();}
 });
 test("successful SLA submission cancels the reminder and sends one confirmation",async()=>{
  const db=new DatabaseSync(":memory:");let customerSent=0;const messages=[];

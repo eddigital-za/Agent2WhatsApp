@@ -82,6 +82,8 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   if (!approvalColumns.includes("context_json")) db.exec("ALTER TABLE sales_approvals ADD COLUMN context_json TEXT");
   if (!approvalColumns.includes("sequence_id")) db.exec("ALTER TABLE sales_approvals ADD COLUMN sequence_id INTEGER");
   if (!approvalColumns.includes("instruction_history_json")) db.exec("ALTER TABLE sales_approvals ADD COLUMN instruction_history_json TEXT");
+  const followupColumns = db.prepare("PRAGMA table_info(sales_sla_followups)").all().map(row => row.name);
+  if (!followupColumns.includes("direct_eligible")) db.exec("ALTER TABLE sales_sla_followups ADD COLUMN direct_eligible INTEGER NOT NULL DEFAULT 0");
   const confirmationColumns = db.prepare("PRAGMA table_info(sales_order_confirmations)").all().map(row => row.name);
   if (!confirmationColumns.includes("booking_key")) db.exec("ALTER TABLE sales_order_confirmations ADD COLUMN booking_key TEXT");
   if (!confirmationColumns.includes("duplicate_of_sla_ref")) db.exec("ALTER TABLE sales_order_confirmations ADD COLUMN duplicate_of_sla_ref TEXT");
@@ -544,7 +546,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const normalized = localPhone(phone);
     const recorded = remember(normalized, "duane", body, messageId, sentAt);
     if (!/https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booking-form)\/?[^\s]*/i.test(body)) return recorded;
-    const followupHours = Math.max(1, Number(process.env.SALES_SLA_FOLLOWUP_HOURS || 24));
+    const followupHours = 24;
     const dueAt = new Date(Date.parse(sentAt) + followupHours * 3600000).toISOString();
     if (db.prepare("SELECT 1 FROM sales_sla_followups WHERE source_message_id=?").get(messageId)) return false;
     const older = db.prepare("SELECT id FROM sales_sla_followups WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").all(normalized);
@@ -553,7 +555,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const sequenceRows = db.prepare("SELECT id FROM sales_lead_sequence WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").all(normalized);
     db.prepare("UPDATE sales_lead_sequence SET state='cancelled_sla',updated_at=? WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").run(now(), normalized);
     for (const row of sequenceRows) db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=?,decision_text='SLA link sent' WHERE sequence_id=? AND state='pending'").run(now(), row.id);
-    const result = db.prepare("INSERT INTO sales_sla_followups(phone,source_message_id,sla_message,sent_at,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)")
+    const result = db.prepare("INSERT INTO sales_sla_followups(phone,source_message_id,sla_message,sent_at,due_at,created_at,updated_at,direct_eligible) VALUES(?,?,?,?,?,?,?,1)")
       .run(normalized, messageId, body, sentAt, dueAt, now(), now());
     if (result.changes !== 1) return false;
     logEvent({ phone: normalized, type: "sla_followup_scheduled", key: `sla-scheduled-${messageId}`, details: { dueAt } });
@@ -562,40 +564,50 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   }
 
   async function processDueFollowups() {
-    if (!ready()) return 0;
-    const rows = db.prepare("SELECT * FROM sales_sla_followups WHERE state='pending' AND due_at<=? ORDER BY due_at ASC LIMIT 5").all(now());
+    if (!customerClient?.info || !reasonerUrl || !token) return 0;
+    const rows = db.prepare("SELECT * FROM sales_sla_followups WHERE state='pending' AND direct_eligible=1 AND due_at<=? ORDER BY due_at LIMIT 5").all(now());
     let processed = 0;
     for (const row of rows) {
-      const locked = db.prepare("UPDATE sales_sla_followups SET state='processing',updated_at=? WHERE id=? AND state='pending'").run(now(), row.id);
-      if (locked.changes !== 1) continue;
+      if (db.prepare("UPDATE sales_sla_followups SET state='processing',updated_at=? WHERE id=? AND state='pending'").run(now(),row.id).changes!==1) continue;
       try {
-        const lead = db.prepare("SELECT * FROM leads WHERE phone=? ORDER BY submitted_at DESC LIMIT 1").get(row.phone);
-        const out = await reason("/sales/followup", {
-          lead: lead ? { name: lead.name || "", phone: row.phone } : { phone: row.phone },
-          slaMessage: row.sla_message,
-          sentAt: row.sent_at,
-          history: followupHistory(row.phone, row.sent_at),
-        });
-        if (!out.proposedReply) throw new Error("Reasoner returned no SLA follow-up reply");
-        const ref = caseRef();
-        db.prepare("UPDATE sales_approvals SET state='superseded' WHERE phone=? AND state='pending'").run(row.phone);
-        const result = db.prepare("INSERT INTO sales_approvals(case_ref,lead_id,phone,customer_text,proposed_reply,followup_id,created_at) VALUES(?,?,?,?,?,?,?)")
-          .run(ref, lead?.id || null, row.phone, "No reply since SLA/booking link", out.proposedReply, row.id, now());
-        const card = `*${ref} — SLA follow-up due — ${lead?.name || `Lead …${row.phone.slice(-4)}`}*\n\nYou sent the booking/SLA link yesterday and the client has not replied.\n\n*My suggested follow-up:*\n${out.proposedReply}\n\nReply naturally or send a voice note. I will wait for your approval before sending.`;
-        db.prepare("UPDATE sales_sla_followups SET state='approval_sending',updated_at=? WHERE id=? AND state='processing'").run(now(), row.id);
-        let groupId;
-        try { groupId = await caseCard({id: Number(result.lastInsertRowid)}, card, out.proposedReply || null); }
-        catch (error) {
-          db.prepare("UPDATE sales_sla_followups SET state='approval_unknown',updated_at=? WHERE id=? AND state='approval_sending'").run(now(), row.id);
+        // Read the current chat, not only the website-lead history. Fail closed if unavailable.
+        const chat = await customerClient.getChatById(`${normalizePhone(row.phone)}@c.us`);
+        const messages = await chat.fetchMessages({limit:100});
+        if (!Array.isArray(messages)) throw Error("WhatsApp reply check unavailable");
+        const source = messages.find(m=>m.id?._serialized===row.source_message_id);
+        if (!source) throw Error("SLA link is outside the verifiable WhatsApp history");
+        const sourceIndex = messages.indexOf(source);
+        const replied = messages.some((m,i)=>!m.fromMe && (Number(m.timestamp)*1000>Date.parse(row.sent_at) || (Number(m.timestamp)*1000===Date.parse(row.sent_at)&&i>sourceIndex)));
+        const localReply = db.prepare("SELECT 1 FROM sales_messages WHERE phone=? AND direction='customer' AND created_at>? LIMIT 1").get(row.phone,row.sent_at);
+        if(replied||localReply) {
+          db.prepare("UPDATE sales_sla_followups SET state='cancelled_reply',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id);
+          continue;
+        }
+        const sheet = await reason("/sales/booking-status",{phone:normalizePhone(row.phone)});
+        if(sheet.checked!==true||typeof sheet.submitted!=="boolean")throw Error("SLA sheet check not verified");
+        const order = db.prepare("SELECT 1 FROM sales_order_confirmations WHERE phone=? AND created_at>=? LIMIT 1").get(row.phone,row.sent_at);
+        if(sheet.submitted||order) {
+          db.prepare("UPDATE sales_sla_followups SET state='cancelled_order',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id);
+          continue;
+        }
+        // Cancel/reply/new-link events can change the row during either lookup.
+        if(db.prepare("UPDATE sales_sla_followups SET state='sending',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id).changes!==1)continue;
+        const text="Howzit, did you get a chance to complete the booking form I sent? If you need a hand with anything, ask me here 👍🏼";
+        try {
+          const sent=await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`,text);
+          remember(row.phone,"agent",text,sent?.id?._serialized);
+          db.prepare("UPDATE sales_sla_followups SET state='sent',updated_at=? WHERE id=? AND state='sending'").run(now(),row.id);
+          logEvent({phone:row.phone,type:"sla_followup_sent",key:`sla-direct-${row.id}`});
+          processed++;
+        } catch(error) {
+          db.prepare("UPDATE sales_sla_followups SET state='send_unknown',updated_at=? WHERE id=? AND state='sending'").run(now(),row.id);
           throw error;
         }
-        db.prepare("UPDATE sales_approvals SET group_message_id=? WHERE id=?").run(groupId, Number(result.lastInsertRowid));
-        db.prepare("UPDATE sales_sla_followups SET state='approval_requested',updated_at=? WHERE id=? AND state='approval_sending'").run(now(), row.id);
-        logEvent({ leadId: lead?.id || null, phone: row.phone, type: "sla_followup_approval_requested", key: `sla-followup-${row.source_message_id}`, details: { ref } });
-        processed++;
-      } catch (error) {
-        db.prepare("UPDATE sales_sla_followups SET state='pending',updated_at=? WHERE id=? AND state='processing'").run(now(), row.id);
-        console.error("SLA follow-up processing failed:", error.message);
+      } catch(error) {
+        // No automatic replay after an uncertain send. Temporary lookup failures wait 15 minutes.
+        db.prepare("UPDATE sales_sla_followups SET state='pending',due_at=?,updated_at=? WHERE id=? AND state='processing'")
+          .run(new Date(Date.now()+15*60000).toISOString(),now(),row.id);
+        console.error("SLA follow-up processing failed:",error.message);
       }
     }
     return processed;
