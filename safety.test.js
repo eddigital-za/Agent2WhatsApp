@@ -125,7 +125,7 @@ test("SLA links send one direct reminder after 24h and skip replies or SLA submi
   assert.equal(await agent.processDueFollowups(),0);
   assert.equal(Date.parse(db.prepare("SELECT due_at FROM sales_sla_followups").get().due_at)-current.timestamp*1000,86400000);
   due(); await Promise.all([agent.processDueFollowups(),agent.processDueFollowups()]);
-  assert.equal(sends.length,1);assert.equal(cards.length,0);assert.match(sends[0].text,/Howzit, did you get a chance/);
+  assert.equal(sends.length,1);assert.equal(cards.length,0);assert.match(sends[0].text,/Howzit, please complete the booking form I sent/);
   assert.equal(await agent.processDueFollowups(),0);
   await link("reply-2");reply=true;due();await agent.processDueFollowups();assert.equal(sends.length,1);
   reply=false;submitted=true;await link("sheet-3");due();await agent.processDueFollowups();assert.equal(sends.length,1);
