@@ -25,6 +25,18 @@ function answer(payload){const j=payload.jobs[0];return {options:[{jobs:[j.id],c
  const refreshed=[order(1,{version:99,notes:[{text:'Routine admin note'}],sheetCells:['refreshed']})];
  assert.equal(optimizer.get(refreshed,instant).optimizer.state,'ready','Sheet metadata changes must retain calculated routes');
  assert.equal(calls,1,'Routine refresh must not restart the solver');
+ assert.equal(optimizer.get([order(1,{clientName:'Updated fake name',collectionAddress:'Updated test address',collectionContact:'New contact'})],instant).optimizer.state,'ready','Rebuild labels and Maps from current records without recalculating the same town-level problem');
+ const keyA=optimizer.prepare([order(1,{collection:{...eta('2026-11-25'),source:'sheet',sourceId:'1'}})],instant,[],[]).key;
+ const keyB=optimizer.prepare([order(1,{collection:{sourceId:'2',source:'whatsapp',confidence:'confirmed',precision:'day',date:'2026-11-25'}})],instant,[],[]).key;
+ assert.equal(keyA,keyB,'Equivalent ETA values and source metadata must not restart a calculation');
+ const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
+ const cacheFile=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'btsa-plan-')),'solution.json');
+ const disk=createOptimizer({cacheFile,fetcher:async()=>matrix,solve:async p=>answer(p)});
+ disk.get(input,instant);await wait();
+ const restarted=createOptimizer({cacheFile,fetcher:async()=>{throw Error('Offline')},solve:async()=>{throw Error('Must reuse exact matching persisted solution')}});
+ assert.equal(restarted.get(input,instant).optimizer.state,'ready','Restart must restore an exact-match solution even with the road provider offline');
+ assert.equal(restarted.get(input,instant).journeys.length,1);
+ assert.equal(restarted.get([order(1,{collection:eta('2026-11-26')})],instant).journeys.length,0,'Changed trip dates must not reuse a persisted solution');
  const sorted=createOptimizer({fetcher:async()=>matrix,solve:async p=>answer(p)});
  const pair=[order(1),order(2)];
  assert.equal(sorted.prepare(pair,instant,[],[]).key,sorted.prepare([...pair].reverse(),instant,[],[]).key,'Database sorting must not invalidate a plan');

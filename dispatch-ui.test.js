@@ -216,6 +216,11 @@ assert.deepEqual(JSON.parse(vm.runInContext("JSON.stringify(changesFor(data.orde
  assert.match(flatten($('planAhead')),/Empty return from Test North/);
  assert.match(flatten($('planAhead')),/Adds 1 order for about 700 km/);
  assert.ok($('planAhead').children.indexOf(findCards()[0])<$('planAhead').children.findIndex(section=>section.children.some(child=>child.textContent==='13 open orders accounted for')),'Show the operational trip before the accounting panel');
+ const beforePolling=refreshes;
+ vm.runInContext("key='fake-test-key';busy=false;selected.clear();$('orderDialog').close()",context);
+ await vm.runInContext('Promise.all([load({recorded:true}),load({recorded:true,quiet:true}),load({recorded:true,quiet:true})])',context);
+ assert.equal(refreshes-beforePolling,1,'Background polling must not overlap and supersede an in-flight refresh');
+ assert.equal(vm.runInContext('workspaceRequests',context),0);
  vm.runInContext("setView('calendar')",context);
  assert.equal($('planAhead').hidden,true);
  assert.equal($('calendar').hidden,false);

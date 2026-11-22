@@ -1,7 +1,7 @@
 'use strict';
 const crypto=require('node:crypto'),fs=require('node:fs'),path=require('node:path');
 const {spawn}=require('node:child_process');
-const {buildRuns,expand,fingerprint,routeParts,mapLinks,WOODHAVEN,POMONA}=require('./dispatch-runs');
+const {buildRuns,expand,routeParts,mapLinks,WOODHAVEN,POMONA}=require('./dispatch-runs');
 const {localDay}=require('./dispatch-domain');
 const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
 // Public town centres only. Exact addresses remain in Dispatch for Maps links.
@@ -25,9 +25,11 @@ function runPython(payload,{python,timeout=45000}={}){
   child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify(payload));
  });
 }
-function createOptimizer({fetcher=globalThis.fetch,solve=runPython,now=()=>Date.now(),onResult=()=>{}}={}){
+function createOptimizer({fetcher=globalThis.fetch,solve=runPython,now=()=>Date.now(),onResult=()=>{},cacheFile=fs.existsSync('/app/.wwebjs_auth')?'/app/.wwebjs_auth/dispatch-planner-solution.json':null}={}){
  let cached=null,pending=false,retryAt=0,failure='',desired=null;
  const matrices=new Map(),coordinates=new Map(Object.entries(POINTS));
+ try{if(cacheFile&&fs.statSync(cacheFile).size<2000000){const saved=JSON.parse(fs.readFileSync(cacheFile,'utf8'));if(typeof saved.key==='string'&&Array.isArray(saved.output?.options))cached={key:saved.key,output:saved.output,updatedAt:saved.updatedAt};for(const [key,value] of saved.matrices||[])matrices.set(key,value);for(const [key,value] of saved.coordinates||[])coordinates.set(key,value);}}catch{}
+ const persist=()=>{if(!cacheFile)return;try{fs.writeFileSync(cacheFile+'.tmp',JSON.stringify({...cached,matrices:[...matrices],coordinates:[...coordinates]}));fs.renameSync(cacheFile+'.tmp',cacheFile);}catch{console.error('Dispatch planner cache could not be saved; orders are unchanged');}};
  async function roads(towns){
   const key=towns.join('|'),existing=matrices.get(key);
   if(existing&&now()-existing.at<86400000)return existing.data;
@@ -64,8 +66,11 @@ function createOptimizer({fetcher=globalThis.fetch,solve=runPython,now=()=>Date.
    jobs.push({...member,from,to,collection:mixed&&!member.pickup?null:o.collection,drop:to===town(parts.at(-1))?o.delivery:null,conditional:Boolean(member.assignmentRequired||member.partner)});
   }
   const direct=jobs.filter(m=>m.partner&&!m.assignmentRequired).map(m=>{const o=originals.get(m.id),parts=routeParts(o.route);return {...m,from:town(parts[0]),to:town(parts.at(-1)),pickupAddress:o.collectionAddress||town(parts[0])+', South Africa',dropAddress:o.deliveryAddress||town(parts.at(-1))+', South Africa',collection:o.collection,drop:o.delivery,directMode:true,conditional:true,assignmentRequired:true};});
-  // Sheet versions, notes and record order change without changing a trip.
-  const key=hash([today,[...originals.values()].map(o=>[o.id,fingerprint(o)]).sort((a,b)=>a[0].localeCompare(b[0])),[...decisions].sort((a,b)=>a.id.localeCompare(b.id)),kept.map(p=>[p.id,p.signature]).sort((a,b)=>a[0].localeCompare(b[0]))]);
+  jobs.sort((a,b)=>a.id.localeCompare(b.id));direct.sort((a,b)=>a.id.localeCompare(b.id));
+  // Cache the solver's inputs, not record identities or ETA/source metadata.
+  const when=eta=>eta?Object.fromEntries(['date','time','precision','confidence','window'].map(k=>[k,eta[k]||''])):null;
+  const pack=j=>({id:j.id,from:j.from,to:j.to,bikes:j.load.bikes,cars:j.load.cars,pickup:when(j.collection),delivery:when(j.drop),conditional:j.conditional});
+  const key=hash([today,jobs.map(pack),direct.map(pack)]);
   return {key,base,jobs,direct,instant,today,kept};
  }
  function decorate(request,result){
@@ -111,21 +116,21 @@ function createOptimizer({fetcher=globalThis.fetch,solve=runPython,now=()=>Date.
   try{
    const all=[...request.jobs,...request.direct];
    if(all.length>40)throw Error('More than 40 open route jobs need a smaller planning batch');
-   const towns=[...new Set(['Durban',...all.flatMap(j=>[j.from,j.to])])];
+   const towns=['Durban',...[...new Set(all.flatMap(j=>[j.from,j.to]))].filter(t=>t!=='Durban').sort()];
    if(towns.length>24)throw Error('More than 24 route towns need a smaller planning batch');
    const matrix=all.length?await roads(towns):{distances:[[0]],durations:[[0]]};
    const pack=j=>({id:j.id,from:towns.indexOf(j.from),to:towns.indexOf(j.to),bikes:j.load.bikes,cars:j.load.cars,pickup:j.collection,delivery:j.drop,conditional:j.conditional});
    const output=all.length?await solve({today:request.today,instant:request.instant,towns,distances:matrix.distances,durations:matrix.durations,jobs:request.jobs.map(pack),direct:request.direct.map(pack)}):{options:[]};
-   const execution=decorate(request,output);cached={key:request.key,execution};retryAt=0;
+   const execution=decorate(request,output);cached={key:request.key,output,updatedAt:execution.optimizer.updatedAt};persist();retryAt=0;
    console.info('Dispatch PyVRP ready',JSON.stringify({bookings:execution.bookingCount,trips:execution.tripCount,options:execution.journeys.length}));onResult(execution);
   }catch(error){failure=error.message;retryAt=now()+60000;console.error('Dispatch trip optimiser held:',failure);}
   finally{pending=false;if(desired&&desired.key!==request.key&&now()>=retryAt)void compute(desired);}
  }
  function get(orders,instant,decisions=[],kept=[]){
   const request=prepare(orders,instant,decisions,kept);desired=request;
-  if(cached?.key===request.key)return cached.execution;
+  if(cached?.key===request.key){const execution=decorate(request,cached.output);execution.optimizer.updatedAt=cached.updatedAt;return execution;}
   if(!pending&&now()>=retryAt)void compute(request);
-  if(cached?.key===request.key)return cached.execution;
+  if(cached?.key===request.key){const execution=decorate(request,cached.output);execution.optimizer.updatedAt=cached.updatedAt;return execution;}
   request.base.journeys=[];request.base.optimizer={engine:'PyVRP 0.14.1',state:failure?'unavailable':'working',message:failure||'Building trip options from current orders. This updates automatically.'};
   return request.base;
  }

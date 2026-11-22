@@ -138,15 +138,16 @@ function matches(o){if(view.kind==='collections')return o.collectionToday;if(vie
 function visibleOrders(){const q=$('search').value.trim().toLowerCase();return data.orders.filter(o=>matches(o)&&[o.externalId,o.clientName,o.bike,o.route,o.status,o.contractor].join(' ').toLowerCase().includes(q)).sort((a,b)=>b.externalId.localeCompare(a.externalId,undefined,{numeric:true}));}
 async function api(url,body){const r=await fetch(url,{method:body?'POST':'GET',headers:{'x-api-key':key,'content-type':'application/json'},cache:'no-store',...(body?{body:JSON.stringify(body)}:{})});const result=await r.json();if(!r.ok){if(r.status===401){rememberLogin('');key='';$('board').hidden=true;$('login').hidden=false;}throw new Error(result.error||'Request failed');}return result;}
 function setView(kind,value=''){if(busy)return;view={kind,value};selected.clear();$('search').value='';$('board').classList.remove('nav-open');$('menu').setAttribute('aria-expanded','false');render();}
-let workspaceLoad=0;
+let workspaceLoad=0,workspaceRequests=0;
 async function load({recorded=false,quiet=false,keepSelection=false}={}){
- if(busy)return;
+ if(busy||quiet&&workspaceRequests)return;
+ workspaceRequests++;
  const request=++workspaceLoad;
  if(!quiet)$('notice').textContent=recorded?'Updating Dispatch…':'Refreshing from Google Sheets…';
  try{
  const fresh=await api('/dispatch/workspace'+(recorded?'?recorded=1':''));
  if(request!==workspaceLoad||quiet&&(!key||busy||selected.size||$('orderDialog').open))return;
- data=fresh;const remembered=rememberLogin(key);if(!keepSelection)selected.clear();$('board').hidden=false;$('login').hidden=true;render();if(quiet)return;$('notice').textContent=data.warning||(!remembered?'Your browser cannot remember this login. Allow site storage to stay logged in.':'Orders updated · '+new Date().toLocaleTimeString());}catch(e){if(!quiet){$('notice').textContent=e.message;$('loginError').textContent=e.message;}}}
+ data=fresh;const remembered=rememberLogin(key);if(!keepSelection)selected.clear();$('board').hidden=false;$('login').hidden=true;render();if(quiet)return;$('notice').textContent=data.warning||(!remembered?'Your browser cannot remember this login. Allow site storage to stay logged in.':'Orders updated · '+new Date().toLocaleTimeString());}catch(e){if(!quiet){$('notice').textContent=e.message;$('loginError').textContent=e.message;}}finally{workspaceRequests--;}}
 $('login').onsubmit=e=>{e.preventDefault();key=$('key').value.trim();$('key').value='';load();};$('refresh').onclick=()=>load();
 if(typeof window!=='undefined')setInterval(()=>{
  if(key&&!document.hidden&&!busy&&!selected.size&&!$('orderDialog').open)void load({recorded:true,quiet:true});
