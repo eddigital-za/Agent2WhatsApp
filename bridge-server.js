@@ -29,6 +29,28 @@ function installBridge(app,client,MessageMedia) {
       res.json(chats.filter(x=>x.isGroup).map(x=>({id:x.id._serialized,name:x.name})));
     }catch(e){res.status(500).json({error:e.message});}
   });
+  // Read-only contact lookup for explicitly named dealer and sales-rep groups.
+  app.get("/bridge/contacts", auth, async (req, res) => {
+    try {
+      if (!client.info) return res.status(503).json({error:"Session not ready"});
+      if (typeof client.getContacts !== "function") return res.status(503).json({error:"Contact lookup unavailable"});
+      const query = String(req.query.q || "").trim().toLowerCase();
+      if (query.length < 3 || query.length > 80) return res.status(400).json({error:"Search term must be 3-80 characters"});
+      const contacts = await client.getContacts();
+      const matches = contacts.filter(c => {
+        const name = String(c.name || c.pushname || c.shortName || "");
+        return name.toLowerCase().includes(query);
+      }).slice(0, 200).map(c => ({
+        name: String(c.name || c.pushname || c.shortName || ""),
+        number: String(c.number || ""),
+        id: String(c.id?._serialized || "")
+      }));
+      res.json({contacts:matches, truncated:matches.length === 200});
+    } catch (e) {
+      console.error("Contact lookup failed:", e.message);
+      res.status(502).json({error:"Contact lookup unavailable"});
+    }
+  });
   async function refresh() {
     const services=[...new Set([...JSON.parse(process.env.SHARED_BRIDGE_WORKERS||"[]"), process.env.SCHEDULING_AGENT_WORKER_URL, process.env.SALES_AGENT_WORKER_URL].filter(Boolean))];
     const next=new Map(), pending=[];
