@@ -697,6 +697,27 @@ function cleanupOldMediaFiles() {
 // Clean temporary media every 15 minutes
 setInterval(cleanupOldMediaFiles, 15 * 60 * 1000);
 
+// One-time, read-only contact diagnostic. Logs aggregate counts only.
+client.once("ready", async () => {
+  try {
+    if (typeof client.getContacts !== "function") {
+      console.log("Contact diagnostic: unavailable (getContacts unsupported)");
+      return;
+    }
+    const contacts = await client.getContacts();
+    const count = term => contacts.filter(c =>
+      String(c.name || c.pushname || c.shortName || "").toLowerCase().includes(term)
+    ).length;
+    console.log("Contact diagnostic:", JSON.stringify({
+      status: "success",
+      dealer: count("dealer"),
+      weBuyCars: count("we buy cars")
+    }));
+  } catch (error) {
+    console.error("Contact diagnostic: failed", error.name || "Error");
+  }
+});
+
 // Start the WhatsApp client and the Express server
 client.initialize().catch(error=>console.error("Bridge initialization failed:",error.message));
 
