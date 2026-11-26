@@ -183,7 +183,7 @@ const sales = installSalesAgent({
   approvalGroupId: () => approvalGroupId,
   reasonerUrl: process.env.SALES_REASONER_URL || "",
   token: process.env.SALES_AGENT_TOKEN || "",
-  normalizePhone: normalizeZaPhone, localPhone: localNineDigit, logEvent,
+  normalizePhone: normalizeZaPhone, localPhone: localNineDigit, logEvent, sendSlaReminder: sendWhatsApp,
 });
 
 app.post("/sales/order-confirmed", auth, async (req, res) => {
@@ -415,6 +415,34 @@ async function handleOutgoing(message) {
 }
 client.on("message_create", handleOutgoing);
 
+// Recover recent outgoing links if WhatsApp's live event stream misses one.
+let slaCaptureRunning = false;
+async function reconcileRecentSlaLinks() {
+  if (slaCaptureRunning || !client.info || !client.pupPage?.evaluate) return;
+  slaCaptureRunning = true;
+  try {
+    const since = Math.max(Date.parse("2026-11-26T19:30:00Z"),Date.now()-20*60000)/1000;
+    const links = await client.pupPage.evaluate(since => {
+      const wid = x => x?._serialized || x?.$1 || (typeof x === 'string' ? x : `${x?.user}@${x?.server}`);
+      return window.require("WAWebCollections").Chat.getModelsArray().filter(chat=>Number(chat.t)>=since)
+        .flatMap(chat=>{
+          const to=wid(chat.id);
+          if (!/^\d+@(?:lid|c\.us)$/.test(to) || !chat.msgs) return [];
+          const link=chat.msgs.getModelsArray().filter(m=>m.id?.fromMe===true && m.t>=since && /https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:booking-form|timestamp)(?=[/?#\s]|$)/i.test(m.body||m.caption||""))
+            .sort((a,b)=>b.t-a.t)[0];
+          return link?[{fromMe:true,to,timestamp:link.t,body:link.body||link.caption,id:{_serialized:link.id?._serialized||link.id?.$1,remote:to,fromMe:true,id:link.id?.id}}]:[];
+        }).slice(0,25);
+    },since);
+    for (const link of links) {
+      const id=link.id._serialized || (link.id.id && `true_${link.to}_${link.id.id}`);
+      if (!id || db.prepare("SELECT 1 FROM sales_sla_followups WHERE source_message_id=?").get(id)) continue;
+      await handleOutgoing(link);
+    }
+  } catch (error) {console.warn("SLA reminder capture check failed:",error.message);}
+  finally {slaCaptureRunning=false;}
+}
+if (process.env.CUSTOMER_SESSION_LOCAL === "true") setInterval(reconcileRecentSlaLinks,300000).unref();
+
 // One authorized catch-up on the existing 072 session. No scan on subsequent starts.
 const catchupEnd = Date.parse("2026-11-26T18:32:28Z");
 const catchupKey = "sla-48h-catchup-20261126-loaded";
@@ -442,19 +470,20 @@ const catchupTimer = process.env.CUSTOMER_SESSION_LOCAL === "true" ? setInterval
 if (catchupTimer) client.on("ready",runSlaCatchup);
 
 // One-time follow-up for the corrected, user-identified 24 November conversation.
-const promiseAuditKey = "sla-corrected-followup-20261126-1204";
+const promiseAuditKey = "sla-corrected-followup-20261126-8977";
 if (process.env.CUSTOMER_SESSION_LOCAL === "true" && Date.now() < Date.parse("2026-11-27T00:00:00+02:00")) {
   const timer = setInterval(async () => {
     if (!client.info) return;
     clearInterval(timer);
     if (db.prepare("SELECT 1 FROM events WHERE event_key=?").get(promiseAuditKey)) return;
     try {
-      const phone = "640011204";
+      const phone = "717438977";
       const ids = [`27${phone}@c.us`];
       try {ids.unshift(await resolveWhatsAppRecipient(client,phone,normalizeZaPhone));} catch {}
-      const outcome = await sales.followUpVerifiedBooking({phone,chatIds:ids,linkTs:1795542266,send:sendWhatsApp});
+      const outcome = await sales.followUpVerifiedBooking({phone,chatIds:ids,linkTs:1795542658,send:sendWhatsApp,allowDiscussion:true,
+        text:"Howzit, just following up on the JHB to Cape Town shipment. I saw your group invite, but it’s expired. Happy to discuss it here, or you can send me a fresh invite if that’s easier 👍🏼"});
       logEvent({type:"sla_corrected_followup",key:promiseAuditKey,details:{outcome}});
-      console.log("SLA corrected follow-up 1204:",outcome);
+      console.log("SLA corrected follow-up 8977:",outcome);
     } catch(e) {console.error("SLA corrected follow-up failed",e.message);}
   },15000);
   timer.unref();
@@ -674,7 +703,14 @@ setInterval(() => { reconcileUnverifiedFirstTouches().catch(console.error); }, 6
 setInterval(() => { processFirstTouches().catch(console.error); }, 30000);
 setInterval(() => { processFollowups().catch(console.error); }, 300000);
 setInterval(() => { sales.processInboundConversations().catch(console.error); }, 2000);
-setInterval(() => { sales.processDueFollowups().catch(console.error); }, 60000);
+let slaWorkerReportedReady = false;
+setInterval(() => {
+  if (client.info && process.env.SALES_REASONER_URL && process.env.SALES_AGENT_TOKEN && !slaWorkerReportedReady) {
+    slaWorkerReportedReady = true;
+    console.log("SLA reminder worker active on WhatsApp");
+  }
+  sales.processDueFollowups().catch(console.error);
+}, 60000);
 setInterval(() => { sales.processLeadSequence().catch(console.error); }, 300000);
 setInterval(() => { sales.processOrderConfirmations().catch(console.error); }, 60000);
 setInterval(() => { maybeSendDailyReport().catch(console.error); }, 60000);

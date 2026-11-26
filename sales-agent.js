@@ -14,6 +14,28 @@ const SLA_LINK = /https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booki
 const messageText = m => String(m?.body || m?._data?.body || m?._data?.caption || "").trim();
 const hasReminder = text => /(?:please complete the booking form i sent|did you get a chance to complete the booking form i sent)/i.test(text);
 
+// A concrete promise is a reminder to wait, but discussion or refusal takes precedence.
+function slaReplyDecision(replies) {
+  let dueAt = null;
+  for (let i=0; i<replies.length; i++) {
+    const m = replies[i];
+    let body = messageText(m).toLowerCase().replace(/[’‘]/g,"'").replace(/\s+/g," ").trim();
+    const next = replies[i+1];
+    if (next && next.timestamp-m.timestamp<=120 && /^tomorrow\s*\**[.! ]*$/i.test(messageText(next))) {
+      body += " tomorrow";
+      i++;
+    }
+    const words = body.replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F]/gu, "").replace(/[,!.]+/g," ").trim();
+    if (dueAt && body && /^(?:(?:thanks?(?: you)?|same to you|cheers|you too|okay|ok)(?:\s+|$))*$/.test(words)) continue;
+    const simplePromise = /^(?:(?:thanks?(?: you)?|okay|ok|yes|sure)[,.! ]+)*(?:i(?:'ll| will) |will )(?:do|fill(?: in| out)?|complete|submit|sign) (?:it(?: in| out)?|(?:the )?(?:booking )?form)(?: (?:in the am|in the morning|tomorrow(?: morning)?|tomo2))+[.! ]*$/i;
+    if (!simplePromise.test(body) || m.type==="group_invite" || !Number.isFinite(Number(m.timestamp))) return {stop:true};
+    const localReply = new Date(Number(m.timestamp)*1000+2*3600000);
+    // Leave the entire promised day, then remind from 09:00 South African time.
+    dueAt = Date.UTC(localReply.getUTCFullYear(),localReply.getUTCMonth(),localReply.getUTCDate()+2,7);
+  }
+  return {dueAt};
+}
+
 async function syncedChatModels(client, chatId = null, since = 0) {
   if (!client?.pupPage?.evaluate) throw Error("Synced WhatsApp history unavailable");
   return client.pupPage.evaluate(async ({id, since}) => {
@@ -39,7 +61,7 @@ async function syncedChatModels(client, chatId = null, since = 0) {
   },{id:chatId,since:Math.floor(since/1000)});
 }
 
-function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId, reasonerUrl, token, normalizePhone, localPhone, logEvent }) {
+function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId, reasonerUrl, token, normalizePhone, localPhone, logEvent, sendSlaReminder }) {
   const approvalGroup = () => typeof approvalGroupId === "function" ? approvalGroupId() : approvalGroupId;
   db.exec(`
     CREATE TABLE IF NOT EXISTS sales_inbound_claims(message_id TEXT PRIMARY KEY, claimed_at TEXT NOT NULL);
@@ -426,9 +448,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
 
   async function onCustomer(message, lead, phone) {
     if (message.fromMe) return false;
-    const cancelled = db.prepare("SELECT id FROM sales_sla_followups WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").all(phone);
+    // Invalidate an in-flight decision; the worker reads the complete reply sequence on its next tick.
+    db.prepare("UPDATE sales_sla_followups SET state='pending',updated_at=? WHERE phone=? AND direct_eligible=1 AND state='processing'").run(now(),phone);
+    const cancelled = db.prepare("SELECT id FROM sales_sla_followups WHERE phone=? AND direct_eligible=0 AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").all(phone);
     if (cancelled.length) {
-      db.prepare("UPDATE sales_sla_followups SET state='cancelled_reply',updated_at=? WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").run(now(), phone);
+      db.prepare("UPDATE sales_sla_followups SET state='cancelled_reply',updated_at=? WHERE phone=? AND direct_eligible=0 AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").run(now(), phone);
       for (const row of cancelled) db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=?,decision_text='Client replied after SLA link' WHERE followup_id=? AND state='pending'").run(now(), row.id);
       logEvent({ leadId: lead?.id || null, phone, type: "sla_followup_cancelled_reply", key: `sla-cancel-${message.id?._serialized || now()}`, details: { count: cancelled.length } });
     }
@@ -590,6 +614,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const followupHours = 24;
     const dueAt = new Date(Date.parse(sentAt) + followupHours * 3600000).toISOString();
     if (db.prepare("SELECT 1 FROM sales_sla_followups WHERE source_message_id=?").get(messageId)) return false;
+    if (db.prepare("SELECT 1 FROM sales_sla_followups WHERE phone=? AND sent_at>? AND state!='superseded' LIMIT 1").get(normalized,sentAt)) return false;
     const older = db.prepare("SELECT id FROM sales_sla_followups WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").all(normalized);
     db.prepare("UPDATE sales_sla_followups SET state='superseded',updated_at=? WHERE phone=? AND state IN ('pending','processing','approval_sending','approval_unknown','approval_requested')").run(now(), normalized);
     for (const row of older) db.prepare("UPDATE sales_approvals SET state='superseded',decided_at=?,decision_text='Newer SLA link sent' WHERE followup_id=? AND state='pending'").run(now(), row.id);
@@ -729,9 +754,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return counts;
   }
 
-  async function followUpVerifiedBooking({ phone, chatIds, linkTs, send }) {
+  async function followUpVerifiedBooking({ phone, chatIds, linkTs, send, text: overrideText, allowDiscussion = false }) {
     const key = `sla-corrected-20261126-${phone}`;
-    const text = "Howzit, just checking in on the booking form for PMB to Vryheid. Are you still keen to go ahead? If the link’s expired, I can send you a fresh one 👍🏼";
+    const text = overrideText || "Howzit, just checking in on the booking form for PMB to Vryheid. Are you still keen to go ahead? If the link’s expired, I can send you a fresh one 👍🏼";
     const loadHistory = async chatId => {
       try { return await (await customerClient.getChatById(chatId)).fetchMessages({limit:60}); }
       catch { return syncedChatModels(customerClient,chatId,linkTs*1000); }
@@ -742,9 +767,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       const link = history.find(m=>m.fromMe===true && SLA_LINK.test(messageText(m)) && messageText(m).includes(`ts=${linkTs}&`));
       if (!link) continue;
       const later = history.filter(m=>m.timestamp>=link.timestamp && m!==link);
-      if (later.some(m=>m.fromMe && (hasReminder(messageText(m)) || /checking in on the booking form/i.test(messageText(m))))) return "already reminded";
+      if (later.some(m=>m.fromMe && (messageText(m)===text || hasReminder(messageText(m)) || /checking in on the booking form/i.test(messageText(m))))) return "already reminded";
       if (later.some(m=>m.fromMe && SLA_LINK.test(messageText(m)))) return "newer booking link in chat";
-      if (later.some(m=>!m.fromMe && m.timestamp*1000>=Date.parse("2026-11-25T00:00:00+02:00"))) return "customer replied after the promise";
+      if (!allowDiscussion && later.some(m=>!m.fromMe && m.timestamp*1000>=Date.parse("2026-11-25T00:00:00+02:00"))) return "customer replied after the promise";
       const sheet = await reason("/sales/booking-status",{phone:normalizePhone(phone)});
       if (sheet.checked!==true || sheet.submitted!==false) return sheet.checked===true && sheet.submitted===true ? "submitted" : "sheet unverified";
       const claimed = db.prepare("INSERT OR IGNORE INTO events(created_at,phone,event_type,event_key,source) VALUES(?,?,?,?,?)")
@@ -781,15 +806,23 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         const source = messages.find(m=>m.fromMe && whatsappMessageId(m)===row.source_message_id);
         if (!source) throw Error("SLA link is outside the verifiable WhatsApp history");
         const sourceIndex = messages.indexOf(source);
-        const replied = messages.some((m,i)=>!m.fromMe && (Number(m.timestamp)*1000>Date.parse(row.sent_at) || (Number(m.timestamp)*1000===Date.parse(row.sent_at)&&i>sourceIndex)));
-        const localReply = db.prepare("SELECT 1 FROM sales_messages WHERE phone=? AND direction='customer' AND created_at>? LIMIT 1").get(row.phone,row.sent_at);
+        const replies = messages.filter((m,i)=>m.fromMe===false && (Number(m.timestamp)*1000>Date.parse(row.sent_at) || (Number(m.timestamp)*1000===Date.parse(row.sent_at)&&i>sourceIndex)));
+        const localReplies = db.prepare("SELECT body FROM sales_messages WHERE phone=? AND direction='customer' AND created_at>?").all(row.phone,row.sent_at);
+        const decision = slaReplyDecision(replies);
+        if (localReplies.some(r=>!replies.some(m=>messageText(m)===r.body))) decision.stop=true;
+        if (messages.slice(sourceIndex+1).some(m=>m.fromMe && SLA_LINK.test(messageText(m)))) decision.stop=true;
         const alreadyReminded = messages.some(m=>m.fromMe && Number(m.timestamp)*1000>=Date.parse(row.sent_at) && hasReminder(messageText(m)));
         if(alreadyReminded) {
           db.prepare("UPDATE sales_sla_followups SET state='cancelled_duplicate',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id);
           continue;
         }
-        if(replied||localReply) {
+        if(decision.stop) {
           db.prepare("UPDATE sales_sla_followups SET state='cancelled_reply',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id);
+          continue;
+        }
+        if (decision.dueAt && decision.dueAt>Date.now()) {
+          db.prepare("UPDATE sales_sla_followups SET state='pending',due_at=?,updated_at=? WHERE id=? AND state='processing'")
+            .run(new Date(decision.dueAt).toISOString(),now(),row.id);
           continue;
         }
         const sheet = await reason("/sales/booking-status",{phone:normalizePhone(row.phone)});
@@ -803,8 +836,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         if(db.prepare("UPDATE sales_sla_followups SET state='sending',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id).changes!==1)continue;
         const text="Howzit, please complete the booking form I sent so we can save your spot on the trailer and lock in your rate. Rates and availability can change as bookings come in, so if you’re holding off, let me know what you need from me before going ahead 👍🏼";
         try {
-          const sent=await customerClient.sendMessage(chatId,text);
-          const receipt = whatsappMessageId(sent);
+          const receipt = sendSlaReminder
+            ? (await sendSlaReminder({chatId,text,idempotencyKey:`sla-reminder-${row.id}`})).messageId
+            : whatsappMessageId(await customerClient.sendMessage(chatId,text));
           if (!receipt) throw Error("WhatsApp reminder send returned no message ID");
           remember(row.phone,"agent",text,receipt);
           db.prepare("UPDATE sales_sla_followups SET state='sent',updated_at=? WHERE id=? AND state='sending'").run(now(),row.id);
@@ -1129,5 +1163,5 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processInboundConversations, processDueFollowups, recoverSlaLinks, auditSlaPromises, followUpVerifiedBooking, processLeadSequence, processOrderConfirmations, ready, conversationReady };
 }
 
-module.exports = { installSalesAgent };
+module.exports = { installSalesAgent, slaReplyDecision };
 

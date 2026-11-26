@@ -662,3 +662,14 @@ test("a reply to a delivered rate question recovers the case and uses only the o
   assert.equal(sends,0);
  } finally {global.fetch=original;db.close();}
 });
+
+test("SLA promises defer to the morning after the promised day; discussion suppresses the nudge", () => {
+ const {slaReplyDecision}=require("./sales-agent");
+ const first=Date.parse("2026-11-24T19:47:00+02:00")/1000;
+ const msg=(body,seconds=0)=>({body,timestamp:first+seconds});
+ const due=Date.parse("2026-11-26T09:00:00+02:00");
+ assert.deepEqual(slaReplyDecision([msg("Will fill it in the am!")]),{dueAt:due});
+ assert.deepEqual(slaReplyDecision([msg("Thank you. I will complete the form tomo2"),msg("Tomorrow **",1),msg("Thank you, same to you🙏",1260)]),{dueAt:due});
+ assert.deepEqual(slaReplyDecision([msg("Will fill it in the am!"),msg("Please may you join here so we can discuss",36000)]),{stop:true});
+ assert.deepEqual(slaReplyDecision([msg("I won't complete it tomorrow")]),{stop:true});
+});
