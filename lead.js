@@ -419,10 +419,16 @@ client.on("message_create", handleOutgoing);
 const catchupEnd = Date.parse("2026-11-26T18:32:28Z");
 const catchupKey = "sla-48h-catchup-20261126";
 let catchupRunning = false;
-client.on("ready", async () => {
-  if (process.env.CUSTOMER_SESSION_LOCAL !== "true" || catchupRunning || Date.now() < catchupEnd || Date.now() > catchupEnd + 3*3600000) return;
-  if (db.prepare("SELECT 1 FROM events WHERE event_key=?").get(catchupKey)) return;
+let catchupAttempts = 0;
+async function runSlaCatchup() {
+  if (Date.now() > catchupEnd + 3*3600000 || catchupAttempts>=3 || db.prepare("SELECT 1 FROM events WHERE event_key=?").get(catchupKey)) {
+    clearInterval(catchupTimer);
+    return;
+  }
+  if (!client.info || catchupRunning || Date.now() < catchupEnd) return;
   catchupRunning = true;
+  catchupAttempts++;
+  console.log("SLA catch-up scan started", {attempt:catchupAttempts});
   try {
     const counts = await sales.recoverSlaLinks({ start:catchupEnd-48*3600000, end:catchupEnd,
       resolvePhone: chat => resolveInboundPhone({ from:chat.id?._serialized || chat.id?.$1, getContact:()=>chat.getContact() }) });
@@ -431,7 +437,9 @@ client.on("ready", async () => {
     await sales.processDueFollowups();
   } catch (error) {console.error("SLA catch-up stopped:", error.message);}
   finally {catchupRunning=false;}
-});
+}
+const catchupTimer = process.env.CUSTOMER_SESSION_LOCAL === "true" ? setInterval(runSlaCatchup,30000) : null;
+if (catchupTimer) client.on("ready",runSlaCatchup);
 
 function logFirstTouchStatus() {
   try {
