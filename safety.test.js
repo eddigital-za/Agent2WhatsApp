@@ -137,6 +137,22 @@ test("SLA links send one direct reminder after 24h and skip replies or SLA submi
   lookupFails=false;await link("legacy-5");db.prepare("UPDATE sales_sla_followups SET direct_eligible=0 WHERE source_message_id='legacy-5'").run();due();await agent.processDueFollowups();assert.equal(sends.length,2);
  }finally{global.fetch=old;db.close();}
 });
+test("SLA reminder queues a handset link with a renamed message ID and uses its original LID chat",async()=>{
+ const db=new DatabaseSync(":memory:"),seen=[];
+ const chatId="123456789@lid", sourceId=`true_${chatId}_LINK`;
+ const source={fromMe:true,body:"https://biketransport.co.za/booking-form/?ts=1",id:{$1:sourceId},timestamp:Math.floor(Date.now()/1000)-86460};
+ const client={info:{},getChatById:async id=>{assert.equal(id,chatId);return {fetchMessages:async()=>[source]};},sendMessage:async id=>{seen.push(id);return {id:{$1:`true_${chatId}_REMINDER`}};}};
+ const agent=installSalesAgent({db,customerClient:client,approvalGroupId:"",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:p=>`27${p}`,localPhone:p=>p,logEvent:()=>{}});
+ const old=global.fetch;
+ global.fetch=async()=>({ok:true,json:async()=>({checked:true,submitted:false})});
+ try {
+  assert.equal(await agent.onOutgoing(source,"760000000"),true);
+  assert.equal(await agent.onOutgoing(source,"760000000"),false);
+  assert.equal(await agent.processDueFollowups(),1);
+  assert.equal(await agent.processDueFollowups(),0);
+  assert.deepEqual(seen,[chatId]);
+ } finally {global.fetch=old;db.close();}
+});
 test("successful SLA submission cancels the reminder and sends one confirmation",async()=>{
  const db=new DatabaseSync(":memory:");let customerSent=0;const messages=[];
  const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async(to,text)=>{customerSent++;messages.push({to,text});return {id:{_serialized:"confirmed-1"}};}};

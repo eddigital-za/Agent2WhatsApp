@@ -1,5 +1,15 @@
 "use strict";
 
+function whatsappMessageId(message) {
+  for (const id of [message?.id, message?._data?.id]) {
+    if (!id) continue;
+    if (id._serialized || id.$1) return String(id._serialized || id.$1);
+    const remote = id.remote?._serialized || id.remote?.$1 || id.remote;
+    if (typeof remote === "string" && typeof id.fromMe === "boolean" && id.id) return `${id.fromMe}_${remote}_${id.id}`;
+  }
+  return "";
+}
+
 function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId, reasonerUrl, token, normalizePhone, localPhone, logEvent }) {
   const approvalGroup = () => typeof approvalGroupId === "function" ? approvalGroupId() : approvalGroupId;
   db.exec(`
@@ -539,13 +549,15 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   async function onOutgoing(message, phone) {
     if (!message?.fromMe || !/^\d{9,15}$/.test(String(phone || ""))) return false;
     const body = String(message.body || message._data?.body || message._data?.caption || "").trim();
-    const messageId = String(message.id?._serialized || "");
+    const isSlaLink = /https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booking-form)\/?[^\s]*/i.test(body);
+    const messageId = whatsappMessageId(message);
+    if (isSlaLink && !messageId) console.warn("SLA follow-up skipped: outgoing link has no WhatsApp message ID");
     if (!body || !messageId) return false;
     const timestamp = Number(message.timestamp) * 1000;
     const sentAt = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp).toISOString() : now();
     const normalized = localPhone(phone);
     const recorded = remember(normalized, "duane", body, messageId, sentAt);
-    if (!/https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booking-form)\/?[^\s]*/i.test(body)) return recorded;
+    if (!isSlaLink) return recorded;
     const followupHours = 24;
     const dueAt = new Date(Date.parse(sentAt) + followupHours * 3600000).toISOString();
     if (db.prepare("SELECT 1 FROM sales_sla_followups WHERE source_message_id=?").get(messageId)) return false;
@@ -571,10 +583,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       if (db.prepare("UPDATE sales_sla_followups SET state='processing',updated_at=? WHERE id=? AND state='pending'").run(now(),row.id).changes!==1) continue;
       try {
         // Read the current chat, not only the website-lead history. Fail closed if unavailable.
-        const chat = await customerClient.getChatById(`${normalizePhone(row.phone)}@c.us`);
+        const chatId = /^true_(\d+@(?:lid|c\.us))_/.exec(row.source_message_id)?.[1] || `${normalizePhone(row.phone)}@c.us`;
+        const chat = await customerClient.getChatById(chatId);
         const messages = await chat.fetchMessages({limit:100});
         if (!Array.isArray(messages)) throw Error("WhatsApp reply check unavailable");
-        const source = messages.find(m=>m.id?._serialized===row.source_message_id);
+        const source = messages.find(m=>m.fromMe && whatsappMessageId(m)===row.source_message_id);
         if (!source) throw Error("SLA link is outside the verifiable WhatsApp history");
         const sourceIndex = messages.indexOf(source);
         const replied = messages.some((m,i)=>!m.fromMe && (Number(m.timestamp)*1000>Date.parse(row.sent_at) || (Number(m.timestamp)*1000===Date.parse(row.sent_at)&&i>sourceIndex)));
@@ -594,10 +607,13 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         if(db.prepare("UPDATE sales_sla_followups SET state='sending',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id).changes!==1)continue;
         const text="Howzit, please complete the booking form I sent so we can save your spot on the trailer and lock in your rate. Rates and availability can change as bookings come in, so if you’re holding off, let me know what you need from me before going ahead 👍🏼";
         try {
-          const sent=await customerClient.sendMessage(`${normalizePhone(row.phone)}@c.us`,text);
-          remember(row.phone,"agent",text,sent?.id?._serialized);
+          const sent=await customerClient.sendMessage(chatId,text);
+          const receipt = whatsappMessageId(sent);
+          if (!receipt) throw Error("WhatsApp reminder send returned no message ID");
+          remember(row.phone,"agent",text,receipt);
           db.prepare("UPDATE sales_sla_followups SET state='sent',updated_at=? WHERE id=? AND state='sending'").run(now(),row.id);
           logEvent({phone:row.phone,type:"sla_followup_sent",key:`sla-direct-${row.id}`});
+          console.log("SLA follow-up accepted by WhatsApp client", { phone: row.phone.slice(-4) });
           processed++;
         } catch(error) {
           db.prepare("UPDATE sales_sla_followups SET state='send_unknown',updated_at=? WHERE id=? AND state='sending'").run(now(),row.id);
