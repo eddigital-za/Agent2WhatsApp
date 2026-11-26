@@ -441,6 +441,23 @@ async function runSlaCatchup() {
 const catchupTimer = process.env.CUSTOMER_SESSION_LOCAL === "true" ? setInterval(runSlaCatchup,30000) : null;
 if (catchupTimer) client.on("ready",runSlaCatchup);
 
+// Audit only the customers who said on 24 November they would submit on the 25th.
+const promiseAuditKey = "sla-promise-audit-20261124";
+if (process.env.CUSTOMER_SESSION_LOCAL === "true" && Date.now() < Date.parse("2026-11-27T00:00:00+02:00")) {
+  const timer = setInterval(async () => {
+    if (!client.info) return;
+    clearInterval(timer);
+    if (db.prepare("SELECT 1 FROM events WHERE event_key=?").get(promiseAuditKey)) return;
+    try {
+      const audit = await sales.auditSlaPromises({start:Date.parse("2026-11-24T00:00:00+02:00"), end:Date.parse("2026-11-25T00:00:00+02:00"),
+        resolvePhone: chat => resolveInboundPhone({ from:chat.id?._serialized || chat.id?.$1, getContact:()=>chat.getContact() }) });
+      logEvent({type:"sla_promise_audit",key:promiseAuditKey,details:audit});
+      console.log("SLA promise audit completed",JSON.stringify(audit));
+    } catch(e) {console.error("SLA promise audit failed",e.message);}
+  },15000);
+  timer.unref();
+}
+
 function logFirstTouchStatus() {
   try {
     const counts = db.prepare(`SELECT COUNT(*) total, SUM(first_touch_sent_at IS NOT NULL) sent, SUM(first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND first_touch_due_at<=?) pending, SUM(manual_review=1) manual_review, SUM(duplicate_suppressed_at IS NOT NULL) suppressed FROM leads WHERE submitted_at>=?`).get(isoNow(), FIRST_TOUCH_START_AT);

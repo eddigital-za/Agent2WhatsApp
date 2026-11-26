@@ -653,6 +653,48 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return counts;
   }
 
+  async function auditSlaPromises({ start, end, resolvePhone }) {
+    const counts = { scanned:0, incomplete:0, promiseWithoutLink:0, matches:[] };
+    const promise = /\b(?:(?:i(?:['’]ll| will)|(?:will))\s+(?:do|complete|fill|submit|send|sign)\b.{0,60}\btomorrow|tomorrow\b.{0,60}\bi(?:['’]ll| will)\s+(?:do|complete|fill|submit|send|sign)\b)/i;
+    let chats;
+    try { chats = await customerClient.getChats(); }
+    catch { chats = await syncedChatModels(customerClient); }
+    const activity = chat => Number(chat.timestamp || chat.lastMessage?.timestamp)*1000;
+    const shortlist = chats.filter(chat=>!chat.isGroup && /^\d+@(?:lid|c\.us)$/.test(chat.id?._serialized || chat.id?.$1 || "") && activity(chat)>=start);
+    counts.incomplete = Math.max(0, shortlist.length-200);
+    const checked = new Set();
+    for (const chat of shortlist.slice(0,200)) {
+      counts.scanned++;
+      try {
+        const chatId = chat.id?._serialized || chat.id?.$1;
+        let messages;
+        try { messages = await chat.fetchMessages({limit:100}); }
+        catch { messages = await syncedChatModels(customerClient,chatId,start-86400000); }
+        const reply = [...messages].reverse().find(m=>m.fromMe===false && m.timestamp*1000>=start && m.timestamp*1000<end && promise.test(messageText(m).replace(/\s+/g," ")));
+        if (!reply) {
+          if (!(messages[0]?.timestamp*1000<start)) counts.incomplete++;
+          continue;
+        }
+        if (!messages.some(m=>m.fromMe===true && m.timestamp<=reply.timestamp && SLA_LINK.test(messageText(m)))) {
+          counts.promiseWithoutLink++; continue;
+        }
+        const phone = localPhone(await resolvePhone(chat));
+        if (!/^\d{9}$/.test(phone)) {counts.incomplete++; continue;}
+        if (checked.has(phone)) continue;
+        checked.add(phone);
+        const later = messages.filter(m=>m.timestamp>reply.timestamp);
+        const priorReminder = later.some(m=>m.fromMe && /(?:please complete the booking form i sent|did you get a chance to complete the booking form i sent|checking in on the booking form)/i.test(messageText(m))) || Boolean(db.prepare("SELECT 1 FROM sales_sla_followups WHERE phone=? AND state IN ('sent','send_unknown') AND updated_at>=? LIMIT 1").get(phone,new Date(reply.timestamp*1000).toISOString()));
+        let submission = "unverified";
+        try {
+          const sheet = await reason("/sales/booking-status",{phone:normalizePhone(phone)});
+          if (sheet.checked===true && typeof sheet.submitted === "boolean") submission=sheet.submitted?"on sheet":"not on sheet";
+        } catch {}
+        counts.matches.push({phoneLast4:phone.slice(-4),submission,priorReminder});
+      } catch { counts.incomplete++; }
+    }
+    return counts;
+  }
+
   async function processDueFollowups() {
     if (!customerClient?.info || !reasonerUrl || !token) return 0;
     const rows = db.prepare("SELECT * FROM sales_sla_followups WHERE state='pending' AND direct_eligible=1 AND due_at<=? ORDER BY due_at LIMIT 5").all(now());
@@ -1016,7 +1058,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return true;
   }
 
-  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processInboundConversations, processDueFollowups, recoverSlaLinks, processLeadSequence, processOrderConfirmations, ready, conversationReady };
+  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processInboundConversations, processDueFollowups, recoverSlaLinks, auditSlaPromises, processLeadSequence, processOrderConfirmations, ready, conversationReady };
 }
 
 module.exports = { installSalesAgent };
