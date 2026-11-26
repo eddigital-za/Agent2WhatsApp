@@ -729,6 +729,40 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return counts;
   }
 
+  async function followUpVerifiedBooking({ phone, chatIds, linkTs, send }) {
+    const key = `sla-corrected-20261126-${phone}`;
+    const text = "Howzit, just checking in on the booking form for PMB to Vryheid. Are you still keen to go ahead? If the link’s expired, I can send you a fresh one 👍🏼";
+    const loadHistory = async chatId => {
+      try { return await (await customerClient.getChatById(chatId)).fetchMessages({limit:60}); }
+      catch { return syncedChatModels(customerClient,chatId,linkTs*1000); }
+    };
+    for (const chatId of new Set(chatIds)) {
+      let history;
+      try { history = await loadHistory(chatId); } catch { continue; }
+      const link = history.find(m=>m.fromMe===true && SLA_LINK.test(messageText(m)) && messageText(m).includes(`ts=${linkTs}&`));
+      if (!link) continue;
+      const later = history.filter(m=>m.timestamp>=link.timestamp && m!==link);
+      if (later.some(m=>m.fromMe && (hasReminder(messageText(m)) || /checking in on the booking form/i.test(messageText(m))))) return "already reminded";
+      if (later.some(m=>m.fromMe && SLA_LINK.test(messageText(m)))) return "newer booking link in chat";
+      if (later.some(m=>!m.fromMe && m.timestamp*1000>=Date.parse("2026-11-25T00:00:00+02:00"))) return "customer replied after the promise";
+      const sheet = await reason("/sales/booking-status",{phone:normalizePhone(phone)});
+      if (sheet.checked!==true || sheet.submitted!==false) return sheet.checked===true && sheet.submitted===true ? "submitted" : "sheet unverified";
+      const claimed = db.prepare("INSERT OR IGNORE INTO events(created_at,phone,event_type,event_key,source) VALUES(?,?,?,?,?)")
+        .run(now(),phone,"sla_corrected_send_claim",key,"railway").changes===1;
+      if (!claimed) return "already attempted; no retry";
+      try {
+        const receipt=await send({chatId,text,idempotencyKey:key});
+        if (receipt?.accepted===true && receipt.messageId) return "accepted by WhatsApp";
+      } catch {}
+      try {
+        const fresh=await loadHistory(chatId);
+        if (fresh.some(m=>m.fromMe && messageText(m)===text)) return "verified in the WhatsApp chat";
+      } catch {}
+      return "send outcome unverified; no retry";
+    }
+    return "original link could not be reverified";
+  }
+
   async function processDueFollowups() {
     if (!customerClient?.info || !reasonerUrl || !token) return 0;
     const rows = db.prepare("SELECT * FROM sales_sla_followups WHERE state='pending' AND direct_eligible=1 AND due_at<=? ORDER BY due_at LIMIT 5").all(now());
@@ -1092,7 +1126,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return true;
   }
 
-  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processInboundConversations, processDueFollowups, recoverSlaLinks, auditSlaPromises, processLeadSequence, processOrderConfirmations, ready, conversationReady };
+  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processInboundConversations, processDueFollowups, recoverSlaLinks, auditSlaPromises, followUpVerifiedBooking, processLeadSequence, processOrderConfirmations, ready, conversationReady };
 }
 
 module.exports = { installSalesAgent };

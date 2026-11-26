@@ -441,19 +441,21 @@ async function runSlaCatchup() {
 const catchupTimer = process.env.CUSTOMER_SESSION_LOCAL === "true" ? setInterval(runSlaCatchup,30000) : null;
 if (catchupTimer) client.on("ready",runSlaCatchup);
 
-// Audit only the customers who said on 24 November they would submit on the 25th.
-const promiseAuditKey = "sla-promise-delivery-check-20261124";
+// One-time follow-up for the corrected, user-identified 24 November conversation.
+const promiseAuditKey = "sla-corrected-followup-20261126-1204";
 if (process.env.CUSTOMER_SESSION_LOCAL === "true" && Date.now() < Date.parse("2026-11-27T00:00:00+02:00")) {
   const timer = setInterval(async () => {
     if (!client.info) return;
     clearInterval(timer);
     if (db.prepare("SELECT 1 FROM events WHERE event_key=?").get(promiseAuditKey)) return;
     try {
-      const audit = await sales.auditSlaPromises({start:Date.parse("2026-11-24T00:00:00+02:00"), end:Date.parse("2026-11-25T00:00:00+02:00"),
-        resolvePhone: chat => resolveInboundPhone({ from:chat.id?._serialized || chat.id?.$1, getContact:()=>chat.getContact() }) });
-      logEvent({type:"sla_promise_audit",key:promiseAuditKey,details:audit});
-      console.log("SLA promise audit completed",JSON.stringify(audit));
-    } catch(e) {console.error("SLA promise audit failed",e.message);}
+      const phone = "640011204";
+      const ids = [`27${phone}@c.us`];
+      try {ids.unshift(await resolveWhatsAppRecipient(client,phone,normalizeZaPhone));} catch {}
+      const outcome = await sales.followUpVerifiedBooking({phone,chatIds:ids,linkTs:1795542266,send:sendWhatsApp});
+      logEvent({type:"sla_corrected_followup",key:promiseAuditKey,details:{outcome}});
+      console.log("SLA corrected follow-up 1204:",outcome);
+    } catch(e) {console.error("SLA corrected follow-up failed",e.message);}
   },15000);
   timer.unref();
 }

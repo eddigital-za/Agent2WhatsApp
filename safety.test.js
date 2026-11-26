@@ -199,6 +199,26 @@ test("promise follow-up rechecks the sheet and sends only once to the verified c
   assert.deepEqual(sends,[jid]);
  } finally {global.fetch=old;db.close();}
 });
+test("corrected follow-up requires the exact original link and skips subsequent customer messages",async()=>{
+ const db=new DatabaseSync(":memory:");
+ db.exec("CREATE TABLE events(created_at TEXT,phone TEXT,event_type TEXT,event_key TEXT UNIQUE,source TEXT)");
+ const chatId="27640011204@c.us", linkTs=1795542266, sends=[];
+ const messages=[{fromMe:true,timestamp:linkTs,body:`https://biketransport.co.za/booking-form/?ts=${linkTs}&route=PMB`}];
+ const client={info:{},getChatById:async()=>({fetchMessages:async()=>messages})};
+ const agent=installSalesAgent({db,customerClient:client,approvalGroupId:"",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:p=>`27${p}`,localPhone:p=>p,logEvent:()=>{}});
+ const old=global.fetch;
+ global.fetch=async()=>({ok:true,json:async()=>({checked:true,submitted:false})});
+ const args={phone:"640011204",chatIds:[chatId],linkTs,send:async x=>{sends.push(x);return {accepted:true,messageId:"ok"};}};
+ try {
+  assert.equal(await agent.followUpVerifiedBooking({...args,linkTs:123}),"original link could not be reverified");
+  messages.push({fromMe:false,timestamp:linkTs+86400,body:"Please call me"});
+  assert.equal(await agent.followUpVerifiedBooking(args),"customer replied after the promise");
+  messages.pop();
+  assert.equal(await agent.followUpVerifiedBooking(args),"accepted by WhatsApp");
+  assert.equal(await agent.followUpVerifiedBooking(args),"already attempted; no retry");
+  assert.equal(sends.length,1);
+ } finally {global.fetch=old;db.close();}
+});
 test("successful SLA submission cancels the reminder and sends one confirmation",async()=>{
  const db=new DatabaseSync(":memory:");let customerSent=0;const messages=[];
  const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async(to,text)=>{customerSent++;messages.push({to,text});return {id:{_serialized:"confirmed-1"}};}};
