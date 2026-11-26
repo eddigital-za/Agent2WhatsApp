@@ -415,6 +415,24 @@ async function handleOutgoing(message) {
 }
 client.on("message_create", handleOutgoing);
 
+// One authorized catch-up on the existing 072 session. No scan on subsequent starts.
+const catchupEnd = Date.parse("2026-11-26T18:32:28Z");
+const catchupKey = "sla-48h-catchup-20261126";
+let catchupRunning = false;
+client.on("ready", async () => {
+  if (process.env.CUSTOMER_SESSION_LOCAL !== "true" || catchupRunning || Date.now() < catchupEnd || Date.now() > catchupEnd + 3*3600000) return;
+  if (db.prepare("SELECT 1 FROM events WHERE event_key=?").get(catchupKey)) return;
+  catchupRunning = true;
+  try {
+    const counts = await sales.recoverSlaLinks({ start:catchupEnd-48*3600000, end:catchupEnd,
+      resolvePhone: chat => resolveInboundPhone({ from:chat.id?._serialized || chat.id?.$1, getContact:()=>chat.getContact() }) });
+    logEvent({type:"sla_catchup_completed",key:catchupKey,details:counts});
+    console.log("SLA catch-up scan completed", JSON.stringify(counts));
+    await sales.processDueFollowups();
+  } catch (error) {console.error("SLA catch-up stopped:", error.message);}
+  finally {catchupRunning=false;}
+});
+
 function logFirstTouchStatus() {
   try {
     const counts = db.prepare(`SELECT COUNT(*) total, SUM(first_touch_sent_at IS NOT NULL) sent, SUM(first_touch_sent_at IS NULL AND replied_at IS NULL AND duplicate_suppressed_at IS NULL AND first_touch_due_at<=?) pending, SUM(manual_review=1) manual_review, SUM(duplicate_suppressed_at IS NOT NULL) suppressed FROM leads WHERE submitted_at>=?`).get(isoNow(), FIRST_TOUCH_START_AT);

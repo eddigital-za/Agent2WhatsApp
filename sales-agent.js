@@ -10,6 +10,10 @@ function whatsappMessageId(message) {
   return "";
 }
 
+const SLA_LINK = /https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booking-form)(?=[/?#\s]|$)/i;
+const messageText = m => String(m?.body || m?._data?.body || m?._data?.caption || "").trim();
+const hasReminder = text => /(?:please complete the booking form i sent|did you get a chance to complete the booking form i sent)/i.test(text);
+
 function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId, reasonerUrl, token, normalizePhone, localPhone, logEvent }) {
   const approvalGroup = () => typeof approvalGroupId === "function" ? approvalGroupId() : approvalGroupId;
   db.exec(`
@@ -549,7 +553,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   async function onOutgoing(message, phone) {
     if (!message?.fromMe || !/^\d{9,15}$/.test(String(phone || ""))) return false;
     const body = String(message.body || message._data?.body || message._data?.caption || "").trim();
-    const isSlaLink = /https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booking-form)\/?[^\s]*/i.test(body);
+    const isSlaLink = SLA_LINK.test(body);
     const messageId = whatsappMessageId(message);
     if (isSlaLink && !messageId) console.warn("SLA follow-up skipped: outgoing link has no WhatsApp message ID");
     if (!body || !messageId) return false;
@@ -575,6 +579,49 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return true;
   }
 
+  async function recoverSlaLinks({ start, end, resolvePhone }) {
+    if (!customerClient?.info || !reasonerUrl || !token) throw Error("SLA reminder dependencies unavailable");
+    const counts = { scanned:0, found:0, queued:0, due:0, replied:0, alreadyReminded:0, alreadyTracked:0, unverified:0, omitted:0 };
+    const chats = await customerClient.getChats();
+    if (!Array.isArray(chats)) throw Error("WhatsApp chat list unavailable");
+    const direct = chats.filter(chat => !chat.isGroup && /^\d+@(?:lid|c\.us)$/.test(chat.id?._serialized || chat.id?.$1 || ""));
+    const activity = chat => Number(chat.timestamp || chat.lastMessage?.timestamp)*1000;
+    counts.unverified = direct.filter(chat => !Number.isFinite(activity(chat)) || activity(chat)<=0).length;
+    const recent = direct.filter(chat=>activity(chat)>=start).sort((a,b)=>activity(b)-activity(a));
+    counts.omitted = Math.max(0,recent.length-200);
+    for (const chat of recent.slice(0,200)) {
+      counts.scanned++;
+      try {
+        const messages = await chat.fetchMessages({limit:100});
+        if (!Array.isArray(messages)) throw Error("Chat history unavailable");
+        const link = [...messages].reverse().filter(m=>m.fromMe && SLA_LINK.test(messageText(m)))
+          .sort((a,b)=>Number(b.timestamp)-Number(a.timestamp))[0];
+        const sent = Number(link?.timestamp)*1000;
+        if (!link || !(sent>=start && sent<=end)) {
+          if (messages.length>=100 && Number(messages[0]?.timestamp)*1000>=start) counts.unverified++;
+          continue;
+        }
+        counts.found++;
+        const after = messages.filter(m => m!==link && Number(m.timestamp)*1000>=sent);
+        if (after.some(m=>!m.fromMe)) { counts.replied++; continue; }
+        if (after.some(m=>m.fromMe && hasReminder(messageText(m)))) { counts.alreadyReminded++; continue; }
+        const phone = localPhone(await resolvePhone(chat));
+        const source = whatsappMessageId(link);
+        if (!/^\d{9}$/.test(phone) || !source) throw Error("Original chat identity unverified");
+        const sentAt = new Date(sent).toISOString();
+        const dueAt = new Date(sent+86400000).toISOString();
+        if (db.prepare("SELECT 1 FROM sales_sla_followups WHERE source_message_id=? OR (phone=? AND (sent_at>=? OR state IN ('pending','processing','sending','send_unknown','approval_sending','approval_unknown','approval_requested')) AND state!='superseded') LIMIT 1").get(source,phone,sentAt)) {
+          counts.alreadyTracked++; continue;
+        }
+        db.prepare("INSERT INTO sales_sla_followups(phone,source_message_id,sla_message,sent_at,due_at,created_at,updated_at,direct_eligible) VALUES(?,?,?,?,?,?,?,1)")
+          .run(phone,source,messageText(link),sentAt,dueAt,now(),now());
+        counts.queued++;
+        if (sent+86400000<=Date.now()) counts.due++;
+      } catch { counts.unverified++; }
+    }
+    return counts;
+  }
+
   async function processDueFollowups() {
     if (!customerClient?.info || !reasonerUrl || !token) return 0;
     const rows = db.prepare("SELECT * FROM sales_sla_followups WHERE state='pending' AND direct_eligible=1 AND due_at<=? ORDER BY due_at LIMIT 5").all(now());
@@ -592,6 +639,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         const sourceIndex = messages.indexOf(source);
         const replied = messages.some((m,i)=>!m.fromMe && (Number(m.timestamp)*1000>Date.parse(row.sent_at) || (Number(m.timestamp)*1000===Date.parse(row.sent_at)&&i>sourceIndex)));
         const localReply = db.prepare("SELECT 1 FROM sales_messages WHERE phone=? AND direction='customer' AND created_at>? LIMIT 1").get(row.phone,row.sent_at);
+        const alreadyReminded = messages.some(m=>m.fromMe && Number(m.timestamp)*1000>=Date.parse(row.sent_at) && hasReminder(messageText(m)));
+        if(alreadyReminded) {
+          db.prepare("UPDATE sales_sla_followups SET state='cancelled_duplicate',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id);
+          continue;
+        }
         if(replied||localReply) {
           db.prepare("UPDATE sales_sla_followups SET state='cancelled_reply',updated_at=? WHERE id=? AND state='processing'").run(now(),row.id);
           continue;
@@ -930,7 +982,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return true;
   }
 
-  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processInboundConversations, processDueFollowups, processLeadSequence, processOrderConfirmations, ready, conversationReady };
+  return { onCustomer, onOutgoing, onApproval, onOrderConfirmed, processInboundConversations, processDueFollowups, recoverSlaLinks, processLeadSequence, processOrderConfirmations, ready, conversationReady };
 }
 
 module.exports = { installSalesAgent };

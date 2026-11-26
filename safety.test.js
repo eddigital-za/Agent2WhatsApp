@@ -153,6 +153,30 @@ test("SLA reminder queues a handset link with a renamed message ID and uses its 
   assert.deepEqual(seen,[chatId]);
  } finally {global.fetch=old;db.close();}
 });
+test("48-hour catch-up sends only due, unanswered and unsubmitted links, once",async()=>{
+ const db=new DatabaseSync(":memory:"),sends=[];
+ const end=Date.now(), hour=3600000;
+ const make=(n,age,after=[])=>{
+  const jid=`2776000000${n}@c.us`,timestamp=Math.floor((end-age*hour)/1000);
+  const link={fromMe:true,body:"https://biketransport.co.za/booking-form/?ts=1",id:{_serialized:`true_${jid}_LINK`},timestamp};
+  return { id:{_serialized:jid},timestamp, fetchMessages:async()=>[link,...after.map(m=>({...m,timestamp:timestamp+1}))] };
+ };
+ const chats=[make(1,25),make(2,23),make(3,49),make(4,26,[{fromMe:false,body:"Thanks"}]),make(5,27,[{fromMe:true,body:"Howzit, please complete the booking form I sent"}]),make(6,28)];
+ const client={info:{},getChats:async()=>chats,getChatById:async id=>chats.find(c=>c.id._serialized===id),sendMessage:async id=>{sends.push(id);return {id:{_serialized:"receipt"}};}};
+ const agent=installSalesAgent({db,customerClient:client,approvalGroupId:"",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:p=>`27${p}`,localPhone:p=>p,logEvent:()=>{}});
+ const old=global.fetch;
+ global.fetch=async(_url,req)=>({ok:true,json:async()=>({checked:true,submitted:JSON.parse(req.body).phone.endsWith("6")})});
+ try {
+  const config={start:end-48*hour,end,resolvePhone:chat=>chat.id._serialized.split("@")[0].slice(2)};
+  const scan=await agent.recoverSlaLinks(config);
+  assert.deepEqual([scan.queued,scan.due,scan.replied,scan.alreadyReminded],[3,2,1,1]);
+  assert.equal(await agent.processDueFollowups(),1);
+  assert.equal((await agent.recoverSlaLinks(config)).queued,0);
+  assert.equal(await agent.processDueFollowups(),0);
+  assert.deepEqual(sends,["27760000001@c.us"]);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM sales_sla_followups WHERE state='cancelled_order'").get().n,1);
+ } finally {global.fetch=old;db.close();}
+});
 test("successful SLA submission cancels the reminder and sends one confirmation",async()=>{
  const db=new DatabaseSync(":memory:");let customerSent=0;const messages=[];
  const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async(to,text)=>{customerSent++;messages.push({to,text});return {id:{_serialized:"confirmed-1"}};}};
