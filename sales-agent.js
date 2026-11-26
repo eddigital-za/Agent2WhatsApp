@@ -653,7 +653,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     return counts;
   }
 
-  async function auditSlaPromises({ start, end, resolvePhone }) {
+  async function auditSlaPromises({ start, end, resolvePhone, followUpLast4 = null }) {
     const counts = { scanned:0, incomplete:0, promiseWithoutLink:0, matches:[] };
     const promise = /\b(?:(?:i(?:['’]ll| will)|(?:will))\s+(?:do|complete|fill|submit|send|sign)\b.{0,60}\btomorrow|tomorrow\b.{0,60}\bi(?:['’]ll| will)\s+(?:do|complete|fill|submit|send|sign)\b)/i;
     let chats;
@@ -663,6 +663,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     const shortlist = chats.filter(chat=>!chat.isGroup && /^\d+@(?:lid|c\.us)$/.test(chat.id?._serialized || chat.id?.$1 || "") && activity(chat)>=start);
     counts.incomplete = Math.max(0, shortlist.length-200);
     const checked = new Set();
+    const targets = [];
     for (const chat of shortlist.slice(0,200)) {
       counts.scanned++;
       try {
@@ -690,7 +691,40 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
           if (sheet.checked===true && typeof sheet.submitted === "boolean") submission=sheet.submitted?"on sheet":"not on sheet";
         } catch {}
         counts.matches.push({phoneLast4:phone.slice(-4),submission,priorReminder});
+        if (phone.endsWith(followUpLast4 || "!") && submission === "not on sheet" && !priorReminder) {
+          targets.push({ phone, chatId, replyId:whatsappMessageId(reply), replyAt:reply.timestamp*1000 });
+        }
       } catch { counts.incomplete++; }
+    }
+    if (followUpLast4) {
+      counts.followUp = "not attempted";
+      if (targets.length !== 1 || counts.matches.filter(x=>x.phoneLast4===followUpLast4).length!==1) return counts;
+      const {phone,chatId,replyId,replyAt} = targets[0];
+      const key = `sla-promised-followup-20261126-${phone}`;
+      let claimed = false;
+      try {
+        let history;
+        try { history = await (await customerClient.getChatById(chatId)).fetchMessages({limit:100}); }
+        catch { history = await syncedChatModels(customerClient,chatId,replyAt); }
+        if (!replyId || !history.some(m=>whatsappMessageId(m)===replyId) || history.some(m=>m.timestamp*1000>replyAt && (!m.fromMe || hasReminder(messageText(m)) || SLA_LINK.test(messageText(m))))) {
+          counts.followUp = "conversation changed or could not be verified";
+          return counts;
+        }
+        const sheet = await reason("/sales/booking-status",{phone:normalizePhone(phone)});
+        if (sheet.checked!==true || sheet.submitted!==false) {
+          counts.followUp = sheet.checked===true && sheet.submitted===true ? "submitted before send" : "sheet check unverified";
+          return counts;
+        }
+        claimed = db.prepare("INSERT OR IGNORE INTO events(created_at,phone,event_type,event_key,source) VALUES(?,?,?,?,?)")
+          .run(now(),phone,"sla_promise_send_claim",key,"railway").changes===1;
+        if (!claimed) { counts.followUp="already attempted"; return counts; }
+        const text = "Howzit, just checking in on the booking form you were going to complete yesterday. Are you still keen to go ahead with the bike transport? If the link’s expired, I can send you a fresh one 👍🏼";
+        const receipt = whatsappMessageId(await customerClient.sendMessage(chatId,text));
+        if (!receipt) throw Error("Missing message receipt");
+        counts.followUp = "accepted by WhatsApp";
+        remember(phone,"agent",text,receipt);
+        logEvent({phone,type:"sla_promise_sent",key:`${key}-sent`});
+      } catch { counts.followUp=claimed?"send outcome unverified; no retry":"pre-send check failed"; }
     }
     return counts;
   }

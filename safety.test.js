@@ -177,6 +177,28 @@ test("48-hour catch-up sends only due, unanswered and unsubmitted links, once",a
   assert.equal(db.prepare("SELECT COUNT(*) n FROM sales_sla_followups WHERE state='cancelled_order'").get().n,1);
  } finally {global.fetch=old;db.close();}
 });
+test("promise follow-up rechecks the sheet and sends only once to the verified customer",async()=>{
+ const db=new DatabaseSync(":memory:"),sends=[];
+ db.exec("CREATE TABLE events(created_at TEXT,phone TEXT,event_type TEXT,event_key TEXT UNIQUE,source TEXT)");
+ const timestamp=100000, jid="27760000283@c.us";
+ const messages=[{fromMe:true,timestamp:timestamp-100,body:"https://biketransport.co.za/booking-form/?ts=1"},{fromMe:false,timestamp,body:"I'll do it tomorrow",id:{_serialized:"reply"}}];
+ const chat={id:{_serialized:jid},timestamp,fetchMessages:async()=>messages};
+ const client={info:{},getChats:async()=>[chat],getChatById:async()=>chat,sendMessage:async id=>{sends.push(id);return {id:{_serialized:"receipt"}};}};
+ const agent=installSalesAgent({db,customerClient:client,approvalGroupId:"",reasonerUrl:"https://example.invalid",token:"test",normalizePhone:p=>`27${p}`,localPhone:p=>p,logEvent:()=>{}});
+ const old=global.fetch;
+ let lookups=0, submitted=false;
+ global.fetch=async()=>({ok:true,json:async()=>({checked:true,submitted:++lookups===2 && submitted})});
+ const config={start:(timestamp-1)*1000,end:(timestamp+1)*1000,resolvePhone:()=>"760000283",followUpLast4:"0283"};
+ try {
+  submitted=true;
+  assert.equal((await agent.auditSlaPromises(config)).followUp,"submitted before send");
+  assert.deepEqual(sends,[]);
+  submitted=false;
+  assert.equal((await agent.auditSlaPromises(config)).followUp,"accepted by WhatsApp");
+  assert.equal((await agent.auditSlaPromises(config)).followUp,"already attempted");
+  assert.deepEqual(sends,[jid]);
+ } finally {global.fetch=old;db.close();}
+});
 test("successful SLA submission cancels the reminder and sends one confirmation",async()=>{
  const db=new DatabaseSync(":memory:");let customerSent=0;const messages=[];
  const customerClient={info:{wid:{user:"27720000000"}},sendMessage:async(to,text)=>{customerSent++;messages.push({to,text});return {id:{_serialized:"confirmed-1"}};}};
