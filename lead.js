@@ -442,14 +442,14 @@ const catchupTimer = process.env.CUSTOMER_SESSION_LOCAL === "true" ? setInterval
 if (catchupTimer) client.on("ready",runSlaCatchup);
 
 // Audit only the customers who said on 24 November they would submit on the 25th.
-const promiseAuditKey = "sla-promise-outstanding-20261124";
+const promiseAuditKey = "sla-promise-delivery-check-20261124";
 if (process.env.CUSTOMER_SESSION_LOCAL === "true" && Date.now() < Date.parse("2026-11-27T00:00:00+02:00")) {
   const timer = setInterval(async () => {
     if (!client.info) return;
     clearInterval(timer);
     if (db.prepare("SELECT 1 FROM events WHERE event_key=?").get(promiseAuditKey)) return;
     try {
-      const audit = await sales.auditSlaPromises({start:Date.parse("2026-11-24T00:00:00+02:00"), end:Date.parse("2026-11-25T00:00:00+02:00"), followUpLast4:"0283",
+      const audit = await sales.auditSlaPromises({start:Date.parse("2026-11-24T00:00:00+02:00"), end:Date.parse("2026-11-25T00:00:00+02:00"),
         resolvePhone: chat => resolveInboundPhone({ from:chat.id?._serialized || chat.id?.$1, getContact:()=>chat.getContact() }) });
       logEvent({type:"sla_promise_audit",key:promiseAuditKey,details:audit});
       console.log("SLA promise audit completed",JSON.stringify(audit));
