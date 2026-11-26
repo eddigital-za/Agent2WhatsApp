@@ -14,6 +14,23 @@ const SLA_LINK = /https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booki
 const messageText = m => String(m?.body || m?._data?.body || m?._data?.caption || "").trim();
 const hasReminder = text => /(?:please complete the booking form i sent|did you get a chance to complete the booking form i sent)/i.test(text);
 
+async function syncedChatModels(client, chatId = null) {
+  if (!client?.pupPage?.evaluate) throw Error("Synced WhatsApp history unavailable");
+  return client.pupPage.evaluate(id => {
+    const chats = window.require('WAWebCollections').Chat;
+    const wid = x => x?._serialized || x?.$1 || (typeof x === 'string' ? x : `${x?.user}@${x?.server}`);
+    if (!id) return chats.getModelsArray().map(c=>({id:{_serialized:wid(c.id)},timestamp:c.t}));
+    const chat = chats.get(id) || chats.getModelsArray().find(c=>wid(c.id)===id);
+    if (!chat?.msgs) throw Error("Synced chat unavailable");
+    const messages = chat.msgs.getModelsArray();
+    if (!messages.length || !Number.isFinite(Number(chat.t)) || !messages.some(m=>Number(m.t)>=Number(chat.t))) throw Error("Synced history is missing the latest chat activity");
+    return messages.filter(m=>!m.isNotification).map(m=>({
+      fromMe:m.id?.fromMe, body:m.body || m.caption, timestamp:m.t,
+      id:{_serialized:m.id?._serialized || m.id?.$1, remote:wid(m.id?.remote), id:m.id?.id, fromMe:m.id?.fromMe},
+    })).sort((a,b)=>a.timestamp-b.timestamp);
+  },chatId);
+}
+
 function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId, reasonerUrl, token, normalizePhone, localPhone, logEvent }) {
   const approvalGroup = () => typeof approvalGroupId === "function" ? approvalGroupId() : approvalGroupId;
   db.exec(`
@@ -582,7 +599,9 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
   async function recoverSlaLinks({ start, end, resolvePhone }) {
     if (!customerClient?.info || !reasonerUrl || !token) throw Error("SLA reminder dependencies unavailable");
     const counts = { scanned:0, found:0, queued:0, due:0, replied:0, alreadyReminded:0, alreadyTracked:0, unverified:0, omitted:0 };
-    const chats = await customerClient.getChats();
+    let chats;
+    try { chats = await customerClient.getChats(); }
+    catch { chats = await syncedChatModels(customerClient); }
     if (!Array.isArray(chats)) throw Error("WhatsApp chat list unavailable");
     const direct = chats.filter(chat => !chat.isGroup && /^\d+@(?:lid|c\.us)$/.test(chat.id?._serialized || chat.id?.$1 || ""));
     const activity = chat => Number(chat.timestamp || chat.lastMessage?.timestamp)*1000;
@@ -592,13 +611,17 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
     for (const chat of recent.slice(0,200)) {
       counts.scanned++;
       try {
-        const messages = await chat.fetchMessages({limit:100});
+        const chatId = chat.id?._serialized || chat.id?.$1;
+        let messages;
+        let cached = false;
+        try { messages = await chat.fetchMessages({limit:100}); }
+        catch { cached=true; messages = await syncedChatModels(customerClient,chatId); }
         if (!Array.isArray(messages)) throw Error("Chat history unavailable");
         const link = [...messages].reverse().filter(m=>m.fromMe && SLA_LINK.test(messageText(m)))
           .sort((a,b)=>Number(b.timestamp)-Number(a.timestamp))[0];
         const sent = Number(link?.timestamp)*1000;
         if (!link || !(sent>=start && sent<=end)) {
-          if (messages.length>=100 && Number(messages[0]?.timestamp)*1000>=start) counts.unverified++;
+          if ((cached || messages.length>=100) && !(Number(messages[0]?.timestamp)*1000<start)) counts.unverified++;
           continue;
         }
         counts.found++;
@@ -631,8 +654,11 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
       try {
         // Read the current chat, not only the website-lead history. Fail closed if unavailable.
         const chatId = /^true_(\d+@(?:lid|c\.us))_/.exec(row.source_message_id)?.[1] || `${normalizePhone(row.phone)}@c.us`;
-        const chat = await customerClient.getChatById(chatId);
-        const messages = await chat.fetchMessages({limit:100});
+        let messages;
+        try {
+          const chat = await customerClient.getChatById(chatId);
+          messages = await chat.fetchMessages({limit:100});
+        } catch { messages = await syncedChatModels(customerClient,chatId); }
         if (!Array.isArray(messages)) throw Error("WhatsApp reply check unavailable");
         const source = messages.find(m=>m.fromMe && whatsappMessageId(m)===row.source_message_id);
         if (!source) throw Error("SLA link is outside the verifiable WhatsApp history");
