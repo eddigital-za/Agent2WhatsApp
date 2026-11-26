@@ -14,21 +14,29 @@ const SLA_LINK = /https?:\/\/(?:www\.)?biketransport\.co\.za\/(?:timestamp|booki
 const messageText = m => String(m?.body || m?._data?.body || m?._data?.caption || "").trim();
 const hasReminder = text => /(?:please complete the booking form i sent|did you get a chance to complete the booking form i sent)/i.test(text);
 
-async function syncedChatModels(client, chatId = null) {
+async function syncedChatModels(client, chatId = null, since = 0) {
   if (!client?.pupPage?.evaluate) throw Error("Synced WhatsApp history unavailable");
-  return client.pupPage.evaluate(id => {
+  return client.pupPage.evaluate(async ({id, since}) => {
     const chats = window.require('WAWebCollections').Chat;
     const wid = x => x?._serialized || x?.$1 || (typeof x === 'string' ? x : `${x?.user}@${x?.server}`);
     if (!id) return chats.getModelsArray().map(c=>({id:{_serialized:wid(c.id)},timestamp:c.t}));
     const chat = chats.get(id) || chats.getModelsArray().find(c=>wid(c.id)===id);
     if (!chat?.msgs) throw Error("Synced chat unavailable");
-    const messages = chat.msgs.getModelsArray();
+    let messages = chat.msgs.getModelsArray();
+    if (since) {
+      const load = window.require('WAWebChatLoadMessages').loadEarlierMsgs;
+      for (let i=0; i<2 && !messages.some(m=>Number(m.t)<since); i++) {
+        const older = await load({chat});
+        if (!older?.length) break;
+        messages = [...older,...chat.msgs.getModelsArray()];
+      }
+    }
     if (!messages.length || !Number.isFinite(Number(chat.t)) || !messages.some(m=>Number(m.t)>=Number(chat.t))) throw Error("Synced history is missing the latest chat activity");
-    return messages.filter(m=>!m.isNotification).map(m=>({
+    return [...new Set(messages)].filter(m=>!m.isNotification).map(m=>({
       fromMe:m.id?.fromMe, body:m.body || m.caption, timestamp:m.t,
       id:{_serialized:m.id?._serialized || m.id?.$1, remote:wid(m.id?.remote), id:m.id?.id, fromMe:m.id?.fromMe},
     })).sort((a,b)=>a.timestamp-b.timestamp);
-  },chatId);
+  },{id:chatId,since:Math.floor(since/1000)});
 }
 
 function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId, reasonerUrl, token, normalizePhone, localPhone, logEvent }) {
@@ -615,7 +623,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         let messages;
         let cached = false;
         try { messages = await chat.fetchMessages({limit:100}); }
-        catch { cached=true; messages = await syncedChatModels(customerClient,chatId); }
+        catch { cached=true; messages = await syncedChatModels(customerClient,chatId,start); }
         if (!Array.isArray(messages)) throw Error("Chat history unavailable");
         const link = [...messages].reverse().filter(m=>m.fromMe && SLA_LINK.test(messageText(m)))
           .sort((a,b)=>Number(b.timestamp)-Number(a.timestamp))[0];
@@ -658,7 +666,7 @@ function installSalesAgent({ db, customerClient, approvalClient, approvalGroupId
         try {
           const chat = await customerClient.getChatById(chatId);
           messages = await chat.fetchMessages({limit:100});
-        } catch { messages = await syncedChatModels(customerClient,chatId); }
+        } catch { messages = await syncedChatModels(customerClient,chatId,Date.parse(row.sent_at)); }
         if (!Array.isArray(messages)) throw Error("WhatsApp reply check unavailable");
         const source = messages.find(m=>m.fromMe && whatsappMessageId(m)===row.source_message_id);
         if (!source) throw Error("SLA link is outside the verifiable WhatsApp history");

@@ -417,7 +417,7 @@ client.on("message_create", handleOutgoing);
 
 // One authorized catch-up on the existing 072 session. No scan on subsequent starts.
 const catchupEnd = Date.parse("2026-11-26T18:32:28Z");
-const catchupKey = "sla-48h-catchup-20261126";
+const catchupKey = "sla-48h-catchup-20261126-loaded";
 let catchupRunning = false;
 let catchupAttempts = 0;
 async function runSlaCatchup() {
