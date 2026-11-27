@@ -3,7 +3,9 @@ function routeQuoteRequest(message, env = process.env, request = fetch, resolveR
   if (!env.QUOTE_INTAKE_URL || !env.QUOTE_INTAKE_TOKEN || !/^27\d{9}$/.test(env.QUOTE_OPERATOR_PHONE) ||
       message.fromMe || !/^\d+@(lid|c\.us)$/.test(message.from)) return false;
   const body = String(message.body || '');
-  if (!/^\/quote(?:\s|:|$)/i.test(body.trim())) return false;
+  const command = /^\/?quote(?:\s|:|$)/i.test(body.trim());
+  const enquiry = /\b(?:collect(?:ing|ion)?|pick(?:ing)?\s+up)\b[\s\S]*\b(?:deliver(?:ing|y)?|drop(?:ping)?\s+off)\b/i.test(body);
+  if (!command && !enquiry) return false;
   const id = message.id?._serialized;
   if (!id) return true;
   void (async () => {
