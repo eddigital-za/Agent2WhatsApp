@@ -6,7 +6,7 @@ function routeQuoteRequest(message, env = process.env, request = fetch) {
   const privateGroup = env.QUOTE_GROUP_ID && message.from === env.QUOTE_GROUP_ID;
   if (!direct && !(privateGroup && message.author === env.QUOTE_OPERATOR_ID)) return false;
   const body = String(message.body || '');
-  const command = /^\/?quote(?:\b|:)/i.test(body.trim());
+  const command = /^\/quote(?:\s|:|$)/i.test(body.trim());
   if (!command && !privateGroup) return false;
   const id = message.id?._serialized;
   if (!id) return true;
