@@ -1,17 +1,17 @@
 // Call routeQuoteRequest before the existing direct-message agent dispatch.
-function routeQuoteRequest(message, env = process.env, request = fetch) {
-  if (!env.QUOTE_INTAKE_URL || !env.QUOTE_INTAKE_TOKEN || !env.QUOTE_OPERATOR_ID ||
-      message.fromMe || !/^(\d+)@(lid|c\.us)$/.test(env.QUOTE_OPERATOR_ID)) return false;
-  const direct = message.from === env.QUOTE_OPERATOR_ID;
-  const privateGroup = env.QUOTE_GROUP_ID && message.from === env.QUOTE_GROUP_ID;
-  if (!direct && !(privateGroup && message.author === env.QUOTE_OPERATOR_ID)) return false;
+function routeQuoteRequest(message, env = process.env, request = fetch, resolveRecipient) {
+  if (!env.QUOTE_INTAKE_URL || !env.QUOTE_INTAKE_TOKEN || !/^27\d{9}$/.test(env.QUOTE_OPERATOR_PHONE) ||
+      message.fromMe || !/^\d+@(lid|c\.us)$/.test(message.from)) return false;
   const body = String(message.body || '');
-  const command = /^\/quote(?:\s|:|$)/i.test(body.trim());
-  if (!command && !privateGroup) return false;
+  if (!/^\/quote(?:\s|:|$)/i.test(body.trim())) return false;
   const id = message.id?._serialized;
   if (!id) return true;
   void (async () => {
-    const quoted = command && message.hasQuotedMsg && !body.replace(/^\s*\/?quote\s*:?\s*/i, '')
+    const phoneId = env.QUOTE_OPERATOR_PHONE + "@c.us";
+    if (message.from !== phoneId) {
+      if (!message.from.endsWith("@lid") || message.from !== await resolveRecipient(phoneId)) return;
+    }
+    const quoted = message.hasQuotedMsg && !body.replace(/^\s*\/?quote\s*:?\s*/i, '')
       ? await message.getQuotedMessage() : null;
     const content = quoted || message;
     const event = { id, text: String(content.body || '') };
