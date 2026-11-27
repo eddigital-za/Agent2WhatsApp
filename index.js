@@ -1,6 +1,6 @@
 try {require("./patch-whatsapp-media-send");} catch(e) {console.error("WhatsApp media compatibility patch unavailable:",e.message);}
 const { SharedClient, installIngress } = require("./shared-transport");
-const { installBridge, resolveDirectRecipient } = require("./bridge-server");
+const { installBridge } = require("./bridge-server");
 const { routeQuoteRequest } = require("./quote-intake.cjs");
 const express = require("express");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
@@ -281,7 +281,11 @@ client.on("message", async (message) => {
   try {
     // Ignore messages sent by this WhatsApp account itself
     if (message.fromMe) return;
-    if (routeQuoteRequest(message, process.env, fetch, id => resolveDirectRecipient(client, id))) return;
+    if (routeQuoteRequest(message, process.env, fetch, async (sender, id) => {
+      const mappings = await client.getContactLidAndPhone([sender, id]);
+      const serialized = value => value?._serialized || value;
+      return mappings.some(({ lid, pn }) => serialized(lid) === sender && serialized(pn) === id);
+    })) return;
 
     // Allowed direct controller
     const ALLOWED_DIRECT_ID =

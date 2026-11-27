@@ -1,18 +1,25 @@
 // Call routeQuoteRequest before the existing direct-message agent dispatch.
-function routeQuoteRequest(message, env = process.env, request = fetch, resolveRecipient) {
+function routeQuoteRequest(message, env = process.env, request = fetch, isOperator) {
   if (!env.QUOTE_INTAKE_URL || !env.QUOTE_INTAKE_TOKEN || !/^27\d{9}$/.test(env.QUOTE_OPERATOR_PHONE) ||
       message.fromMe || !/^\d+@(lid|c\.us)$/.test(message.from)) return false;
   const body = String(message.body || '');
   const command = /^\/?quote(?:\s|:|$)/i.test(body.trim());
   const enquiry = /\b(?:collect(?:ing|ion)?|pick(?:ing)?\s+up)\b[\s\S]*\b(?:deliver(?:ing|y)?|drop(?:ping)?\s+off)\b/i.test(body);
-  if (!command && !enquiry) return false;
-  const id = message.id?._serialized;
-  if (!id) return true;
+  const pastedEnquiry = /\b(how much|transport|delivery|collect|pickup|bike|motorcycle|cost)\b/i.test(body) && /\bfrom\s+[^\n]+?\s+to\s+\S/i.test(body);
+  if (!command && !enquiry && !pastedEnquiry && !(message.isForwarded && /\bfrom\b.+\bto\b|→/is.test(body))) return false;
   void (async () => {
     const phoneId = env.QUOTE_OPERATOR_PHONE + "@c.us";
-    if (message.from !== phoneId) {
-      if (!message.from.endsWith("@lid") || message.from !== await resolveRecipient(phoneId)) return;
+    if (message.from !== phoneId && !(await isOperator(message.from, phoneId))) {
+      console.warn('Quote request ignored: sender could not be verified');
+      return;
     }
+    const key = message.id;
+    const id = key?._serialized || key?.$1 || (key?.id ? `${message.from}:${key.id}` : null);
+    if (!id) {
+      console.warn('Quote request ignored: message ID unavailable');
+      return;
+    }
+    console.info('Verified WhatsApp quote request received');
     const quoted = message.hasQuotedMsg && !body.replace(/^\s*\/?quote\s*:?\s*/i, '')
       ? await message.getQuotedMessage() : null;
     const content = quoted || message;
@@ -30,6 +37,7 @@ function routeQuoteRequest(message, env = process.env, request = fetch, resolveR
       body: JSON.stringify(event)
     });
     if (!response.ok) console.warn('Private quote intake returned status', response.status);
+    else console.info('WhatsApp quote request processed');
   })().catch(() => console.warn('Private quote intake unavailable'));
   return true;
 }
