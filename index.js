@@ -281,7 +281,7 @@ client.on("message", async (message) => {
   try {
     // Ignore messages sent by this WhatsApp account itself
     if (message.fromMe) return;
-    if (routeQuoteRequest(message, process.env, fetch, async (sender, id) => {
+    if (await routeQuoteRequest(message, process.env, fetch, async (sender, id) => {
       const mappings = await client.getContactLidAndPhone([sender, id]);
       const serialized = value => value?._serialized || value;
       return mappings.some(({ lid, pn }) => serialized(lid) === sender && serialized(pn) === id);
